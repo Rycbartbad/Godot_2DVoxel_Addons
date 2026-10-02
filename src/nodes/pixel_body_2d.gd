@@ -124,6 +124,38 @@ func _inv_scale() -> Vector2:
 	return Vector2(1.0 / s.x, 1.0 / s.y)
 
 
+## ---- 自身内置形状的缓存 ----
+##
+## ⚠️⚠️ 这个形状是"没挂形状子节点时的兜底"，但它同时被两处高频调用：
+##     · collect_shapes() —— 每次 rebuild() 都会走
+##     · _gizmo_aabb()    —— 每次 _draw() 都会走
+##     而 _draw() 在编辑器里每次重绘都跑。
+##
+##     800x40 的 Ground 重建一次就是 **32000 次 set_pixel**。
+##     拖动时位置每变一次就失效一次 -> 每帧重算 -> 就是"移动很卡"。
+##
+##     （上次我只给形状子节点 PixelShape2D 加了缓存，漏了这里 ——
+##       而 nodes_demo 的地面用的正是内置 rect_size，所以一点没改善。）
+var _shape: PixelShape = null
+var _shape_valid := false
+var _shape_sig: Array = []
+
+
+## 自身内置形状（带缓存）。build_shape() 仍是给子类重写的接口。
+##
+## ⚠️ 用**输入签名**判断要不要重算，而不是靠 setter 手动失效。
+##    手动失效必然漏 —— 目前有 5 个会影响形状的属性 + scale，少接一个就是
+##    "改了属性但形状没更新"这种静默 bug。签名比较只是几个值的相等判断，
+##    代价可以忽略，但不可能漏。
+func get_shape() -> PixelShape:
+	var sig := [source, rect_size, radius, texture, alpha_threshold, material_id, scale]
+	if not _shape_valid or sig != _shape_sig:
+		_shape_sig = sig
+		_shape = build_shape()
+		_shape_valid = true
+	return _shape
+
+
 ## 形状外接的缓存。_draw() 每帧都要用，而 build_shape() 可能很贵
 ## （Ground 是 800x40 = 32000 像素），所以必须缓存。
 var _aabb_cache := Rect2i()
@@ -132,7 +164,7 @@ var _aabb_valid := false
 
 func _gizmo_aabb() -> Rect2i:
 	if not _aabb_valid:
-		var shape := build_shape()
+		var shape := get_shape()          # ← 用缓存，不要直接 build_shape()
 		_aabb_cache = shape.local_aabb() if not shape.is_empty() else Rect2i()
 		_aabb_valid = true
 	return _aabb_cache
@@ -140,6 +172,9 @@ func _gizmo_aabb() -> Rect2i:
 
 ## 形状属性变了就调它让缓存失效（导出属性的 setter 会自动调）
 func invalidate_gizmo() -> void:
+	# ⚠️ 只失效**外接**，不失效形状 —— 位置/旋转变化不影响形状的生成结果，
+	#    而重建形状可能要几万次 set_pixel。
+	#    形状只在**自身属性**或 **scale** 变化时失效（见 setter 与 _notification）。
 	_aabb_valid = false
 	queue_redraw()
 	# 形状变了，兄弟里的渲染节点也要重建贴图（它是子节点，位置由节点变换自动跟随，
