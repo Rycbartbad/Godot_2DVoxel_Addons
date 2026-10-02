@@ -141,6 +141,27 @@ def main() -> int:
         return 1
 
     data, err = call("POST", "/repos/%s/releases" % slug, tok, payload)
+    if err and "already_exists" in err:
+        # ⚠️ 推 tag 时 GitHub 会**自动建一个 Release**（正文是自动生成的 changelog 链接），
+        #    所以正常流程下 POST 几乎必然撞 already_exists —— 这不是错误，是常态。
+        #    撞上就改成更新，把仓库里的发布说明灌进去（两边同源）。
+        print("Release 已存在（推 tag 时 GitHub 自动建的），改为更新正文")
+        cur, err2 = call("GET", "/repos/%s/releases/tags/%s" % (slug, tag), tok)
+        if err2:
+            print("查不到已有 Release：")
+            print("  " + scrub(err2, tok))
+            return 1
+        if (cur.get("body") or "").strip() == body.strip():
+            print("正文已经一致，不用改：%s" % cur.get("html_url", ""))
+            return 0
+        data, err2 = call("PATCH", "/repos/%s/releases/%d" % (slug, cur["id"]), tok,
+                          {"name": tag, "body": body})
+        if err2:
+            print("更新失败：")
+            print("  " + scrub(err2, tok))
+            return 1
+        print("正文已更新为 %d 字符：%s" % (len(body), data.get("html_url", "")))
+        return 0
     if err:
         print("建 Release 失败：")
         print("  " + scrub(err, tok))
