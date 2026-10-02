@@ -1336,6 +1336,38 @@ func _update_sleep(dt: float) -> void:
 			b.sleep_timer += dt
 		elif b.awake:
 			b.sleep_timer = 0.0
+	# ---- 岛屿级唤醒 ----
+	#
+	# ⚠️ 只靠逐对唤醒（_wake_pass）会死锁：A 被抓着、想推开睡着的 B，
+	# 但 A 因为被 B 挡住所以速度很低 —— 于是
+	#     "A 太慢" ⇒ 不唤醒 B ⇒ B 当作静态（无限质量）⇒ A 更动不了
+	# 实测以 20 px/s 拖动时邻居**永不苏醒**，物体 2 秒只挪了 1.2 像素。
+	#
+	# 判据必须与"被挡住物体的**速度**"无关。唯一的信号是"有东西在**驱动**这个岛"：
+	#   · 被抓着  —— 游戏逻辑正在操控它
+	#   · 有外力  —— 同上
+	#
+	# ⚠️ 不要把"岛里有成员在运动"也算进来。看着合理，实测**灾难性**：
+	#    它把 sleep_box 从 0/12 变成 8/12 清醒 —— 因为该判据用的是双倍阈值
+	#    （12 px/s），比休眠阈值（6）宽松，于是 6~12 之间的缓慢蠕动
+	#    会让整个岛永远醒着。而这一条本来也是多余的：
+	#    下面 island_min 取的是岛内 awake 成员 sleep_timer 的最小值，
+	#    只要有人不"慢"，它的计时就是 0，岛自然不会睡。
+	var island_drive := {}
+	for i in n:
+		var bd: PBody = bodies[i]
+		if bd.is_static:
+			continue
+		if held.has(bd.id) or bd.accum_force != Vector2.ZERO or bd.accum_torque != 0.0:
+			island_drive[_find(parent, i)] = true
+	if not island_drive.is_empty():
+		for i in n:
+			var bw: PBody = bodies[i]
+			if bw.is_static:
+				continue
+			if island_drive.has(_find(parent, i)):
+				bw.awake = true
+				bw.sleep_timer = 0.0
 	# 每个岛取最小的 sleep_timer 作为岛的计时
 	var island_min: Dictionary = {}
 	for i in n:
