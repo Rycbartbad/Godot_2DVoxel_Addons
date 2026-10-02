@@ -101,7 +101,10 @@ def main() -> int:
         print("推送失败（很可能是 stable 有 main 没有的提交 = 分叉）：")
         print((r.stderr or r.stdout).strip()[:600])
         return 1
-    print("stable 已推进到 %s" % head)
+    # 本地 ref 也要跟上 —— 只推远端的话，本地 stable 会一直停在旧位置，
+    # 下一次 "git checkout stable" 看到的是过期的代码，很容易误判。
+    run(["git", "branch", "-f", STABLE, SOURCE])
+    print("stable 已推进到 %s（本地与远端同步）" % head)
     return 0
 
 
