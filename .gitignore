@@ -45,10 +45,14 @@ demo_shot.png
 demo_shot.png.import
 
 # ---------------------------------------------------------------- 调研资料
-# _research/ 是第三方仓库的拷贝（含一个 84 MB 的 .vox），_tdres/ 是下载的参考资料。
-# 两者都不属于本项目源码，而且提交第三方内容有许可问题。
+# 这些都不是本项目源码，而是第三方材料 —— 放进一个 MIT 仓库是不一致的：
+#   _research/                第三方仓库的拷贝（含一个 84 MB 的 .vox）
+#   _tdres/                   下载的参考资料
+#   docs/teardown_api_research/  Teardown 官方 API 文档（api.xml/api.html/changelog 等）
+# 它们仍然是**本地参考资料**，只是不随仓库分发。要用请自行到官方渠道获取。
 _research/
 _tdres/
+docs/teardown_api_research/
 
 # ---------------------------------------------------------------- 杂项
 *.tmp

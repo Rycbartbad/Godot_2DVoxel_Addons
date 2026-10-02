@@ -106,3 +106,12 @@ addons/pixel_destruction/   **生成物**（.gitignore，由 tools/build_addon.p
 - **[addons/pixel_destruction/docs/PRECISION.md](addons/pixel_destruction/docs/PRECISION.md)** —— 精度纪律：float32/float64 的全部边界
 - **[docs/development_log.md](docs/development_log.md)** —— 开发日志，按坑编号，含被证伪的假设
 - [docs/2d_pixel_physics_framework.md](docs/2d_pixel_physics_framework.md) —— 框架设计
+
+---
+
+## 许可
+
+MIT，见 [LICENSE](LICENSE)。
+
+> 仓库里**不含**第三方材料：`_research/`、`_tdres/`、`docs/teardown_api_research/`（Teardown 官方 API 文档）。
+> 它们只在本地作为参考资料存在，已列入 `.gitignore` —— 用 MIT 分发一个仓库时，不该把别人的文档一起打包。

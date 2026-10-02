@@ -97,6 +97,12 @@ def main() -> int:
         total += n
         print("  %-8s %2d 个脚本（生成）" % (mod, n))
 
+    # 1.5) 许可：分发的包必须带许可全文
+    lic = os.path.join(ROOT, "LICENSE")
+    if os.path.isfile(lic):
+        shutil.copyfile(lic, os.path.join(out, "LICENSE"))
+        print("  %-8s LICENSE 已拷入" % "license")
+
     # 2) 原样拷贝手写模板（README / docs / examples / pixel_physics.gd）
     for name in sorted(os.listdir(TEMPLATE)):
         if name == ".gdignore":

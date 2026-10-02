@@ -345,4 +345,5 @@ g++ -O2 -std=c++17 -ffp-contract=off -shared -static-libgcc -static-libstdc++ \
 
 ## 许可
 
-（按你的项目需要补充。）
+MIT，见包内的 `LICENSE`。
+

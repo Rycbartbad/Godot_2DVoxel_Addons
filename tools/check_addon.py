@@ -21,6 +21,7 @@ OUT = os.path.join(ROOT, "addons", "pixel_destruction")
 MODULES = ["physics", "core", "render", "gpu"]
 REQUIRED = [
     "README.md",
+    "LICENSE",
     "pixel_physics.gd",
     "docs/ARCHITECTURE.md",
     "docs/PRECISION.md",

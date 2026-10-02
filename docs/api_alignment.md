@@ -1,6 +1,9 @@
 # API 对照与缺口清单
 
-参考 API 来自 `docs/teardown_api_research/`（Teardown 官方 609 个函数，按 26 个分类组织）。
+参考 API 来自 Teardown 官方文档（609 个函数，按 26 个分类组织）。
+
+> ⚠️ 那些文档是**第三方材料**，不随本仓库分发（见 `.gitignore`）——
+> 本文只做**对照与缺口分析**，不复制原文。要查原始定义请到官方渠道获取。
 本引擎是 **2D**，所以只对照与物理相关的四类：**Entity / Body / Shape / Scene queries**，
 外加 Joint。其余分类（Vehicle / Water / Light / Screen / Trigger / Animation / Player / UI / Sound）
 不在范围内。
