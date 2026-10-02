@@ -66,6 +66,25 @@ linux.release.x86_64 = "res://addons/pixel_destruction/native/fastphys.so"
 """
 
 
+## 去掉 class_name 声明。
+##
+## ⚠️ 为什么必须去：addon 与 src/ 同处一棵 Godot 项目树时（开发仓库就是这样），
+##    两份 class_name 会冲突 —— 报 "Class X hides a global script class"，
+##    而且**级联到编译失败**。实测 headless 也躲不过（之前不报只是因为那些类
+##    已经在 global_script_class_cache 里了；新加的类立刻炸）。
+##
+## addon 内部的引用**全是路径式**（上面的 rewrite 已经改写好了），
+## 所以 class_name 对它不是必需的。使用者按路径 preload 即可：
+##     const PixelPhysics = preload("res://addons/pixel_destruction/pixel_physics.gd")
+def strip_class_name(text: str) -> str:
+    out = []
+    for line in text.split("\n"):
+        if line.startswith("class_name "):
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
 def rewrite(text: str) -> str:
     for m in MODULES:
         text = text.replace("res://src/%s/" % m, "res://addons/pixel_destruction/%s/" % m)
@@ -117,7 +136,7 @@ def main() -> int:
             with open(os.path.join(sd, name), encoding="utf-8") as f:
                 body = f.read()
             with open(os.path.join(dd, name), "w", encoding="utf-8", newline="\n") as f:
-                f.write(rewrite(body))
+                f.write(strip_class_name(rewrite(body)))
             # ⚠️ **不要**把 src/ 的 .uid 复制过来。
             #
             # 曾经复制过，理由是"场景按 UID 引用脚本"。但那个理由在本项目不成立：

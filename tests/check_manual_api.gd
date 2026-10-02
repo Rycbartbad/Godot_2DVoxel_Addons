@@ -41,8 +41,29 @@ func _initialize() -> void:
 	PWorld = load(ADDON + "physics/pworld.gd")
 	PBody = load(ADDON + "physics/pbody.gd")
 	if Facade == null:
-		print("=== 跳过：addon 未构建（python tools/build_addon.py 生成后再跑）===")
-		quit(0)
+		# ⚠️⚠️ 这里**不能默默跳过**。
+		#
+		# 之前是"缺席就 print 一句然后 exit 0"——那比失败更糟：它看起来是绿的。
+		# 而 CI 里 --verify 会把产物移出项目树，于是这个检查一路空转，
+		# 手册和代码漂移了也没人知道。**教错 API 的手册比没有手册更糟。**
+		#
+		# 现在：CI 环境下缺席 = **失败**（CI 会先在树内构建）；
+		# 本地缺席 = 大声警告 + 失败退出码，但可以通过 DSH_ALLOW_MISSING_ADDON=1 放行
+		# （比如只想跑别的测试时）。
+		var allow := OS.get_environment("DSH_ALLOW_MISSING_ADDON") == "1"
+		var in_ci := OS.get_environment("CI") != ""
+		printerr("check_manual_api: 找不到 addon（%s）" % ADDON)
+		if in_ci and not allow:
+			printerr("CI 环境下必须能找到 —— 请确认 engine-tests 这一步之前跑过 tools/build_addon.py")
+			quit(1)
+			return
+		if allow:
+			print("=== 已放行（DSH_ALLOW_MISSING_ADDON=1）：跳过 manual API 检查 ===")
+			quit(0)
+			return
+		printerr("要构建：python tools/build_addon.py")
+		printerr("要临时放行：设 DSH_ALLOW_MISSING_ADDON=1")
+		quit(1)
 		return
 	var f = Facade.new()
 	var w = PWorld.new()

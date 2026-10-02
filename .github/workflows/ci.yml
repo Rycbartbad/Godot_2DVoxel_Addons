@@ -136,6 +136,17 @@ jobs:
           mv "Godot_v${V}-stable_linux.x86_64" godot
           chmod +x godot
 
+      # ⚠️ 这个 job **在树内**构建 addon（不用 --verify）。
+      #
+      # 为什么可以放树里：class_name 重名只在**编辑器**里致命（脚本重载路径），
+      # 而这里跑的是 headless —— 实测 addon 在树里时 290 项断言照样全过。
+      # 必须放树里的理由：check_manual_api.gd 要 preload/load addon 的脚本，
+      # 而 ../_addon_build 在 res:// 之外，load() 够不着。
+      #
+      # 不构建的话，那个检查会"缺席即跳过"—— 看起来是绿的，实际空转。
+      - name: 构建 addon（树内，供手册 API 检查用）
+        run: python tools/build_addon.py
+
       - name: 单元断言
         run: |
           set -e
@@ -160,4 +171,6 @@ jobs:
       ## 拿去和真实代码对一遍。
       - name: 手册引用的 API 必须真实存在
         run: ./godot --headless --path . --script res://tests/check_manual_api.gd | tee /tmp/man
+        # 检查脚本现在会在 addon 缺席时**失败**（CI 环境下），
+        # 不会再有"跳过然后 exit 0"这种看起来是绿的空转。
 
