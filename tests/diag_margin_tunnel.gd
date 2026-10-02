@@ -54,7 +54,7 @@ func _initialize() -> void:
 	print("理想撞墙 x≈188 rot≈0；wmax 是整个过程里最大角速度")
 	print("%6s | %9s %9s %9s | %9s %9s %9s | %8s" % [
 		"边际", "x@600", "rot@600", "wmax@600", "x@1500", "rot@1500", "wmax@1500", "休眠"])
-	for margin in [0.1, 0.5, 1.0, 1.5, 1.8, 2.0]:
+	for margin in [0.0, 0.1, 0.5, 1.0, 1.5, 2.0, 3.0, 5.0]:
 		var a := _tunnel(margin, 600.0)
 		var b := _tunnel(margin, 1500.0)
 		print("%6.1f | %9.2f %9.3f %9.2f | %9.2f %9.3f %9.2f | %8s" % [

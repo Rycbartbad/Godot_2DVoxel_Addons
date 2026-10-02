@@ -32,6 +32,11 @@ var sleeping_enabled := true
 var sleep_linear := 6.0
 ## 角速度那一半判据用**表面速度**（px/s），不是裸角速度。
 ## 绝对角速度阈值会把小碎块永久钉在"醒着"（见 PBody.is_slow 的实测数据）。
+## 睡眠的**表面速度**容差：|ω| * bounding_radius() 要小于它才算「慢」。
+##
+## 6.0 是配着**当前**的推测接触点公式调的（见 collide.gd 的 speculative_point
+## 墓碑注释）。若哪天把接触点改成「正确的」那种，堆叠的残余角速度会让表面速度
+## 压过这个阈值、整岛睡不着 —— 届时这个值要跟着提到 12.0 左右。
 var sleep_surface := 6.0
 var sleep_delay := 0.4
 

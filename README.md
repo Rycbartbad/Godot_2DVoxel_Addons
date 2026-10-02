@@ -1,18 +1,16 @@
-# TapTap2026 — 2D 像素破坏物理引擎
+2D 像素破坏物理引擎
 
-Teardown 风格的 2D 像素破坏 + 刚体物理。Godot 4.x（标准版，无 .NET），GDScript 为主，
-可选 GDExtension 原生加速。
+# 本仓库是参考 Teardown 实现的 Godot 2D 体素拓展
 
-**任意像素团就是碰撞体**（贪心分解成 OBB），**破坏即物理**（按连通性分裂成新刚体）。
 引擎已经剥离成可迁移的 addon：`addons/pixel_destruction/`。
 
 ---
 
-## 跑起来
+## 运行
 
 ```bash
 # 演示（需要 GPU）
-godot --path . -- --shot            # 截图模式，跑完就退
+godot --path . -- --shot
 
 # 无头测试
 godot --headless --path . --script res://tests/test_core.gd
@@ -22,7 +20,7 @@ godot --headless --path . --script res://tests/dump_state.gd    # 逐位状态�
 ## 测试
 
 | 类别 | 命令 |
-|---|---|
+| --- | --- |
 | 单元断言 | `tests/test_core.gd` / `test_physics.gd` / `test_interaction.gd` / `test_parallel.gd` |
 | 物理验证 | `tests/validation_*.gd`（sweep 14/14、extreme、grab、stroke…） |
 | 逐位回归 | `tests/dump_state.gd` —— 8 个固定场景的 12 位小数摘要，**基准值见 `docs/development_log.md`** |
@@ -30,7 +28,7 @@ godot --headless --path . --script res://tests/dump_state.gd    # 逐位状态�
 | 性能 | `tests/bench_phase.gd` / `bench_grab_cost.gd` / `bench_native_solve.gd` |
 | GPU | 加 `--display-driver windows --rendering-driver vulkan` 再跑 `tests/test_gpu.gd` |
 
-## 首次使用：先让编辑器注册扩展
+## 首次使用时需让编辑器先注册扩展
 
 GDExtension 是靠**编辑器扫描** `.gdextension` 写进 `.godot/extension_list.cfg` 来注册的，
 而这个缓存不进仓库。所以刚克隆下来时：
@@ -40,9 +38,9 @@ godot --headless --editor --quit --path .     # 扫描一次，注册扩展
 ```
 
 在此之前直接跑 `--headless --script`，扩展**不会**加载，会落到 GDScript 回退路径。
-仓库里带了预编译的 `gdext/fastphys.dll`（Windows x86_64），所以注册完就能用。
+仓库里带了预编译的 `gdext/fastphys.dll`（Windows x86_64）。
 
-> ⚠️ **已知问题**：GDScript 回退路径目前与原生路径**不等价**
+> **已知问题**：GDScript 回退路径目前与原生路径**不等价**
 > （实测 `sleep_box` 场景 0/12 → 10/12 清醒）。详见
 > [docs/development_log.md](docs/development_log.md) 坑 36。所以请确保 dll 可用。
 

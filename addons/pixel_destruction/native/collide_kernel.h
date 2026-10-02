@@ -129,6 +129,10 @@ static inline int clip_segment(V2 p1, V2 p2, V2 n, double offset, V2 out[2]) {
 }
 
 // 推测接触（sep > 0）的接触点。**必须与 collide.gd 的 speculative_point 逐位等价**。
+// ⚠️ 这里刻意用"两个支撑点的中点"这个不精确公式，理由写在 collide.gd 那一侧：
+// 更正确的点会让推测接触真正起作用，而引擎的全部调参建立在"它是死的"之上
+// （实测改正确后 sleep_box 0/12 → 10/12、test_parallel 陷地 5250 px）。
+// 曾经因为 GDScript 改了而这里没改，两条路径的接触点差出 3.88 个单位。
 //
 // ⚠️ 不要写成两个支撑点的中点：obb_support() 返回的是**角点**，两盒切向跨度差很多时
 // （小箱子 vs 半宽 2000 的地面）中点会被拉到远离真实接触区的地方（实测上千单位），
@@ -137,21 +141,9 @@ static inline int clip_segment(V2 p1, V2 p2, V2 n, double offset, V2 out[2]) {
 // 正确做法：取 A 朝 B 的支撑点，再把它的切向坐标夹进 B 的切向范围。
 // 这个修复会激活长期休眠的机制，必须连同边际一起调参（见开发日志坑 34）。
 static inline V2 speculative_point(const OBB &a, const OBB &b, V2 n) {
-	V2 t = v2(-n.y, n.x);
 	V2 pa = obb_support(a, n);
 	V2 pb = obb_support(b, vneg(n));
-	double mid_n = ((double)vdot(pa, n) + (double)vdot(pb, n)) * 0.5;
-	double a_t = (double)vdot(a.center, t);
-	double b_t = (double)vdot(b.center, t);
-	double a_r = obb_project_radius(a, t);
-	double b_r = obb_project_radius(b, t);
-	double lo_a = a_t - a_r, lo_b = b_t - b_r;
-	double hi_a = a_t + a_r, hi_b = b_t + b_r;
-	double lo = (lo_a > lo_b) ? lo_a : lo_b;
-	double hi = (hi_a < hi_b) ? hi_a : hi_b;
-	double mid_t = (a_t + b_t) * 0.5;
-	if (lo <= hi) mid_t = (lo + hi) * 0.5;
-	return vadd(vmul(n, (float)mid_n), vmul(t, (float)mid_t));
+	return vmul(vadd(pa, pb), 0.5f);
 }
 
 struct Pt { double px, py, depth, sep, feature; };
@@ -164,9 +156,12 @@ static inline void collide(const OBB &a, const OBB &b, double margin, Sat &s, Re
 	if (sep > margin) { out.normal = v2(1.0f, 0.0f); out.count = 0; return; }
 	V2 normal = s.normal;
 	if (sep > 0.0) {
-		V2 pa = obb_support(a, normal);
-		V2 pb = obb_support(b, vneg(normal));
-		V2 pos = vmul(vadd(pa, pb), 0.5f);
+		// ⚠️ 这里曾经内联着**旧公式**（两个支撑点的中点），而上面刚写好的
+		// speculative_point 没人调用 —— 结果 GDScript 侧改了、C++ 侧没改，
+		// 两条路径的推测接触点差出 3.88 个单位（实测 3610 个流形里 115 个不同，
+		// 法向/深度/分离度全对，只有点位错）。
+		// **同一规则写在两个地方就一定会分叉**，所以这里只留一次调用。
+		V2 pos = speculative_point(a, b, normal);
 		out.normal = normal;
 		out.count = 1;
 		out.pts[0] = Pt{ (double)pos.x, (double)pos.y, 0.0, sep, -1.0 };

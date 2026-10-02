@@ -54,11 +54,22 @@ def main() -> int:
     for mod in MODULES:
         sd = os.path.join(SRC, mod)
         dd = os.path.join(DST, mod)
+        # ⚠️ Godot 会给每个 .gd 生成一个 .uid（脚本 ID，被场景引用）。
+        # 重生成模块目录时必须把它们**留下来**，否则每次构建都churn 一批删除，
+        # 而且引用这些脚本的场景会短暂失联。
+        keep = {}
         if os.path.isdir(dd):
-            shutil.rmtree(dd)          # 只清模块目录，手写内容不动
+            for name in os.listdir(dd):
+                if name.endswith(".uid"):
+                    with open(os.path.join(dd, name), "rb") as f:
+                        keep[name] = f.read()
+            shutil.rmtree(dd)
         if not os.path.isdir(sd):
             continue
         os.makedirs(dd)
+        for name, blob in keep.items():
+            with open(os.path.join(dd, name), "wb") as f:
+                f.write(blob)
         n = 0
         for name in sorted(os.listdir(sd)):
             if not name.endswith(".gd"):
