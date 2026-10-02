@@ -53,6 +53,14 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true", help="只检查，不推送")
     ap.add_argument("--force", action="store_true", help="跳过测试")
+    # ⚠️⚠️ 必须有 --yes 才真的推。
+    #
+    # 规则是「开发只在 main 上，**由人确认后**才往 stable 发布」。
+    # 光把规则写进文档挡不住 —— 实测我自己就会顺手跑 promote.py，
+    # 等于替人做了发布决定。所以把「确认」变成命令的一部分：
+    # 不加 --yes 就只报告将要发生什么，然后退出。
+    ap.add_argument("--yes", action="store_true",
+                    help="确认发布（不加这个只做检查并报告，不推送）")
     args = ap.parse_args()
 
     st = run(["git", "status", "--porcelain"]).stdout.strip()
@@ -92,6 +100,16 @@ def main() -> int:
 
     if args.dry_run:
         print("--dry-run：检查通过，未推送。")
+        return 0
+
+    if not args.yes:
+        # 没有 --yes：把"将要发生什么"讲清楚就停手。
+        # 决策权在人，不在脚本，也不在替你跑脚本的助手。
+        print("")
+        print("测试全绿，**但没有推送** —— 发布是人的决定。")
+        print("确认无误后重跑并加 --yes：")
+        print("    python tools/promote.py --yes")
+        print("（将把 stable 快进到 %s）" % head)
         return 0
 
     # fast-forward only：失败说明 stable 有 main 没有的提交，那是**分叉**，
