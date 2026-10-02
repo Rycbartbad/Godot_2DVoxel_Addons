@@ -1,6 +1,6 @@
 extends SceneTree
-const PixelShape := preload("res://addons/pixel_destruction/core/pixel_shape.gd")
-const Destruction := preload("res://addons/pixel_destruction/core/destruction.gd")
+const PixelShape := preload("res://src/core/pixel_shape.gd")
+const Destruction := preload("res://src/core/destruction.gd")
 
 func _initialize() -> void:
 	var s := PixelShape.new()

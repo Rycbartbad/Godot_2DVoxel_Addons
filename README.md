@@ -54,14 +54,35 @@ g++ -O2 -std=c++17 -ffp-contract=off -shared -static-libgcc -static-libstdc++ -o
 `-ffp-contract=off` 不能省：少了它编译器会把浮点乘加融合成 FMA，与 GDScript 路径立刻分叉。
 构建前先关掉占用 dll 的 Godot 进程，否则链接会报 Permission denied。
 
-## 重新生成 addon
+## 引擎包（addon）：**生成物，不进仓库**
 
-```bash
-python tools/build_addon.py
+`addons/pixel_destruction/` 是**构建产物**，由 `tools/build_addon.py` 从三处拼出来：
+
+```
+src/ + gdext/       引擎真源
+addon_src/          手写模板（README / docs / examples / pixel_physics.gd）
+        |
+        v  python tools/build_addon.py
+addons/pixel_destruction/     <- 构建产物（.gitignore）
 ```
 
-引擎的**源码是 `src/`**；addon 是生成物 —— 脚本只重生成模块目录，
+本地构建与校验：
 
+```bash
+python tools/build_addon.py     # 生成
+python tools/check_addon.py     # 校验自洽：路径改写、内部引用、空文件
+```
+
+**CI**（`.github/workflows/ci.yml`）在每次推送时构建 → 校验 → 验证幂等 →
+打包成 `pixel_destruction.zip` 作为 artifact；**打 `v*` tag 时自动发布 Release**。
+
+> **为什么不把生成物提交进仓库**：那就等于有两个真源。
+> 这个项目已经因为「同一份规则写在两个地方」栽过好几次
+> （见 [docs/development_log.md](docs/development_log.md) 坑 18/31/36）——
+> 其中一次就是 GDScript 侧改了而 C++ 侧没改，两条路径的接触点差出 3.88 个单位。
+
+> `addon_src/` 里有 `.gdignore`，让 Godot 跳过它 ——
+> 模板里的 preload 路径是**装好之后**的路径，在仓库里解析不了。
 ---
 
 ## 目录
@@ -75,7 +96,8 @@ src/demo/       演示场景逻辑
 tests/          单元断言 + 物理验证 + 逐位回归 + 性能基准
 docs/           开发日志（三十多个坑的完整记录）与框架文档
 gdext/          GDExtension 原生加速源码
-addons/pixel_destruction/   可迁移的引擎包（见其 README）
+addon_src/      引擎包的手写模板（README / docs / examples / 门面）
+addons/pixel_destruction/   **生成物**（.gitignore，由 tools/build_addon.py 产出）
 ```
 
 ## 文档
@@ -84,8 +106,3 @@ addons/pixel_destruction/   可迁移的引擎包（见其 README）
 - **[addons/pixel_destruction/docs/PRECISION.md](addons/pixel_destruction/docs/PRECISION.md)** —— 精度纪律：float32/float64 的全部边界
 - **[docs/development_log.md](docs/development_log.md)** —— 开发日志，按坑编号，含被证伪的假设
 - [docs/2d_pixel_physics_framework.md](docs/2d_pixel_physics_framework.md) —— 框架设计
-
-## 说明
-
-`_research/` 与 `_tdres/` 是调研资料（第三方仓库拷贝 / 下载的参考文档），已在 `.gitignore` 中排除。
-`gdext/*.bin` 是可由 `tests/dump_*_bin.gd` 重新生成的测试夹具，同样未提交。

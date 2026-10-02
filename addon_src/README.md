@@ -23,6 +23,14 @@ Teardown 风格的 **2D 像素破坏 + 刚体物理**，纯 GDScript 实现，�
 
 ---
 
+## 获取
+
+从 [Releases](../../releases) 下载 `pixel_destruction.zip`，解开即是完整的 addon。
+
+> 仓库里**没有** `addons/pixel_destruction/` —— 它是构建产物，由 CI 生成。
+> 要在本地构建：先跑 `python tools/build_addon.py`，
+> 再用 `python tools/check_addon.py` 校验自洽。
+
 ## 安装
 
 1. 把整个 `addons/pixel_destruction/` 目录拷进你的项目。

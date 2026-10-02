@@ -1,0 +1,96 @@
+name: build-addon
+
+## 生成物不进仓库（见 .gitignore）：addons/pixel_destruction/ 是构建产物。
+## 仓库里只有真源 src/ + gdext/ 和手写模板 addon_src/。
+## 这个 workflow 负责构建、校验、打包，并在打 tag 时发布 Release。
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write        # 打 tag 时创建 Release 需要
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: 构建 addon
+        run: python tools/build_addon.py
+
+      - name: 校验 addon 自洽
+        run: python tools/check_addon.py
+
+      - name: 二次构建必须完全一致（生成器要幂等）
+        run: |
+          cp -r addons/pixel_destruction /tmp/first
+          python tools/build_addon.py
+          diff -r /tmp/first addons/pixel_destruction
+          echo "幂等 OK"
+
+      - name: 打包
+        run: |
+          cd addons
+          zip -qr ../pixel_destruction.zip pixel_destruction
+          cd ..
+          unzip -l pixel_destruction.zip | tail -3
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pixel_destruction-addon
+          path: pixel_destruction.zip
+          if-no-files-found: error
+
+      - name: 打 tag 时发布 Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: pixel_destruction.zip
+          generate_release_notes: true
+
+  ## 引擎回归：跑 Godot 无头测试。
+  ## Godot 版本由仓库变量 GODOT_VERSION 控制，没设就跳过 ——
+  ## 不让 CI 因为一个下载地址失效而长期红着（红着的 CI 等于没有 CI）。
+  engine-tests:
+    runs-on: ubuntu-latest
+    if: ${{ vars.GODOT_VERSION != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载 Godot
+        run: |
+          set -e
+          V="${{ vars.GODOT_VERSION }}"
+          curl -fsSL -o godot.zip \
+            "https://github.com/godotengine/godot/releases/download/${V}/Godot_v${V}-stable_linux.x86_64.zip"
+          unzip -q godot.zip
+          mv "Godot_v${V}-stable_linux.x86_64" godot
+          chmod +x godot
+
+      - name: 单元断言
+        run: |
+          set -e
+          for t in test_core test_physics test_interaction test_parallel; do
+            ./godot --headless --path . --script "res://tests/${t}.gd" | tee /tmp/out
+            grep -q "0 failed" /tmp/out
+          done
+
+      - name: 逐位回归基准
+        run: ./godot --headless --path . --script res://tests/dump_state.gd
+
+      - name: 物理与接口验证
+        run: |
+          set -e
+          for t in validation_sweep validation_query validation_api validation_api2; do
+            ./godot --headless --path . --script "res://tests/${t}.gd" | tee /tmp/out
+            grep -q "0 failed" /tmp/out
+          done

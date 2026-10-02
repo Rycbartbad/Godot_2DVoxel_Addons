@@ -2407,6 +2407,61 @@ tests/validation_api2.gd    23 passed   标签 / 重力缩放 / 形状操作 / �
 
 ---
 
+### 交付 · 生成物改由 CI 产出，不再进仓库 ★★★★
+
+原来的做法自相矛盾：@@addons/pixel_destruction/@@ 是 @@tools/build_addon.py@@ 的产物，
+却**提交进了仓库** —— 那正是这个项目反复栽的"两个真源"。
+
+#### 现在的结构
+
+@@@
+src/ + gdext/       引擎真源
+addon_src/          手写模板（README / docs / examples / pixel_physics.gd）
+        |
+        v  tools/build_addon.py
+addons/pixel_destruction/     <- 构建产物（.gitignore）
+@@@
+
+- @@addon_src/@@ 里放了 @@.gdignore@@：模板里的 preload 路径是"装好之后"的路径，
+  在仓库里解析不了，不跳过 Godot 会在编辑器里报一堆 Parse Error。
+- 生成器**整目录重建**，不留上次的残留（残留正是"看着对其实没更新"的来源）。
+- 顺手把 @@src/@@ 的 @@.uid@@ 一起带上 —— 否则使用方导入时会各自生成不同的脚本 id。
+
+#### CI（.github/workflows/ci.yml）
+
+@@@
+build:        构建 -> 校验自洽 -> **验证幂等** -> 打包 zip -> 上传 artifact
+              打 v* tag 时自动发布 Release
+engine-tests: 跑 Godot 无头测试（单元断言 + 逐位基准 + 物理验证）
+              由仓库变量 GODOT_VERSION 控制，没设就跳过
+```
+
+"验证幂等"这一条是刻意加的：生成器如果带时间戳或残留清理不干净，
+产物就会**每次都不一样**，而那种问题在本地几乎看不出来。
+
+@@engine-tests@@ 默认跳过是刻意的 —— **一个长期红着的 CI 等于没有 CI**。
+下载地址随 Godot 版本变化，把它设成仓库变量比写死在 yml 里可靠。
+
+#### 守门人：tools/check_addon.py
+
+生成器"跑成功"不等于"产物能用"。最典型的两种失败都**不会让生成器报错**：
+
+1. **路径改写漏了** —— 模块里还留着 @@res://src/...@@；
+2. **preload 指向不存在的文件** —— 在 Godot 里变成一堆 Parse Error。
+
+校验脚本把这两条都钉住（外加空文件、必需文件清单、数量 sanity）。
+实测输出：@@addon 自洽（24 个 .gd，67 条内部引用全部可解析）@@。
+
+#### 验证（模拟 CI 从零跑一遍）
+
+@@@
+删掉产物 -> 构建 -> 校验 -> 二次构建哈希比对 -> 跑 addon 自带示例 -> 跑主项目回归
+幂等 OK（56 个文件逐字节一致）
+minimal 8/8、facade_demo 24/24、121 项原有断言全绿、八个基准逐位不变
+```
+
+---
+
 ## 4.4 修复后的诚实备注
 
 仍有已知瑕疵，记在这里以免下次重新发现：

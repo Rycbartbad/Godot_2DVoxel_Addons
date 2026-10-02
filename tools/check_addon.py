@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""校验生成出来的 addon 是否自洽。CI 的守门人。
+
+为什么需要它：生成器"跑成功"不等于"产物能用"。最典型的失败是
+**路径改写漏了**（模块里还留着 res://src/...）或者 **preload 指向不存在的文件**
+—— 两者都不会让生成器报错，只会在 Godot 里变成一堆 Parse Error。
+
+检查项：
+  1. 必须存在的文件都在；
+  2. 生成的模块里不残留 res://src/ 路径；
+  3. addon 内所有引用的 res://addons/pixel_destruction/... 目标都真实存在；
+  4. 没有空文件（生成中断会留下 0 字节文件）。
+"""
+import os
+import re
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUT = os.path.join(ROOT, "addons", "pixel_destruction")
+
+MODULES = ["physics", "core", "render", "gpu"]
+REQUIRED = [
+    "README.md",
+    "pixel_physics.gd",
+    "docs/ARCHITECTURE.md",
+    "docs/PRECISION.md",
+    "examples/minimal.gd",
+    "examples/facade_demo.gd",
+    "native/fastphys.cpp",
+    "native/collide_kernel.h",
+    "native/bp_kernel.h",
+    "native/solver_kernel.h",
+    "native/fastphys.gdextension.template",
+]
+PREFIX = "res://addons/pixel_destruction/"
+REF = re.compile(r'res://addons/pixel_destruction/[A-Za-z0-9_./-]+\.(?:gd|tscn|tres)')
+
+
+def main() -> int:
+    errors = []
+    if not os.path.isdir(OUT):
+        print("找不到生成目录 %s —— 先跑 tools/build_addon.py" % OUT)
+        return 1
+
+    # 1) 必需文件
+    for rel in REQUIRED:
+        if not os.path.isfile(os.path.join(OUT, rel)):
+            errors.append("缺少文件: %s" % rel)
+
+    # 2) 模块里不能残留 src 路径 / 不能有空文件
+    for mod in MODULES:
+        d = os.path.join(OUT, mod)
+        if not os.path.isdir(d):
+            errors.append("缺少模块目录: %s" % mod)
+            continue
+        for name in sorted(os.listdir(d)):
+            if not name.endswith(".gd"):
+                continue
+            with open(os.path.join(d, name), encoding="utf-8") as f:
+                body = f.read()
+            if "res://src/" in body:
+                errors.append("%s/%s 里残留 res://src/ 路径（路径改写漏了）" % (mod, name))
+            if len(body.strip()) == 0:
+                errors.append("%s/%s 是空文件" % (mod, name))
+
+    # 3) 所有内部引用都要能解析
+    refs = 0
+    for dirpath, _dirs, files in os.walk(OUT):
+        for name in files:
+            if not name.endswith(".gd"):
+                continue
+            p = os.path.join(dirpath, name)
+            with open(p, encoding="utf-8") as f:
+                body = f.read()
+            for m in REF.finditer(body):
+                refs += 1
+                target = os.path.join(OUT, m.group(0)[len(PREFIX):])
+                if not os.path.isfile(target):
+                    errors.append("%s 引用了不存在的 %s" % (os.path.relpath(p, OUT), m.group(0)))
+
+    n_gd = sum(1 for dp, _d, fs in os.walk(OUT) for f in fs if f.endswith(".gd"))
+    if n_gd < 20:
+        errors.append("生成的 .gd 只有 %d 个，明显不完整" % n_gd)
+
+    for e in errors:
+        print("  ERROR %s" % e)
+    if errors:
+        print("=== 校验失败：%d 项 ===" % len(errors))
+        return 1
+    print("=== addon 自洽（%d 个 .gd，%d 条内部引用全部可解析）===" % (n_gd, refs))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
