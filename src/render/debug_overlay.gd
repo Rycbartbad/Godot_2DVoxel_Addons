@@ -44,24 +44,24 @@ extends Node2D
 @export var contact_normal_len := 12.0
 @export var font_size := 12
 
-var _world = null
+var world = null
 ## 统计文字的字号要按相机 zoom 反算，否则拉近之后字会占满整个屏幕
 var font_size_draw := 12.0
 
 
 func _ready() -> void:
-	_resolve_world()
+	_resolveworld()
 	set_process(true)
 
 
 func _process(_dt: float) -> void:
 	# ⚠️ 只重画，**不推进物理**。编辑器里也走这条路。
-	if _world == null:
-		_resolve_world()
+	if world == null:
+		_resolveworld()
 	queue_redraw()
 
 
-func _resolve_world() -> void:
+func _resolveworld() -> void:
 	var src: Node = null
 	if not world_source.is_empty():
 		src = get_node_or_null(world_source)
@@ -79,22 +79,22 @@ func _resolve_world() -> void:
 						src = c
 						break
 	if src != null and "world" in src:
-		_world = src.world
+		world = src.world
 	else:
-		_world = null
+		world = null
 	if OS.get_cmdline_user_args().has("--shot"):
-		print("[DebugOverlay] src=%s world=%s" % [src, _world != null])
+		print("[DebugOverlay] src=%s world=%s" % [src, world != null])
 
 
 ## 世界里的刚体（没有世界就返回空，编辑器里没摆 PixelPhysics 时不该报错）
 func _bodies() -> Array:
-	if _world == null:
+	if world == null:
 		return []
-	return _world.bodies
+	return world.bodies
 
 
 func _draw() -> void:
-	if _world == null:
+	if world == null:
 		if show_stats:
 			draw_string(ThemeDB.fallback_font, Vector2(8, 18),
 				"调试叠加层：找不到 world_source（把 world_source 指到 PixelPhysics 节点）",
@@ -149,7 +149,7 @@ func _draw() -> void:
 
 	# ---- 接触点 + 法向 ----
 	if show_contacts:
-		for m in _world.manifolds:
+		for m in world.manifolds:
 			for p in m.points:
 				draw_circle(p.position, 2.5, contact_color)
 				draw_line(p.position, p.position + m.normal * contact_normal_len,
@@ -190,11 +190,11 @@ func _draw_stats(bodies: Array, font: Font) -> void:
 	var lines := PackedStringArray([
 		"刚体 %d（动态 %d，清醒 %d，休眠 %d）" % [bodies.size(), dyn, awake, dyn - awake],
 		"流形 %d  接触点 %d  子步 %d" % [
-			_world.manifolds.size(), _world.last_contacts, _world.last_substeps],
+			world.manifolds.size(), world.last_contacts, world.last_substeps],
 		"总动量 (%.1f, %.1f)  总角动量 %.1f  总动能 %.1f" % [
-			_world.total_momentum().x, _world.total_momentum().y,
-			_world.total_angular_momentum(_world.center_of_mass_world()),
-			_world.total_kinetic_energy()],
+			world.total_momentum().x, world.total_momentum().y,
+			world.total_angular_momentum(world.center_of_massworld()),
+			world.total_kinetic_energy()],
 	])
 	# ⚠️ _draw() 画的是**世界坐标**，直接写 (8,18) 会跑到镜头外面去
 	#    （表现是"叠加层在画但看不到字"）。要跟着相机走：

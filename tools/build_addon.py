@@ -30,7 +30,21 @@ TEMPLATE = os.path.join(ROOT, "addon_src")
 DEFAULT_OUT = os.path.join(ROOT, "addons", "pixel_destruction")
 
 ## 从 src/ 打包哪些模块（顺序即生成顺序）
-MODULES = ["physics", "core", "render", "gpu"]
+MODULES = ["physics", "core", "render", "gpu", "nodes"]
+
+## ⚠️ addons/pixel_destruction/ 是 src/ 的**拷贝**，两者在同一棵 Godot 项目树里。
+## 不忽略它就会出两类硬错误：
+##   · 重复 UID        -> "UID duplicate detected between res://src/... and res://addons/..."
+##   · 重复 class_name -> "Class "PixelBody2D" hides a global script class"
+## 后者尤其致命：class_name 是**全局**的，两份同名声明直接解析失败。
+## Godot 的 .gdignore 让整个目录对编辑器不可见 —— 这才是生成物该有的样子。
+## 使用方把 addon 拷进自己的项目时，那里没有 src/，自然也不冲突。
+GDIGNORE = """# 这是构建产物（tools/build_addon.py 从 src/ + gdext/ + addon_src/ 拼出来）。
+# 它和本仓库的 src/ 是同一份代码的拷贝，同时存在会让 Godot 报
+#   · UID duplicate detected
+#   · Class "X" hides a global script class
+# 所以让 Godot 忽略整个目录。把 addon 拷进别的项目时删掉本文件即可（那边没有 src/）。
+"""
 ## 从 gdext/ 打包哪些原生源码
 NATIVE_SRC = ["fastphys.cpp", "collide_kernel.h", "bp_kernel.h", "solver_kernel.h"]
 ## 扩展名故意不是 .gdextension —— Godot **编辑器**会自动扫描并加载项目里的
@@ -71,6 +85,10 @@ def main() -> int:
     if os.path.isdir(out):
         shutil.rmtree(out)
     os.makedirs(out)
+
+    # 0) 让 Godot 忽略整个目录（见 GDIGNORE 的说明：重复 UID + 重复 class_name）
+    with open(os.path.join(out, ".gdignore"), "w", encoding="utf-8", newline="\n") as f:
+        f.write(GDIGNORE)
 
     # 1) 从 src/ 生成模块
     total = 0

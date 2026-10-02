@@ -1,0 +1,90 @@
+SCRIPT ERROR: Invalid call. Nonexistent function 'center_of_massworld' in base 'RefCounted (pworld.gd)'.
+   at: _draw_stats (res://src/render/debug_overlay.gd:190)
+   GDScript backtrace (most recent call first):
+       [0] _draw_stats (res://src/render/debug_overlay.gd:190)
+       [1] _draw (res://src/render/debug_overlay.gd:160)
+SCRIPT ERROR: Invalid call. Nonexistent function 'center_of_massworld' in base 'RefCounted (pworld.gd)'.
+   at: _draw_stats (res://src/render/debug_overlay.gd:190)
+   GDScript backtrace (most recent call first):
+       [0] _draw_stats (res://src/render/debug_overlay.gd:190)
+       [1] _draw (res://src/render/debug_overlay.gd:160)
+SCRIPT ERROR: Invalid call. Nonexistent function 'center_of_massworld' in base 'RefCounted (pworld.gd)'.
+   at: _draw_stats (res://src/render/debug_overlay.gd:190)
+   GDScript backtrace (most recent call first):
+       [0] _draw_stats (res://src/render/debug_overlay.gd:190)
+       [1] _draw (res://src/render/debug_overlay.gd:160)
+SCRIPT ERROR: Invalid call. Nonexistent function 'center_of_massworld' in base 'RefCounted (pworld.gd)'.
+   at: _draw_stats (res://src/render/debug_overlay.gd:190)
+   GDScript backtrace (most recent call first):
+       [0] _draw_stats (res://src/render/debug_overlay.gd:190)
+       [1] _draw (res://src/render/debug_overlay.gd:160)
+SCRIPT ERROR: Invalid call. Nonexistent function 'center_of_massworld' in base 'RefCounted (pworld.gd)'.
+   at: _draw_stats (res://src/render/debug_overlay.gd:190)
+   GDScript backtrace (most recent call first):
+       [0] _draw_stats (res://src/render/debug_overlay.gd:190)
+       [1] _draw (res://src/render/debug_overlay.gd:160)
+SCRIPT ERROR: Invalid call. Nonexistent function 'center_of_massworld' in base 'RefCounted (pworld.gd)'.
+   at: _draw_stats (res://src/render/debug_overlay.gd:190)
+   GDScript backtrace (most recent call first):
+       [0] _draw_stats (res://src/render/debug_overlay.gd:190)
+       [1] _draw (res://src/render/debug_overlay.gd:160)
+SCRIPT ERROR: Invalid call. Nonexistent function 'center_of_massworld' in base 'RefCounted (pworld.gd)'.
+   at: _draw_stats (res://src/render/debug_overlay.gd:190)
+   GDScript backtrace (most recent call first):
+       [0] _draw_stats (res://src/render/debug_overlay.gd:190)
+       [1] _draw (res://src/render/debug_overlay.gd:160)
+SCRIPT ERROR: Invalid call. Nonexistent function 'center_of_massworld' in base 'RefCounted (pworld.gd)'.
+   at: _draw_stats (res://src/render/debug_overlay.gd:190)
+   GDScript backtrace (most recent call first):
+       [0] _draw_stats (res://src/render/debug_overlay.gd:190)
+       [1] _draw (res://src/render/debug_overlay.gd:160)
+SCRIPT ERROR: Invalid call. Nonexistent function 'center_of_massworld' in base 'RefCounted (pworld.gd)'.
+   at: _draw_stats (res://src/render/debug_overlay.gd:190)
+   GDScript backtrace (most recent call first):
+       [0] _draw_stats (res://src/render/debug_overlay.gd:190)
+       [1] _draw (res://src/render/debug_overlay.gd:160)
+SCRIPT ERROR: Invalid call. Nonexistent function 'center_of_massworld' in base 'RefCounted (pworld.gd)'.
+   at: _draw_stats (res://src/render/debug_overlay.gd:190)
+   GDScript backtrace (most recent call first):
+       [0] _draw_stats (res://src/render/debug_overlay.gd:190)
+       [1] _draw (res://src/render/debug_overlay.gd:160)
+SCRIPT ERROR: Invalid call. Nonexistent function 'center_of_massworld' in base 'RefCounted (pworld.gd)'.
+   at: _draw_stats (res://src/render/debug_overlay.gd:190)
+   GDScript backtrace (most recent call first):
+       [0] _draw_stats (res://src/render/debug_overlay.gd:190)
+       [1] _draw (res://src/render/debug_overlay.gd:160)
+SCRIPT ERROR: Invalid call. Nonexistent function 'center_of_massworld' in base 'RefCounted (pworld.gd)'.
+   at: _draw_stats (res://src/render/debug_overlay.gd:190)
+   GDScript backtrace (most recent call first):
+       [0] _draw_stats (res://src/render/debug_overlay.gd:190)
+       [1] _draw (res://src/render/debug_overlay.gd:160)
+SCRIPT ERROR: Invalid call. Nonexistent function 'center_of_massworld' in base 'RefCounted (pworld.gd)'.
+   at: _draw_stats (res://src/render/debug_overlay.gd:190)
+   GDScript backtrace (most recent call first):
+       [0] _draw_stats (res://src/render/debug_overlay.gd:190)
+       [1] _draw (res://src/render/debug_overlay.gd:160)
+SCRIPT ERROR: Invalid call. Nonexistent function 'center_of_massworld' in base 'RefCounted (pworld.gd)'.
+   at: _draw_stats (res://src/render/debug_overlay.gd:190)
+   GDScript backtrace (most recent call first):
+       [0] _draw_stats (res://src/render/debug_overlay.gd:190)
+       [1] _draw (res://src/render/debug_overlay.gd:160)
+SCRIPT ERROR: Invalid call. Nonexistent function 'center_of_massworld' in base 'RefCounted (pworld.gd)'.
+   at: _draw_stats (res://src/render/debug_overlay.gd:190)
+   GDScript backtrace (most recent call first):
+       [0] _draw_stats (res://src/render/debug_overlay.gd:190)
+       [1] _draw (res://src/render/debug_overlay.gd:160)
+SCRIPT ERROR: Invalid call. Nonexistent function 'center_of_massworld' in base 'RefCounted (pworld.gd)'.
+   at: _draw_stats (res://src/render/debug_overlay.gd:190)
+   GDScript backtrace (most recent call first):
+       [0] _draw_stats (res://src/render/debug_overlay.gd:190)
+       [1] _draw (res://src/render/debug_overlay.gd:160)
+SCRIPT ERROR: Invalid call. Nonexistent function 'center_of_massworld' in base 'RefCounted (pworld.gd)'.
+   at: _draw_stats (res://src/render/debug_overlay.gd:190)
+   GDScript backtrace (most recent call first):
+       [0] _draw_stats (res://src/render/debug_overlay.gd:190)
+       [1] _draw (res://src/render/debug_overlay.gd:160)
+SCRIPT ERROR: Invalid call. Nonexistent function 'center_of_massworld' in base 'RefCounted (pworld.gd)'.
+   at: _draw_stats (res://src/render/debug_overlay.gd:190)
+   GDScript backtrace (most recent call first):
+       [0] _draw_stats (res://src/render/debug_overlay.gd:190)
+       [1] _draw (res://src/render/debug_overlay.gd:160)

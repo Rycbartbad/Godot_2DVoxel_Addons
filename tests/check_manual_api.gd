@@ -60,7 +60,10 @@ func _initialize() -> void:
 		"fill_rect", "count_by_material", "dirty_chunks", "has_dirty", "clear_dirty",
 		"mark_dirty", "mark_dirty_key", "flood", "neighbors"])
 	# component_map 在 ShapeOps 上（PixelShape 不能 preload Destruction，会成环）
-	var so = preload("res://addons/pixel_destruction/core/shape_ops.gd").new()
+	# ⚠️ 用 src/ 而不是 addons/ 路径：addon 目录被 .gdignore 忽略了
+	#    （它是 src/ 的拷贝，同时存在会撞 UID 和 class_name）。
+	#    addon 自身的引用可解析性由 tools/check_addon.py 做文本校验。
+	var so = preload("res://src/core/shape_ops.gd").new()
 	if not so.has_method("component_map"):
 		_bad.append("ShapeOps.component_map")
 	_check_prop("PixelShape", s, ["chunks"])

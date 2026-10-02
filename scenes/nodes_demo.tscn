@@ -1,0 +1,65 @@
+[gd_scene load_steps=5 format=3]
+
+[ext_resource type="Script" path="res://src/nodes/pixel_world.gd" id="1_world"]
+[ext_resource type="Script" path="res://src/nodes/pixel_body_2d.gd" id="2_body"]
+[ext_resource type="Script" path="res://src/render/debug_overlay.gd" id="3_overlay"]
+[ext_resource type="Script" path="res://src/demo/nodes_demo.gd" id="4_cam"]
+
+; 用场景节点摆出来的物理关卡 —— 打开这个场景就能在编辑器里看到像素和碰撞形状。
+; 每个 PixelBody2D 就是一个刚体：在 Inspector 里改 rect_size / material_id / is_static。
+; 运行时的热循环只碰 RefCounted，不碰这些 Node（见 tests/bench_nodes.gd 的实测）。
+[node name="NodesDemo" type="Node2D"]
+script = ExtResource("4_cam")
+
+[node name="PixelWorld" type="Node2D" parent="."]
+script = ExtResource("1_world")
+gravity = Vector2(0, 600)
+
+; 地面：静态，很宽
+[node name="Ground" type="Node2D" parent="PixelWorld"]
+script = ExtResource("2_body")
+position = Vector2(-400, 200)
+rect_size = Vector2i(800, 40)
+material_id = 1
+is_static = true
+
+; 一摞箱子：材料 2（木头，密度 0.6）
+[node name="Box1" type="Node2D" parent="PixelWorld"]
+script = ExtResource("2_body")
+position = Vector2(-120, 180)
+rect_size = Vector2i(16, 16)
+material_id = 2
+
+[node name="Box2" type="Node2D" parent="PixelWorld"]
+script = ExtResource("2_body")
+position = Vector2(-120, 164)
+rect_size = Vector2i(16, 16)
+material_id = 2
+
+[node name="Box3" type="Node2D" parent="PixelWorld"]
+script = ExtResource("2_body")
+position = Vector2(-120, 148)
+rect_size = Vector2i(16, 16)
+material_id = 2
+
+; 铁球：材料 3（密度 7.8），给一个初速度
+[node name="Ball" type="Node2D" parent="PixelWorld"]
+script = ExtResource("2_body")
+position = Vector2(-300, 100)
+source = 1
+radius = 12.0
+material_id = 3
+initial_velocity = Vector2(180, 0)
+
+; 砖墙：材料 4，可以被撞穿
+[node name="Wall" type="Node2D" parent="PixelWorld"]
+script = ExtResource("2_body")
+position = Vector2(120, 120)
+rect_size = Vector2i(24, 80)
+material_id = 4
+is_static = true
+
+[node name="DebugOverlay" type="Node2D" parent="PixelWorld"]
+script = ExtResource("3_overlay")
+show_velocity = true
+show_angular = true

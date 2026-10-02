@@ -1,0 +1,28 @@
+对接 Godot 场景编辑器：PixelBody2D / PixelWorld 节点层
+
+让物理引擎可以用场景节点摆关卡，而不是每步都靠程序生成。
+
+新增节点层：
+- PixelBody2D：可放置的刚体节点。形状来源 RECT/CIRCLE/TEXTURE（从 PNG 取 alpha 当实心，
+  这是「像素画即碰撞体」的推荐工作流）。材质、静态、重力缩放、初速度、可否休眠都在 Inspector 里设。
+- PixelWorld：把子节点烘焙成刚体并驱动。材质颜色表与密度表都从这里一处导出。
+
+性能：节点只是编辑期描述，_ready 时烘焙成普通 RefCounted PBody，之后热循环一个 Node 都不碰
+（Godot 自己的套路：CollisionShape2D -> RID、MultiMeshInstance2D -> 一个 MultiMesh）。
+实测 tests/bench_nodes.gd，同样 500 刚体：
+  代码构建 每步 7.360 ms | 场景节点构建 每步 7.512 ms（差 2.1%，噪声范围）
+  一次性烘焙 76.8 ms（0.15 ms/刚体，只在 _ready 发生一次）
+所以答案是不影响性能。
+
+顺带解决了一个反复出现的根因：addons/pixel_destruction/ 是 src/ 的拷贝、两者在同一棵
+Godot 项目树里，会同时撞上
+  · UID duplicate detected
+  · Class hides a global script class（class_name 是全局的，两份同名声明直接解析失败）
+构建脚本现在会生成 .gdignore 让 Godot 整个忽略该目录。
+注意：加了 .gdignore 之后必须清掉 .godot/ 再跑一次导入 —— 否则旧缓存还记得那个目录
+（和之前重复 UID 那次是同一个教训：删除类修复要连状态一起清）。
+
+新增 scenes/nodes_demo.tscn：全部由场景节点摆出来的关卡，打开就能在编辑器里看到像素、
+碰撞矩形、接触点、速度矢量。
+
+全量 217 项断言通过。

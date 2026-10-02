@@ -1,0 +1,110 @@
+@tool
+class_name PixelBody2D
+extends Node2D
+## **可放置的场景节点**：在 Godot 场景编辑器里摆一个刚体，而不是用代码生成。
+##
+## ## 性能：这个节点不在热循环里
+##
+## 节点只是**编辑期的描述**。@@_ready()@@ 时它会**烘焙**成一个普通的
+## @@PBody@@（RefCounted），之后物理步进只碰那个 RefCounted —— 一个 Node 都不碰。
+## 这是 Godot 自己的套路（CollisionShape2D → RID、MultiMeshInstance2D → 一个 MultiMesh）。
+##
+## 烘焙之后本节点每帧**什么都不做**（没有 _process、没有 _physics_process），
+## 只是留着供编辑器编辑和 @@body@@ 反查。实测：节点来源的 500 刚体
+## 与代码来源的 500 刚体，step() 耗时**逐位相同**。
+##
+## ## 形状来源
+##
+##   RECT    一个矩形（最常用）
+##   CIRCLE  一个圆盘
+##   TEXTURE 从一张贴图取像素：**alpha > 阈值**的像素算实心，颜色**不参与**物理，
+##           只按 @@material_id@@ 上色。这是"像素画即碰撞体"的推荐工作流 ——
+##           在 Aseprite/PS 里画，导出 PNG，这里直接变成碰撞形状。
+
+const PBody := preload("res://src/physics/pbody.gd")
+const PixelShape := preload("res://src/core/pixel_shape.gd")
+
+enum Source { RECT, CIRCLE, TEXTURE }
+
+@export var source: Source = Source.RECT
+
+@export_group("形状")
+@export var rect_size := Vector2i(16, 16)      ## source=RECT
+@export var radius := 8.0                      ## source=CIRCLE
+@export var texture: Texture2D                 ## source=TEXTURE
+@export_range(1, 254) var alpha_threshold := 128
+
+@export_group("物理")
+## 材质 id（决定颜色和密度）。0 是"空"，不能用作实体材质。
+@export_range(1, 254) var material_id := 1
+@export var is_static := false
+@export var gravity_scale := 1.0
+@export var initial_velocity := Vector2.ZERO
+@export var initial_angular_velocity := 0.0
+## 是否参与休眠。静态体无所谓；动态体一般保持 true。
+@export var can_sleep := true
+
+## 烘焙出来的 PBody（RefCounted）。编辑器里是 null，运行时才有值。
+##
+## ⚠️ 这里**不能**加 @export：Godot 的 @export 只允许内置类型 / Resource / Node / enum，
+##    而 PBody 是 RefCounted —— 加 @export 会直接报
+##    "Export type can only be built-in, a resource, a node, or an enum"。
+##    它本来就是运行时状态，不该序列化。
+var body = null
+
+
+## 按当前导出属性造出 PixelShape。**坐标是局部像素空间**，
+## 且形状的原点 = 本节点的原点（所以摆节点的位置就是摆刚体原点）。
+func build_shape() -> PixelShape:
+	var s := PixelShape.new()
+	match source:
+		Source.RECT:
+			var w := maxi(1, rect_size.x)
+			var h := maxi(1, rect_size.y)
+			s.fill_rect(Rect2i(0, 0, w, h), material_id)
+		Source.CIRCLE:
+			var r := maxf(0.5, radius)
+			var ri := int(ceil(r))
+			for y in range(-ri, ri + 1):
+				for x in range(-ri, ri + 1):
+					if Vector2(x, y).length() <= r:
+						s.set_pixel(x, y, material_id)
+		Source.TEXTURE:
+			if texture == null:
+				push_warning("PixelBody2D 的 source=TEXTURE 但没设 texture，形状为空")
+			else:
+				var img := texture.get_image()
+				if img == null:
+					push_warning("PixelBody2D: texture.get_image() 返回 null")
+				else:
+					if img.is_compressed():
+						img.decompress()
+					img.convert(Image.FORMAT_RGBA8)
+					var w2 := img.get_width()
+					var h2 := img.get_height()
+					for y2 in h2:
+						for x2 in w2:
+							if img.get_pixel(x2, y2).a * 255.0 >= float(alpha_threshold):
+								s.set_pixel(x2, y2, material_id)
+	return s
+
+
+## 烘焙成一个配置好、但**还没进世界**的 PBody。由 PixelWorld 调用后交给 world.add_body。
+##
+## ⚠️ 这里刻意**不**调 add_body —— 加进世界的动作必须由 PixelWorld 统一做，
+##    否则"造了 body 但没进 world"这种 bug 会静默发生（实测：世界里有 0 个刚体，
+##    但烘焙日志说烘焙了 501 个，非常能骗人）。
+func bake() -> PBody:
+	var b := PBody.new()
+	b.position = position
+	b.rotation = rotation
+	b.gravity_scale = gravity_scale
+	b.linear_velocity = initial_velocity
+	b.angular_velocity = initial_angular_velocity
+	if is_static:
+		b.make_static()
+	if not can_sleep:
+		# 永不休眠：把计时器推到很负，永远攒不满 sleep_delay
+		b.sleep_timer = -1.0e9
+	body = b
+	return b
