@@ -25,6 +25,9 @@ const PWorld := preload("res://src/physics/pworld.gd")
 const PBody := preload("res://src/physics/pbody.gd")
 const PixelRenderer := preload("res://src/render/pixel_renderer.gd")
 const PixelBody2D := preload("res://src/nodes/pixel_body_2d.gd")
+# ⚠️ 用 preload 而不是依赖全局 class_name：addon 里也有同名脚本，
+#    靠 class_name 解析在某些缓存状态下会失败，preload 是确定的。
+const PixelMaterial := preload("res://src/nodes/pixel_material.gd")
 
 @export_group("物理")
 @export var gravity := Vector2(0, 600)
@@ -35,16 +38,24 @@ const PixelBody2D := preload("res://src/nodes/pixel_body_2d.gd")
 @export var use_native := true
 
 @export_group("材质")
-## 材质 id -> 颜色。下标就是材质 id，0 必须是透明。
-@export var palette: Array[Color] = [
+## 全部材质。**在这里加一条就是加一种材质** —— 颜色、密度、强度一次设好。
+##
+## ⚠️ 以前颜色/密度/强度是三张散落的表（还分居两个对象），改一处忘另一处是静默 bug。
+##    现在它们是同一份数据的三个视图，由 rebuild() 一次性播到物理层和渲染层。
+##
+## 没列进来的 id 会退回下面的 fallback 表。
+@export var materials: Array[PixelMaterial] = []
+
+## 兜底颜色表（下标即材质 id，0 必须是透明）。只在 materials 里没覆盖到该 id 时用。
+@export var palette_fallback: Array[Color] = [
 	Color(0, 0, 0, 0),
 	Color(0.62, 0.60, 0.56),
 	Color(0.72, 0.52, 0.32),
 	Color(0.55, 0.58, 0.66),
 	Color(0.80, 0.32, 0.30),
 ]
-## 材质 id -> 密度（下标即 id，缺省 1.0）
-@export var densities: Array[float] = [0.0, 2.5, 0.6, 7.8, 2.0]
+## 兜底密度表（下标即 id，缺省 1.0）
+@export var densities_fallback: Array[float] = [0.0, 2.5, 0.6, 7.8, 2.0]
 
 @export_group("运行")
 @export var auto_step := true
@@ -82,24 +93,49 @@ func rebuild() -> void:
 	world.use_native_broadphase = use_native
 	world.use_native_collide = use_native
 	world.use_native_solve = use_native
-	# 颜色表给渲染器、密度表给物理 —— 两张表都从本节点这一处导出，不会不同步。
-	# （这是门面层存在的理由之一：以前这两张表分居两处，改一处忘另一处是静默 bug。）
+	# ---- 把材质播到物理层与渲染层 ----
+	# ⚠️ 这是本节点存在的核心理由之一：材质是**一份数据**，
+	#    颜色给渲染、密度给物理、强度给破坏判据 —— 三处必须同源。
+	var pal := palette_fallback.duplicate()
+	var dens := PackedFloat32Array()
+	dens.resize(densities_fallback.size())
+	for i in densities_fallback.size():
+		dens[i] = densities_fallback[i]
+	for m in materials:
+		if m == null:
+			continue
+		var mid := clampi(m.id, 1, 254)
+		while pal.size() <= mid:
+			pal.append(Color(1, 1, 1))
+		pal[mid] = m.color
+		while dens.size() <= mid:
+			dens.resize(mid + 1)
+		dens[mid] = m.density
+		if m.has_strength():
+			world.set_material_strength(mid, m.compress_strength, m.resolved_shear())
+	# 密度表直接写进 world（与 material_density 同构）
+	for i in dens.size():
+		world.set_material_density(i, dens[i])
 	if renderer == null:
 		renderer = PixelRenderer.new()
 		renderer.name = "PixelRenderer"
 		add_child(renderer)
-	renderer.palette = palette.duplicate()
-	var dens := Callable(self, "_density_of")
+	renderer.palette = pal
+	var dens_call := Callable(self, "_density_of")
 	var n := 0
 	for c in get_children():
-		if c is PixelBody2D:
-			var node := c as PixelBody2D
-			var shape := node.build_shape()
-			if shape.is_empty():
-				continue
-			# 造 body（配置位置/速度）与"加进世界"是两步，这里一起做完
-			world.add_body(node.bake(), [shape], dens)
-			n += 1
+		if not (c is PixelBody2D):
+			continue
+		var node := c as PixelBody2D
+		# ⚠️ 用 collect_shapes() 而不是 build_shape()：
+		#    一个刚体可以挂**多个形状子节点**（就像多个 CollisionShape2D），
+		#    也可以一个都不挂、退回自身的内置形状。
+		var shapes := node.collect_shapes()
+		if shapes.is_empty():
+			continue
+		# 造 body（配置位置/速度）与「加进世界」是两步，这里一起做完
+		world.add_body(node.bake(), shapes, dens_call)
+		n += 1
 	if auto_render:
 		# ⚠️ 必须先清空再重建：rebuild 会造出**新的 body.id**，
 		#    而渲染器按 id 索引贴图 —— 不清的话旧贴图会留在原地变成幽灵
@@ -112,8 +148,8 @@ func rebuild() -> void:
 
 
 func _density_of(material: int) -> float:
-	if material >= 0 and material < densities.size():
-		return densities[material]
+	if material >= 0 and material < densities_fallback.size():
+		return densities_fallback[material]
 	return 1.0
 
 

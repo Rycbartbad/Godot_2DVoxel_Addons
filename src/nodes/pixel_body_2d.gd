@@ -241,6 +241,28 @@ func build_shape() -> PixelShape:
 	return s
 
 
+## 收集全部形状：**优先用形状子节点**，没有子节点时退回自身的内置形状。
+##
+## ⚠️ 这里体现的是「接口」而不是「类型」：只要子节点有 build_shape() 就算数，
+##    不检查它是不是 PixelShape2D。所以任何继承 PixelShape2D 的自定义形状节点、
+##    甚至一个碰巧实现了同名方法的其他节点，都能直接挂上来用。
+##
+## 这样 PixelBody2D 不需要知道"有几种形状" —— 加一种新形状不用改它一行代码。
+func collect_shapes() -> Array:
+	var out: Array = []
+	for c in get_children():
+		if c.has_method("build_shape"):
+			var sh = c.build_shape()
+			if sh != null and not (sh as PixelShape).is_empty():
+				out.append(sh)
+	if out.is_empty():
+		# 向后兼容：没挂形状子节点时用自身的内置形状
+		var own := build_shape()
+		if not own.is_empty():
+			out.append(own)
+	return out
+
+
 ## 烘焙成一个配置好、但**还没进世界**的 PBody。由 PixelWorld 调用后交给 world.add_body。
 ##
 ## ⚠️ 这里刻意**不**调 add_body —— 加进世界的动作必须由 PixelWorld 统一做，

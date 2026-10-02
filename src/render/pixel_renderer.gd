@@ -38,6 +38,20 @@ var palette: Array = [
 var _nodes := {}          # body.id -> Sprite2D
 var _textures := {}       # body.id -> ImageTexture
 var _bounds := {}         # body.id -> Rect2i
+## body.id -> true 表示"像素内容变了，下次 sync 要重建贴图"。
+## 位置/旋转变化不在此列 —— 那些只改 node.transform，不需要重做贴图。
+var _dirty := {}
+
+
+## 显式标记某刚体的像素内容变了（在刚体内部挖洞、改材质时调）。
+## 外接发生变化的情况会自动标记，不用调这个。
+func mark_dirty(body_id: int) -> void:
+	_dirty[body_id] = true
+
+
+func mark_all_dirty() -> void:
+	for id in _nodes.keys():
+		_dirty[id] = true
 
 func _ready() -> void:
 	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
@@ -70,6 +84,7 @@ func forget(body_id: int) -> void:
 	_nodes.erase(body_id)
 	_textures.erase(body_id)
 	_bounds.erase(body_id)
+	_dirty.erase(body_id)
 
 ## 改一种材质的颜色（会自动扩容；id 0 忽略）。
 func set_material_color(material: int, color: Color) -> void:
@@ -105,7 +120,25 @@ func sync(body) -> void:
 	if _bounds[body.id] != aabb:
 		_bounds[body.id] = aabb
 		_textures.erase(body.id)
-	node.texture = _build_texture(body, aabb)
+		_dirty[body.id] = true
+	# 🔥 只在**内容真的变了**时才重建贴图。
+	#
+	# ⚠️⚠️ 这里以前是无条件 node.texture = _build_texture(body, aabb)，
+	#    而 _build_texture 要逐像素重填 Image 再 tex.update() ——
+	#    Ground 是 800x40 = 32000 像素，**每帧**跑一遍，掉帧就是这么来的。
+	#    位置/旋转变化完全不需要重建贴图（那只是改 node.transform）。
+	#
+	#    AABB 变化是"形状变了"的可靠信号（破坏一定会改变外接，
+	#    除非恰好在内部挖洞 —— 那种情况调用方要显式 mark_dirty()）。
+	if _dirty.get(body.id, true):
+		node.texture = _build_texture(body, aabb)
+		_dirty.erase(body.id)
+	else:
+		var t: ImageTexture = _textures.get(body.id)
+		if t != null:
+			node.texture = t
+		else:
+			node.texture = _build_texture(body, aabb)
 	node.offset = Vector2(aabb.position)
 	# 贴图是 1 纹素 = 1 体素；靠节点缩放把每个体素放大成"大块像素"。
 	# 最近邻采样（TEXTURE_FILTER_NEAREST）保证放大后依然是硬边方块，不会糊。
