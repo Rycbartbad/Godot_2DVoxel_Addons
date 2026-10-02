@@ -455,6 +455,10 @@ func _substep(dt: float) -> void:
 	_collect_contacts()      # 求解**之前**采集：带的是"撞击前的接近速度"
 	_wake_pass()
 	_solve(dt)
+	# 求解**之后**把真实冲量回填到接触事件上（见 _fill_contact_impulses 的说明）。
+	# 放在这里而不是 _collect_contacts 里，是因为冲量要等求解器算完才有 ——
+	# 采集时带的是"撞击前的接近速度"，两者是同一个事件的两面。
+	_fill_contact_impulses()
 	_integrate_transforms(dt)
 	for b in bodies:
 		if not b.is_static:
@@ -1153,16 +1157,25 @@ class Contact:
 	##    所以这里按"有效质量 × 接近速度"估：
 	##        m_eff = 1 / (1/m_a + 1/m_b)      （静态体视作无穷大质量）
 	##        J ≈ m_eff · |approach|
-	##    忽略了转动项（力的作用线不通过质心时真值会偏小），所以对**偏心撞击**
-	##    会高估。做破坏判据够用 —— 破坏看的是量级不是精确值。
-	##
-	##    要精确值就得让 C++ 求解器把冲量写进输出缓冲，那是另一件事。
+	##    ⚠️ 这是**近似值，而且会在求解后被真值覆盖** —— 见 _fill_contact_impulses()。
+	##    求解器算了精确的 normal_impulse，这里先按近似填上，只是为了让
+	##    "求解器没跑到这一对"（比如它被 sleep 掉了、或没有对应流形）时仍有可用值。
+	##    读取方不需要关心这个区别，读到的要么是真值要么是合理的近似。
 	var impulse := 0.0
 
 	## 接触的**切向宽度**（像素）。用两刚体世界 AABB 在切向上的重叠近似。
 	##
 	## 用途：算应力 σ = impulse / contact_width。矛尖宽度小 → 应力大 → 能破盾。
 	var contact_width := 0.0
+
+	## **切向（摩擦）冲量**。求解之后的真值。
+	##
+	## 用途：算"磨"这种破坏 —— 盾被慢慢削薄不是被撞穿，是摩擦做功。
+	## 与 impulse 一起构成这一对刚体本子步的总冲量。
+	var tangent_impulse := 0.0
+
+	## 内部：这一对刚体的键，用来把求解器的冲量对回到接触事件上
+	var _pair_key := 0
 
 	## **剪切比**：0 = 纯压缩（法向穿过材料厚度方向），1 = 纯剪切。
 	##
@@ -1214,6 +1227,62 @@ static func _project_span(box: Rect2, t: Vector2) -> Vector2:
 	var h := absf(t.x) * e.x + absf(t.y) * e.y
 	var m := c.dot(t)
 	return Vector2(m - h, m + h)
+
+
+## 把求解器算出的**真实冲量**回填到本子步的接触事件上。
+##
+## ## 为什么要这一步
+##
+## 冲量是求解器的产物：它在迭代中累积每个接触点的 normal_impulse / tangent_impulse。
+## 而接触事件是在**求解之前**采集的（那时才有"撞击前的接近速度"），
+## 所以采集时冲量还不存在 —— 必须在求解之后补一次。
+##
+## ## 为什么不用近似了
+##
+## 之前 Contact.impulse 用的是 m_eff × approach 的**近似**，在偏心撞击下会高估
+## （忽略了转动项）。而破坏判据最关心的恰恰是偏心撞击（矛尖戳盾面边缘）。
+## 求解器本来就算了精确值，只是没往外递 —— 这里就是那个"递"。
+##
+## 代价：每个子步遍历一次流形的点，O(点数)。实测对 step 时间无可测影响。
+## 开关：只为基准测试对比用（关掉就是加这个功能之前的行为）
+var fill_contact_impulses_enabled := true
+
+
+func _fill_contact_impulses() -> void:
+	if not fill_contact_impulses_enabled or contacts.is_empty():
+		return
+	# (a,b) 对 -> [法向冲量和, 切向冲量和]
+	var acc := {}
+	for m: Solver.Manifold in manifolds:
+		if m.points.is_empty():
+			continue
+		var key := Solver.make_key(m.a.id, 0, m.b.id, 0)
+		var n := 0.0
+		var t := 0.0
+		for p: Solver.Point in m.points:
+			n += p.normal_impulse
+			t += p.tangent_impulse
+		var e: Array = acc.get(key, [0.0, 0.0])
+		e[0] += n
+		e[1] += t
+		acc[key] = e
+	# 同一个刚体对可能有多个接触点（一个流形两个点 -> 两个 Contact），
+	# 把这一对的总冲量**平均**分给各点：求和之后仍是真实总冲量，
+	# 单点读到的也是同量级的值。
+	var counts := {}
+	for c: Contact in contacts:
+		var ka := c.a.id
+		var kb := c.b.id
+		var key := Solver.make_key(ka, 0, kb, 0) if ka < kb else Solver.make_key(kb, 0, ka, 0)
+		c._pair_key = key
+		counts[key] = counts.get(key, 0) + 1
+	for c: Contact in contacts:
+		var e: Array = acc.get(c._pair_key, [])
+		if e.is_empty():
+			continue
+		var cn := float(counts[c._pair_key])
+		c.impulse = e[0] / cn
+		c.tangent_impulse = e[1] / cn
 
 
 ## 算出这一对接触的应力相关量：冲量、接触宽度、剪切比。
