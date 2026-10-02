@@ -1,0 +1,23 @@
+# 仓库里一律 LF，避免 Windows 换行符把 diff 搅乱
+* text=auto eol=lf
+
+# 二进制（不要做任何换行转换）
+*.dll binary
+*.so binary
+*.dylib binary
+*.exe binary
+*.bin binary
+*.png binary
+*.vox binary
+*.ttf binary
+*.ogg binary
+*.wav binary
+
+# Godot 文本资源
+*.gd text eol=lf
+*.tscn text eol=lf
+*.tres text eol=lf
+*.godot text eol=lf
+*.cfg text eol=lf
+*.gdextension text eol=lf
+*.glsl text eol=lf

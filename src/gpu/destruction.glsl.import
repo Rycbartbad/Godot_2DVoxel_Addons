@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://c1oaxugk4ypd4"
+path="res://.godot/imported/destruction.glsl-fc5dab8b64ac95c74f6b1a8c6cefc739.res"
+
+[deps]
+
+source_file="res://src/gpu/destruction.glsl"
+dest_files=["res://.godot/imported/destruction.glsl-fc5dab8b64ac95c74f6b1a8c6cefc739.res"]
+
+[params]
+
