@@ -1,0 +1,11 @@
+[gd_resource type="Resource" script_class="PixelMaterial" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/nodes/pixel_material.gd" id="1_mat"]
+
+[resource]
+script = ExtResource("1_mat")
+display_name = "砖"
+id = 4
+color = Color(0.8, 0.32, 0.3, 1)
+density = 2.0
+compress_strength = 20.0

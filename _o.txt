@@ -1,0 +1,9 @@
+[FastPhys] 入口被调用，接口全部拿到
+Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org
+Vulkan 1.4.351 - Forward+ - Using Device #0: NVIDIA - NVIDIA GeForce RTX 5060 Laptop GPU
+
+[FastPhys] 类已注册
+[FastPhys] 已注册方法 collide_batch（ptrcall）
+[FastPhys] 已注册方法 broadphase
+[FastPhys] 已注册方法 solve
+[FastPhys] 已注册方法 clear_warm

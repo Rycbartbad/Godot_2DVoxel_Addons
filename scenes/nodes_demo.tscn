@@ -1,38 +1,44 @@
-[gd_scene format=3 uid="uid://baw7ln87c7kj6"]
+[gd_scene load_steps=9 format=3]
 
-[ext_resource type="Script" uid="uid://c2ue2xs2ynpvn" path="res://src/nodes/pixel_world.gd" id="1_world"]
-[ext_resource type="Script" uid="uid://b81cn0blc3bc5" path="res://src/nodes/pixel_body_2d.gd" id="2_body"]
-[ext_resource type="Script" uid="uid://bo2s2jnttpp4b" path="res://src/render/debug_overlay.gd" id="3_overlay"]
-[ext_resource type="Script" uid="uid://dytpf6bddtu68" path="res://src/demo/nodes_demo.gd" id="4_cam"]
+[ext_resource type="Script" path="res://src/nodes/pixel_world.gd" id="1_world"]
+[ext_resource type="Script" path="res://src/nodes/pixel_body_2d.gd" id="2_body"]
+[ext_resource type="Script" path="res://src/render/debug_overlay.gd" id="3_overlay"]
+[ext_resource type="Script" path="res://src/demo/nodes_demo.gd" id="4_cam"]
+[ext_resource type="Resource" path="res://materials/stone.tres" id="5_stone"]
+[ext_resource type="Resource" path="res://materials/wood.tres" id="6_wood"]
+[ext_resource type="Resource" path="res://materials/metal.tres" id="7_metal"]
+[ext_resource type="Resource" path="res://materials/brick.tres" id="8_brick"]
 
-[node name="NodesDemo" type="Node2D" unique_id=161308875]
+[node name="NodesDemo" type="Node2D"]
 script = ExtResource("4_cam")
 
-[node name="PixelWorld" type="Node2D" parent="." unique_id=235545502]
+[node name="PixelWorld" type="Node2D" parent="."]
 script = ExtResource("1_world")
+materials = Array[Resource]([ExtResource("5_stone"), ExtResource("6_wood"), ExtResource("7_metal"), ExtResource("8_brick")])
 
-[node name="Ground" type="Node2D" parent="PixelWorld" unique_id=1119932227]
+[node name="Ground" type="Node2D" parent="PixelWorld"]
 position = Vector2(-400, 200)
 script = ExtResource("2_body")
 rect_size = Vector2i(800, 40)
+material_id = 1
 is_static = true
 
-[node name="Box1" type="Node2D" parent="PixelWorld" unique_id=823851333]
+[node name="Box1" type="Node2D" parent="PixelWorld"]
 position = Vector2(-120, 180)
 script = ExtResource("2_body")
 material_id = 2
 
-[node name="Box2" type="Node2D" parent="PixelWorld" unique_id=552707734]
+[node name="Box2" type="Node2D" parent="PixelWorld"]
 position = Vector2(-120, 164)
 script = ExtResource("2_body")
 material_id = 2
 
-[node name="Box3" type="Node2D" parent="PixelWorld" unique_id=2035103496]
+[node name="Box3" type="Node2D" parent="PixelWorld"]
 position = Vector2(-120, 148)
 script = ExtResource("2_body")
 material_id = 2
 
-[node name="Ball" type="Node2D" parent="PixelWorld" unique_id=1949670900]
+[node name="Ball" type="Node2D" parent="PixelWorld"]
 position = Vector2(-300, 100)
 script = ExtResource("2_body")
 source = 1
@@ -40,14 +46,14 @@ radius = 12.0
 material_id = 3
 initial_velocity = Vector2(180, 0)
 
-[node name="Wall" type="Node2D" parent="PixelWorld" unique_id=1570931956]
+[node name="Wall" type="Node2D" parent="PixelWorld"]
 position = Vector2(131, 162)
 script = ExtResource("2_body")
 rect_size = Vector2i(24, 80)
 material_id = 4
 is_static = true
 
-[node name="DebugOverlay" type="Node2D" parent="PixelWorld" unique_id=405576947]
+[node name="DebugOverlay" type="Node2D" parent="PixelWorld"]
 script = ExtResource("3_overlay")
 show_velocity = true
 show_angular = true

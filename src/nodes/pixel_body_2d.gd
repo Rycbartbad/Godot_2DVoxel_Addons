@@ -121,6 +121,11 @@ func _gizmo_aabb() -> Rect2i:
 func invalidate_gizmo() -> void:
 	_aabb_valid = false
 	queue_redraw()
+	# 形状变了，兄弟里的渲染节点也要重建贴图（它是子节点，位置由节点变换自动跟随，
+	# 只有**内容**要人来通知）
+	for c in get_children():
+		if c.has_method("rebuild") and c != self:
+			c.rebuild()
 
 @export var source: Source = Source.RECT:
 	set(v):

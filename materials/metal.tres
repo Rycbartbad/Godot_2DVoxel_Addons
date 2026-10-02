@@ -1,0 +1,11 @@
+[gd_resource type="Resource" script_class="PixelMaterial" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/nodes/pixel_material.gd" id="1_mat"]
+
+[resource]
+script = ExtResource("1_mat")
+display_name = "铁"
+id = 3
+color = Color(0.55, 0.58, 0.66, 1)
+density = 7.8
+compress_strength = 120.0

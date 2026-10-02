@@ -28,6 +28,7 @@ const PixelBody2D := preload("res://src/nodes/pixel_body_2d.gd")
 # ⚠️ 用 preload 而不是依赖全局 class_name：addon 里也有同名脚本，
 #    靠 class_name 解析在某些缓存状态下会失败，preload 是确定的。
 const PixelMaterial := preload("res://src/nodes/pixel_material.gd")
+const PixelSprite2D := preload("res://src/nodes/pixel_sprite_2d.gd")
 
 @export_group("物理")
 @export var gravity := Vector2(0, 600)
@@ -70,6 +71,8 @@ var world = null
 var renderer: PixelRenderer = null
 var _accum := 0.0
 var _rebuild_queued := false
+## 与 world.bodies 一一对应的节点（用来判断谁自带精灵）
+var _body_nodes: Array = []
 
 
 func _ready() -> void:
@@ -122,6 +125,7 @@ func rebuild() -> void:
 		add_child(renderer)
 	renderer.palette = pal
 	var dens_call := Callable(self, "_density_of")
+	_body_nodes.clear()
 	var n := 0
 	for c in get_children():
 		if not (c is PixelBody2D):
@@ -135,16 +139,38 @@ func rebuild() -> void:
 			continue
 		# 造 body（配置位置/速度）与「加进世界」是两步，这里一起做完
 		world.add_body(node.bake(), shapes, dens_call)
+		_body_nodes.append(node)
 		n += 1
 	if auto_render:
 		# ⚠️ 必须先清空再重建：rebuild 会造出**新的 body.id**，
 		#    而渲染器按 id 索引贴图 —— 不清的话旧贴图会留在原地变成幽灵
 		#    （表现是"拖动之后原地还有一个不动的影子"）。
 		renderer.prune({})
-		renderer.sync_all(world.bodies)
+		# ⚠️ 自带 PixelSprite2D 的刚体不进内部渲染器 —— 否则会画两遍
+		#    （两份精灵重叠，半透明时尤其明显）。
+		var internal: Array = []
+		for i in world.bodies.size():
+			var b = world.bodies[i]
+			if i < _body_nodes.size() and _body_nodes[i] != null 					and has_own_sprite(_body_nodes[i]):
+				continue
+			internal.append(b)
+		renderer.sync_all(internal)
 	_sync_overlays()
 	if log_bake:
 		print("[PixelWorld] 烘焙 %d 个刚体（场景节点 -> RefCounted，之后热循环不碰 Node）" % n)
+
+
+## 供 PixelSprite2D 取用的调色板（保证与物理层同源）。
+func palette_for_render() -> Array:
+	return renderer.palette if renderer != null else palette_fallback
+
+
+## 这个刚体是否自带 PixelSprite2D —— 自带的话就不进内部渲染器，避免画两遍。
+static func has_own_sprite(node: Node) -> bool:
+	for c in node.get_children():
+		if c is PixelSprite2D:
+			return true
+	return false
 
 
 func _density_of(material: int) -> float:
