@@ -9,18 +9,7 @@
 [ext_resource type="Resource" path="res://materials/wood.tres" id="6_wood"]
 [ext_resource type="Resource" path="res://materials/metal.tres" id="7_metal"]
 [ext_resource type="Resource" path="res://materials/brick.tres" id="8_brick"]
-[ext_resource type="Script" path="res://src/nodes/pixel_shape_2d.gd" id="9_shape"]
-
-; ⚠️ 形状一律用 PixelShape2D **子节点**，不再用 PixelBody2D 的内置 rect_size。
-;
-; 两个理由：
-;   1. 内置形状是「没挂形状子节点时的兜底」，那条路径容易漏（我就漏过缓存），
-;      让它不再是主力用法，就少一个会静默退化的分支。
-;   2. 形状子节点能在编辑器里**单独选中、拖动、改属性**，还能一个刚体挂多个。
-;      README 里写的「形状是子节点」也终于是真的了。
-;
-; 节点位置一律是 Vector2.ZERO —— 形状的原点（局部像素 (0,0)）就等于刚体原点，
-; 想让形状相对刚体偏移，改形状子节点的 position（必须是整数像素，否则像素格会错位）。
+[ext_resource type="Script" uid="uid://wuwdclig4gq6" path="res://src/nodes/pixel_shape_2d.gd" id="9_shape"]
 
 [node name="NodesDemo" type="Node2D" unique_id=1214596658]
 script = ExtResource("4_cam")
@@ -35,54 +24,56 @@ script = ExtResource("2_body")
 is_static = true
 
 [node name="Shape" type="Node2D" parent="PixelWorld/Ground" unique_id=1073741825]
+visible = false
 script = ExtResource("9_shape")
 rect_size = Vector2i(800, 40)
-material_id = 1
 
 [node name="Box1" type="Node2D" parent="PixelWorld" unique_id=1811991561]
 position = Vector2(-120, 180)
 script = ExtResource("2_body")
 
 [node name="Shape" type="Node2D" parent="PixelWorld/Box1" unique_id=1073741826]
+visible = false
 script = ExtResource("9_shape")
-rect_size = Vector2i(16, 16)
 material_id = 2
 
 [node name="Box2" type="Node2D" parent="PixelWorld" unique_id=301130582]
-position = Vector2(-144, 124)
+position = Vector2(-164, 165)
 script = ExtResource("2_body")
 
 [node name="Shape" type="Node2D" parent="PixelWorld/Box2" unique_id=1073741827]
+visible = false
 script = ExtResource("9_shape")
-rect_size = Vector2i(16, 16)
 material_id = 2
 
 [node name="Box3" type="Node2D" parent="PixelWorld" unique_id=1966708600]
-position = Vector2(-57, 78)
+position = Vector2(-79, 169)
 script = ExtResource("2_body")
 
 [node name="Shape" type="Node2D" parent="PixelWorld/Box3" unique_id=1073741828]
+visible = false
 script = ExtResource("9_shape")
-rect_size = Vector2i(16, 16)
 material_id = 2
 
 [node name="Ball" type="Node2D" parent="PixelWorld" unique_id=1123877619]
-position = Vector2(-300, 100)
+position = Vector2(-289, 123)
 script = ExtResource("2_body")
 initial_velocity = Vector2(180, 0)
 
 [node name="Shape" type="Node2D" parent="PixelWorld/Ball" unique_id=1073741829]
+visible = false
 script = ExtResource("9_shape")
 source = 1
 radius = 12.0
 material_id = 3
 
 [node name="Wall" type="Node2D" parent="PixelWorld" unique_id=112161035]
-position = Vector2(72, 21)
+position = Vector2(56, 109)
 script = ExtResource("2_body")
 is_static = true
 
 [node name="Shape" type="Node2D" parent="PixelWorld/Wall" unique_id=1073741830]
+visible = false
 script = ExtResource("9_shape")
 rect_size = Vector2i(24, 80)
 material_id = 4
