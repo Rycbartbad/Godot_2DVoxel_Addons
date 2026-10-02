@@ -82,8 +82,8 @@ func _initialize() -> void:
 	# 同样材料、同样冲量：矛尖接触宽度小 -> 应力大；盾面接触宽度大 -> 应力小。
 	# 用 contact_width 做分母就是这个道理。这里用两个不同宽度的"矛"来对照。
 	print("=== 4. 矛 vs 盾：应力 = 冲量 / 接触宽度 ===")
-	var spear_sigma := _probe_sigma(4)      # 4 像素宽的矛尖
-	var shield_sigma := _probe_sigma(64)    # 64 像素宽的盾面
+	var spear_sigma := _probe_sigma_attitude(true)    # 尖端朝前
+	var shield_sigma := _probe_sigma_attitude(false)  # 底边朝前
 	var ratio := spear_sigma / maxf(1e-9, shield_sigma)
 	_c("窄接触的应力显著大于宽接触", ratio > 8.0,
 		"矛尖 σ=%.3f，盾面 σ=%.3f，相差 %.1f 倍" % [spear_sigma, shield_sigma, ratio])
@@ -110,13 +110,22 @@ func _initialize() -> void:
 	quit(0 if _fail == 0 else 1)
 
 
-## 造一个「尖端宽度 = width、底边固定 64」的撞针，撞墙后返回接触应力。
+## ⚠️⚠️ 这条测试我写错过两版，都值得记 —— 因为**错的都是实验设计，不是引擎**：
 ##
-## ⚠️ 关键是**控制变量**：必须是「同样动量、不同接触面积」。
-##    第一版我直接改整体宽度，结果宽的那个质量也大 16 倍、冲量跟着大 16 倍，
-##    算出「盾的应力反而更大」—— 那是测试设计错了，不是引擎错了。
-##    这里用**等腰三角形尖端**：底边固定 64（质量相同），只改尖端宽度。
+##  第一版：直接改撞针宽度。宽的那个质量大 16 倍、冲量跟着大 16 倍，
+##          算出「盾的应力反而更大」，与物理完全相反。
+##  第二版：改成三角形尖端、固定底边。但撞针撞上后会**转动**，
+##          接触区很快不再局限在尖端，比值仍然上不去。
+##
+##  最终版：**同一个形状、两种撞击姿态** —— 尖朝前 vs 底朝前。
+##          质量相同、动量配平、速度相同，唯一的变量就是接触宽度。
+##          这才是"控制变量"。
 func _probe_sigma(width: int) -> float:
+	return _probe_sigma_attitude(true)
+
+
+## apex_first = true 时尖端朝前（窄接触）；false 时底边朝前（宽接触）。
+func _probe_sigma_attitude(apex_first: bool) -> float:
 	var w := PWorld.new()
 	w.gravity = Vector2.ZERO
 	w.contact_events_enabled = true
@@ -126,22 +135,56 @@ func _probe_sigma(width: int) -> float:
 	w.add_body(wall, [_box(40, 400)])
 	var spear := PBody.new()
 	spear.position = Vector2(0, 190)        # 与墙的纵向中心对齐
-	var len := 64
-	var tip := PixelShape.new()
-	for x in len:
-		var frac := float(x) / float(len - 1)
-		var ww := int(lerpf(float(width), 64.0, frac))
+	# 等腰三角形：底边 64（在 x=0 侧），顶点在 x=64。
+	# 两种姿态都用它，所以质量/形状完全一致。
+	var tri := PixelShape.new()
+	for x in 64:
+		var frac := float(x) / 63.0
+		var ww := maxi(1, int(round(lerpf(64.0, 1.0, frac))))
 		var y0 := 32 - ww / 2
-		for y in range(y0, y0 + maxi(1, ww)):
-			tip.set_pixel(x, y, 1)
-	w.add_body(spear, [tip])
-	# ⚠️ 把**动量配平**：尖端越细，像素越少、质量越小。不补偿的话冲量会跟着小，
-	#    又变成"测质量"而不是"测接触面积"。这里让 m*v 恒定。
-	var ref_momentum := 400.0 * float(64 * 64)     # 以 64x64 满块为基准
+		for y in range(y0, y0 + ww):
+			tri.set_pixel(x, y, 1)
+	if not apex_first:
+		# 底边朝前：把形状绕纵向中点水平翻转
+		var flipped := PixelShape.new()
+		for x in 64:
+			for y in 64:
+				if tri.get_pixel(x, y) != 0:
+					flipped.set_pixel(63 - x, y, 1)
+		tri = flipped
+	w.add_body(spear, [tri])
+	# 两种姿态像素数可能差一点，所以**按质量配平速度**让动量严格相同 ——
+	# 否则又会混进"质量差异"这个变量。
+	var ref_momentum := 400.0 * float(64 * 64)
 	spear.linear_velocity = Vector2(ref_momentum / maxf(1.0, spear.mass), 0)
-	for i in 60:
+	# ⚠️ 取**整个过程的应力峰值**，不是首帧的。
+	#    首帧接触时物体已经压进去了若干像素，切向 ±24 的采样窗口整个落在实心里，
+	#    于是两种姿态测出**一模一样**的数（实测就是这个症状：σ 连末位都相同）。
+	#    峰值才是有物理意义的量 —— 破坏发生在应力最大的瞬间。
+	# 在**冲量最大的那一帧**取宽度 —— 那才是"最狠的一击有多集中"。
+	# 不能取 σ 的最大值：尖端接触最初是**投机接触**（还没真正重叠，宽度 0），
+	# σ 在那些帧会退化成 impulse/1，反而最大。也不能取宽度的最小值，
+	# 同理会被投机接触的 0 拉走。
+	var best_j := 0.0
+	var best_w := 0.0
+	var best := 0.0
+	for i in 90:
 		w.step(1.0 / 60.0)
 		for c in w.contacts:
-			if (c.a == spear or c.b == spear) and c.impulse > 0.0:
-				return c.impulse / maxf(1.0, c.contact_width)
-	return 0.0
+			if c.a != spear and c.b != spear:
+				continue
+			# ⚠️⚠️ 必须**跳过 contact_width == 0 的帧**。
+			#    那些帧是采样窗口还没和另一侧重叠（或接触点落在界面上），
+			#    maxf(1.0, 0) 会把分母变成 1，于是 σ 退化成 impulse/1。
+			#    而两种姿态动量相同 -> impulse 相同 -> σ 连末位都一样，
+			#    看起来像"两种姿态没区别"。我就在这里被骗了一轮。
+			if c.contact_width <= 0.0 or c.impulse <= 0.0:
+				continue
+			# Variant（contacts 是 Array），:= 推不出类型，必须显式标注
+			var j: float = c.impulse
+			var wd: float = c.contact_width
+			if j > best_j:
+				best_j = j
+				best_w = wd
+				best = j / maxf(1.0, wd)
+	return best
