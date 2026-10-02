@@ -75,12 +75,37 @@ func _enter_tree() -> void:
 	# ⚠️ 必须显式打开，否则 NOTIFICATION_TRANSFORM_CHANGED 不会发 ——
 	#    拖动本形状子节点时缓存就不会失效，形状停在旧位置。
 	set_notify_transform(true)
+	_apply_editor_visibility()
+
+
+## 编辑器里是否隐藏本节点（默认隐藏）。
+##
+## ## 为什么必须隐藏
+##
+## 形状子节点的 position 与刚体原点**必然重合**（形状原点就是刚体原点），
+## 而 2D 编辑器的拾取在重叠时**优先命中子节点** ——
+## 于是每次想拖刚体，拖到的都是形状。实测就是这个问题。
+##
+## 编辑器**不拾取不可见的 item**，这是唯一能改的场景图机制。
+##
+## 损失为零：形状本来什么都不画（碰撞外接是 PixelBody2D 画的），
+## 所以隐藏前后画面完全一样，只是不再抢点击。
+##
+## 想改形状参数：在场景树里选中它，或者直接在 Inspector 里改数值。
+## 真的需要它可见（比如一个刚体挂多个形状、要对齐它们），把这里关掉即可。
+@export var hide_in_editor := true
+
+
+func _apply_editor_visibility() -> void:
+	if Engine.is_editor_hint():
+		visible = not hide_in_editor
 
 
 func _notification(what: int) -> void:
 	# 变换（position/scale/rotation）变了，形状的生成结果就变了
 	if what == NOTIFICATION_TRANSFORM_CHANGED and Engine.is_editor_hint():
 		invalidate_shape()
+		_apply_editor_visibility()
 
 
 ## 取形状（带缓存）。**PixelBody2D 用这个，不要直接调 build_shape()。**
