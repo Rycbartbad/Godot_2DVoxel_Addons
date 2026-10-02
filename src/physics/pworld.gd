@@ -1195,13 +1195,27 @@ class Contact:
 ##    矛尖只有几像素宽 → 应力大 → 破盾；盾面贴上来几十像素宽 → 应力小 → 不破。
 ##
 ## 代价是沿切向走 2*half+1 步、每步查两个形状的像素。只在开了接触事件时才算。
-func _contact_width(a: PBody, b: PBody, point: Vector2, normal: Vector2, half: int = 24) -> float:
+func _contact_width(a: PBody, b: PBody, point: Vector2, normal: Vector2,
+		separation: float = 0.0) -> float:
 	var t := Vector2(-normal.y, normal.x)
-	# ⚠️ 采样要**各自往自己身体里挪半步**。
-	#    接触点正好落在两个形状的界面上，而 _solid_at 用的是 floor() ——
-	#    点恰好在边界上时会对两边都判成"空"，接触宽度恒为 0（实测就是这个症状）。
-	var ea := point - normal * 0.5
-	var eb := point + normal * 0.5
+	# ⚠️⚠️ 采样要各自往自己身体里挪，而且挪的距离必须**大于分离距离**。
+	#
+	#    接触点恰好落在两者界面上时，floor() 会对两边都判"空" → 宽度恒 0。
+	#    更要命的是**投机接触**：那时两个刚体还没真正重叠（separation > 0），
+	#    接触点悬在空隙里，固定挪 0.5 根本够不着任何一侧 ——
+	#    于是"最狠的那一击"（第一次撞上、冲量最大的那一帧）宽度报 0，
+	#    σ = impulse/0 直接失效。实测验収：矛尖撞墙那帧 separation 0.73~1.44，
+	#    挪 0.5 → 宽度 0；挪 1.0/1.5 → 宽度 1，σ 立刻从 0 变成 1539133。
+	var push := maxf(0.5, separation + 0.5)
+	var ea := point - normal * push
+	var eb := point + normal * push
+	# ⚠️ 窗口不能写死：以前固定 ±24，于是 60 px 宽和 200 px 宽的接触都算出 49，
+	#    应力分别被高估 1.2 倍和 4 倍，"宽接触应力小"的分级整个失效。
+	#    改成覆盖两者 AABB 在切向上的**重叠跨度**（那才是宽度的物理上限）。
+	var sa := _project_span(a.aabb, t)
+	var sb := _project_span(b.aabb, t)
+	var overlap := maxf(0.0, minf(sa.y, sb.y) - maxf(sa.x, sb.x))
+	var half := clampi(int(ceil(overlap * 0.5)) + 4, 8, 4096)
 	var n := 0
 	for i in range(-half, half + 1):
 		var off := t * float(i)
@@ -1246,6 +1260,8 @@ static func _project_span(box: Rect2, t: Vector2) -> Vector2:
 ## 代价：每个子步遍历一次流形的点，O(点数)。实测对 step 时间无可测影响。
 ## 开关：只为基准测试对比用（关掉就是加这个功能之前的行为）
 var fill_contact_impulses_enabled := true
+## 本子步第一个接触的下标 —— 回填时用它区分"本子步新增的"和"整步累积的"
+var _substep_contact_begin := 0
 
 
 func _fill_contact_impulses() -> void:
@@ -1269,18 +1285,23 @@ func _fill_contact_impulses() -> void:
 	# 同一个刚体对可能有多个接触点（一个流形两个点 -> 两个 Contact），
 	# 把这一对的总冲量**平均**分给各点：求和之后仍是真实总冲量，
 	# 单点读到的也是同量级的值。
+	# ⚠️ 只统计**本子步**的接触。contacts 是整步累积的（每步开头才清），
+	#    而本函数每个子步都跑一次 —— 用整步的计数当除数，冲量会被多除子步数倍
+	#    （实测 16 子步那一帧每个事件只有真值的 1/7，而且 7 个事件被写成同一个值）。
 	var counts := {}
-	for c: Contact in contacts:
+	for i in range(_substep_contact_begin, contacts.size()):
+		var c: Contact = contacts[i]
 		var ka := c.a.id
 		var kb := c.b.id
 		var key := Solver.make_key(ka, 0, kb, 0) if ka < kb else Solver.make_key(kb, 0, ka, 0)
 		c._pair_key = key
 		counts[key] = counts.get(key, 0) + 1
-	for c: Contact in contacts:
+	for i in range(_substep_contact_begin, contacts.size()):
+		var c: Contact = contacts[i]
 		var e: Array = acc.get(c._pair_key, [])
 		if e.is_empty():
 			continue
-		var cn := float(counts[c._pair_key])
+		var cn := float(counts.get(c._pair_key, 1))
 		c.impulse = e[0] / cn
 		c.tangent_impulse = e[1] / cn
 
@@ -1289,19 +1310,27 @@ func _fill_contact_impulses() -> void:
 ##
 ## 剪切比需要**法向厚度**（要沿体素走一遍），所以只在调用方配过材质强度时才算 ——
 ## 没配强度的话这一项毫无用处，白花时间。
-func _fill_contact_stress(c: Contact, a: PBody, b: PBody, rel: Vector2) -> void:
+func _fill_contact_stress(c: Contact, a: PBody, b: PBody, rel: Vector2,
+		separation: float = 0.0) -> void:
 	var ma := 0.0 if a.is_static else a.mass
 	var mb := 0.0 if b.is_static else b.mass
 	var inv := (1.0 / ma if ma > 0.0 else 0.0) + (1.0 / mb if mb > 0.0 else 0.0)
 	var m_eff := (1.0 / inv) if inv > 0.0 else 0.0
 	c.impulse = m_eff * absf(c.approach)
-	c.contact_width = _contact_width(a, b, c.point, c.normal)
+	c.contact_width = _contact_width(a, b, c.point, c.normal, separation)
 	if material_compress.is_empty() and material_shear.is_empty():
 		return
 	# 剪切比：法向穿过多厚 = 压缩；法向几乎不穿过厚度 = 剪切。
 	# 取两侧较薄的那个（谁先坏看谁）。
-	var ta := Query.thickness_at(a, c.point, c.normal)
-	var tb := Query.thickness_at(b, c.point, -c.normal)
+	# ⚠️⚠️ 方向必须是「从接触点**朝自己身体里**」。
+	#    normal 是 A→B，所以对 A 而言要传 -normal。
+	#    我第一版传反了，于是 thickness_at 从 point-normal*back 开始沿 normal 走 ——
+	#    那是**离开** A 材料的方向，量到的段长恒等于 back(=4)，
+	#    24 像素厚的墙和 80 像素厚的墙算出同一个 thin。
+	#    症状是 shear_ratio 与材料厚度完全无关，"抗压远强于抗剪"从未生效，
+	#    而且 set_material_strength 的第二个参数等于白设。
+	var ta := Query.thickness_at(a, c.point, -c.normal)
+	var tb := Query.thickness_at(b, c.point, c.normal)
 	var thin := ta if (ta > 0.0 and (tb <= 0.0 or ta < tb)) else tb
 	if thin <= 0.0:
 		c.shear_ratio = 0.0
@@ -1311,7 +1340,8 @@ func _fill_contact_stress(c: Contact, a: PBody, b: PBody, rel: Vector2) -> void:
 	c.shear_ratio = clampf(c.contact_width / (c.contact_width + thin), 0.0, 1.0)
 
 
-func _contact_add(a: PBody, b: PBody, point: Vector2, normal: Vector2) -> void:
+func _contact_add(a: PBody, b: PBody, point: Vector2, normal: Vector2,
+		separation: float = 0.0) -> void:
 	if contacts.size() >= max_contacts:
 		return
 	var c := Contact.new()
@@ -1327,7 +1357,7 @@ func _contact_add(a: PBody, b: PBody, point: Vector2, normal: Vector2) -> void:
 	#    我第一版把这一句插在前面，结果冲量恒为 0（approach 还是默认值），
 	#    而且不会报任何错，只是"破坏判据永远不触发"。
 	# ---- 冲量近似 + 接触宽度（很便宜，总是算）----
-	_fill_contact_stress(c, a, b, rel)
+	_fill_contact_stress(c, a, b, rel, separation)
 	var ka := a.id
 	var kb := b.id
 	var key := (ka << 32) | (kb & 0xFFFFFFFF) if ka < kb else (kb << 32) | (ka & 0xFFFFFFFF)
@@ -1341,6 +1371,8 @@ func _collect_contacts() -> void:
 	if not contact_events_enabled:
 		return
 	var seen := {}
+	# 记下本子步从哪个下标开始 —— 回填冲量时只统计这一段
+	_substep_contact_begin = contacts.size()
 	if _packed_manifolds:
 		# 打包流形布局：+0 ia, +4 ib, +16/24 normal(f64), +32 count, +40 起 2 个点(各 5 个 f64)
 		for k in _bp_count:
@@ -1354,7 +1386,10 @@ func _collect_contacts() -> void:
 			var b: PBody = bodies[ib]
 			var n := Vector2(_bp_res.decode_double(base + 16), _bp_res.decode_double(base + 24))
 			var pt := Vector2(_bp_res.decode_double(base + 40), _bp_res.decode_double(base + 48))
-			_contact_add(a, b, pt, n)
+			# 点布局与 _native_out 一致：x(+0) y(+8) depth(+16) separation(+24) feature(+32)
+			# 少了 separation，投机接触那帧的接触宽度会算成 0（见 _contact_width 的说明）
+			var sep := _bp_res.decode_double(base + 64)
+			_contact_add(a, b, pt, n, sep)
 			var ka := a.id
 			var kb := b.id
 			seen[(ka << 32) | (kb & 0xFFFFFFFF) if ka < kb else (kb << 32) | (ka & 0xFFFFFFFF)] = true
@@ -1363,7 +1398,7 @@ func _collect_contacts() -> void:
 			if m.points.is_empty():
 				continue
 			var p0: Solver.Point = m.points[0]
-			_contact_add(m.a, m.b, p0.position, m.normal)
+			_contact_add(m.a, m.b, p0.position, m.normal, p0.separation)
 			var ka2 := m.a.id
 			var kb2 := m.b.id
 			seen[(ka2 << 32) | (kb2 & 0xFFFFFFFF) if ka2 < kb2 else (kb2 << 32) | (ka2 & 0xFFFFFFFF)] = true

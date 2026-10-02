@@ -40,18 +40,28 @@ var _textures := {}       # body.id -> ImageTexture
 var _bounds := {}         # body.id -> Rect2i
 ## body.id -> true 表示"像素内容变了，下次 sync 要重建贴图"。
 ## 位置/旋转变化不在此列 —— 那些只改 node.transform，不需要重做贴图。
-var _dirty := {}
+var _rev := {}           # body.id -> 上次建贴图时的内容版本
+var _warned_material := false
 
 
-## 显式标记某刚体的像素内容变了（在刚体内部挖洞、改材质时调）。
-## 外接发生变化的情况会自动标记，不用调这个。
+## 所有形状的 revision 之和 —— 任何一处像素改动都会让它变。
+static func _content_revision(body) -> int:
+	var r := 0
+	for s: PixelShape in body.shapes:
+		r += s.revision
+	return r
+
+
+## 强制下次 sync 重建某刚体的贴图。
+##
+## 正常情况下**不需要调** —— revision 会自动发现内容变化。
+## 只有一种情况要手动来一下：换了 palette（形状没动，但画出来的颜色要变）。
 func mark_dirty(body_id: int) -> void:
-	_dirty[body_id] = true
+	_rev.erase(body_id)
 
 
 func mark_all_dirty() -> void:
-	for id in _nodes.keys():
-		_dirty[id] = true
+	_rev.clear()
 
 func _ready() -> void:
 	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
@@ -84,7 +94,7 @@ func forget(body_id: int) -> void:
 	_nodes.erase(body_id)
 	_textures.erase(body_id)
 	_bounds.erase(body_id)
-	_dirty.erase(body_id)
+	_rev.erase(body_id)
 
 ## 改一种材质的颜色（会自动扩容；id 0 忽略）。
 func set_material_color(material: int, color: Color) -> void:
@@ -117,10 +127,6 @@ func sync(body) -> void:
 		add_child(node)
 		_nodes[body.id] = node
 		_bounds[body.id] = Rect2i()
-	if _bounds[body.id] != aabb:
-		_bounds[body.id] = aabb
-		_textures.erase(body.id)
-		_dirty[body.id] = true
 	# 🔥 只在**内容真的变了**时才重建贴图。
 	#
 	# ⚠️⚠️ 这里以前是无条件 node.texture = _build_texture(body, aabb)，
@@ -130,14 +136,28 @@ func sync(body) -> void:
 	#
 	#    AABB 变化是"形状变了"的可靠信号（破坏一定会改变外接，
 	#    除非恰好在内部挖洞 —— 那种情况调用方要显式 mark_dirty()）。
-	if _dirty.get(body.id, true):
+	# 🔥 只在**像素内容真的变了**时才重建贴图。
+	#
+	# ⚠️⚠️ 第一版这里写的是 `_dirty.get(body.id, true)` + `erase()` ——
+	#    那是个**恒真**的表达式：默认 true，erase 之后键没了、下次 get 又拿默认 true。
+	#    于是每帧都在重建贴图（800x40 的地面 = 32000 像素/帧），
+	#    "修掉帧"的那个提交其实一点没修掉，而且不报任何错。
+	#    教训：**用"默认值 + 删除键"表达布尔状态，默认值就是真正的状态**，删除毫无意义。
+	#
+	#    现在比较的是形状自带的 revision（见 PixelShape.revision）——
+	#    谁改了内容谁 +1，不依赖任何调用方记得调 mark_dirty()。
+	var rev := _content_revision(body)
+	if _bounds[body.id] != aabb or _rev.get(body.id, -1) != rev:
+		_bounds[body.id] = aabb
+		_rev[body.id] = rev
+		_textures.erase(body.id)
 		node.texture = _build_texture(body, aabb)
-		_dirty.erase(body.id)
 	else:
 		var t: ImageTexture = _textures.get(body.id)
 		if t != null:
 			node.texture = t
 		else:
+			_rev[body.id] = rev
 			node.texture = _build_texture(body, aabb)
 	node.offset = Vector2(aabb.position)
 	# 贴图是 1 纹素 = 1 体素；靠节点缩放把每个体素放大成"大块像素"。
@@ -240,7 +260,16 @@ func _build_texture_impl(shapes: Array, aabb: Rect2i, cache_key: int):
 				var gy := by + (i >> 3)
 				if gx < 0 or gx >= w or gy < 0 or gy >= h:
 					continue
-				var col: Color = palette[c.mat[i] % palette.size()]
+				# ⚠️ 不要取模回绕：材质 id 越界时 7 % 7 = 0，而索引 0 通常是
+				#    Color(0,0,0,0) —— 像素会在画面上**直接消失**（物理还在），
+				#    极难联想到是材质表不够长。夹紧 + 明确警告。
+				var mi: int = c.mat[i]
+				if mi >= palette.size():
+					if not _warned_material:
+						_warned_material = true
+						push_warning("PixelRenderer: 材质 id %d 超出调色板（只有 %d 项），已夹到末项。请在材质表里补上。" % [mi, palette.size()])
+					mi = palette.size() - 1
+				var col: Color = palette[mi]
 				var o := (gy * w + gx) * 4
 				data[o] = int(col.r * 255.0)
 				data[o + 1] = int(col.g * 255.0)

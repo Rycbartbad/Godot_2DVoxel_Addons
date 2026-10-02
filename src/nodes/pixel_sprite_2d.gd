@@ -130,17 +130,16 @@ func _collect() -> Array:
 ## 签名：形状变了才重建贴图。用外接 + 像素数 + 材质和做粗指纹 ——
 ## 够便宜，且能抓住"挖了个洞""换了材质"这类变化。
 func _signature(shapes: Array) -> String:
+	# ⚠️⚠️ 必须带上 shape.revision。
+	#    以前只用"外接 + 按材质像素数的加权和"做指纹 —— 那是**不完全**的：
+	#    实测 8x8 实心块上"洞在 (2,2)"与"洞在 (6,6)"两个形状签名完全相同，
+	#    于是 rebuild() 早退，精灵停在旧像素上（洞留在旧位置）。
+	#    revision 是形状自己维护的，任何改动都 +1，不会漏。
 	var parts := PackedStringArray()
 	for s: PixelShape in shapes:
 		var aabb: Rect2i = s.local_aabb()
-		var counts := s.count_by_material()
-		var keys := counts.keys()
-		keys.sort()
-		var acc := 0
-		for k in keys:
-			acc = (acc * 31 + int(k) * 131 + int(counts[k])) & 0x7FFFFFFF
-		parts.append("%d,%d,%d,%d,%d" % [aabb.position.x, aabb.position.y,
-			aabb.size.x, aabb.size.y, acc])
+		parts.append("%d,%d,%d,%d,r%d" % [aabb.position.x, aabb.position.y,
+			aabb.size.x, aabb.size.y, s.revision])
 	return "|".join(parts)
 
 

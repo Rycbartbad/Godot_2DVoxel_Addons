@@ -24,17 +24,32 @@ var chunks: Dictionary = {}
 ##
 ## ⚠️ 直接改 chunk.mat / chunk.occ（批量写入，性能需要）时**不会自动标记**，
 ##    那种路径要自己调 mark_dirty()。逐像素的 set_pixel / set_aux 会自动标记。
+## **内容版本号**：任何一次像素改动都 +1。
+##
+## ## 为什么需要它（而不是靠调用方标记"脏了"）
+##
+## 渲染器曾经用 `_dirty.get(body.id, true)` + `erase()` 判断要不要重建贴图 ——
+## 那是个**恒真**的表达式（默认 true，erase 之后又变回默认 true），
+## 于是每帧都在重建 800x40 的贴图，掉帧"修"了个寂寞，而且不报任何错。
+##
+## 靠调用方调 mark_dirty() 也不行：全仓库根本没人调（只有定义）。
+## 唯一可靠的做法是**让数据自己带着版本走** —— 谁改了内容谁就 +1，
+## 读取方只比版本号，既不漏也不误。
+var revision := 0
+
 var _dirty: Dictionary = {}
 
 
 ## 标记一个 chunk 为脏（chunk 坐标）。已经脏了就早退，热路径上只有一次查表。
 func mark_dirty(cx: int, cy: int) -> void:
+	revision += 1
 	var k := make_key(cx, cy)
 	if not _dirty.has(k):
 		_dirty[k] = true
 
 
 func mark_dirty_key(k: int) -> void:
+	revision += 1
 	if not _dirty.has(k):
 		_dirty[k] = true
 

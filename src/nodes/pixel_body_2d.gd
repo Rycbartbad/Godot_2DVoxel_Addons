@@ -126,6 +126,14 @@ func invalidate_gizmo() -> void:
 	for c in get_children():
 		if c.has_method("rebuild") and c != self:
 			c.rebuild()
+	# ⚠️ 还要让父世界**重烘焙**。以前只清缓存+重绘，于是 Inspector 里把 rect_size
+	#    从 8 改成 32，抓手框和子精灵都变新了，但世界里的刚体还是 8x8 ——
+	#    画面与碰撞分叉，而且只有再拖一下节点才会好（改导出属性不发
+	#    TRANSFORM_CHANGED 通知）。on_child_moved 内部已有编辑器守卫与防抖。
+	if Engine.is_editor_hint():
+		var p := get_parent()
+		if p != null and p.has_method("on_child_moved"):
+			p.on_child_moved()
 
 @export var source: Source = Source.RECT:
 	set(v):
