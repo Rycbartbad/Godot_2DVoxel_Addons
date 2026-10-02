@@ -14,6 +14,16 @@
 [node name="NodesDemo" type="Node2D" unique_id=1214596658]
 script = ExtResource("4_cam")
 
+; 相机与 UI 都用 **Godot 原生节点**，不是代码生成的。
+; 之前 Camera2D 和 Label 都是在 _ready() 里 new 出来的 —— 与这个文件的文档
+; （「全部由场景节点摆出来，没有一行生成代码」）自相矛盾，而且编辑器里看不到、
+; 调不了。现在它们就是普通场景节点。
+;
+; 唯一留在代码里的是 camera.zoom —— 它要按**视口高度**算（见 PixelScale），
+; 场景文件里写不成静态值。
+[node name="Camera2D" type="Camera2D" parent="." unique_id=1073741900]
+position = Vector2(0, 140)
+
 [node name="PixelWorld" type="Node2D" parent="." unique_id=702209692]
 script = ExtResource("1_world")
 materials = Array[ExtResource("3_xktxc")]([ExtResource("5_stone"), ExtResource("6_wood"), ExtResource("7_metal"), ExtResource("8_brick")])
@@ -56,7 +66,7 @@ script = ExtResource("9_shape")
 material_id = 2
 
 [node name="Ball" type="Node2D" parent="PixelWorld" unique_id=1123877619]
-position = Vector2(-289, 123)
+position = Vector2(-118, 94)
 script = ExtResource("2_body")
 initial_velocity = Vector2(180, 0)
 
@@ -82,3 +92,15 @@ material_id = 4
 script = ExtResource("3_overlay")
 show_velocity = true
 show_angular = true
+
+[node name="UI" type="CanvasLayer" parent="." unique_id=1073741901]
+
+[node name="Hint" type="Label" parent="UI" unique_id=1073741902]
+offset_left = 12.0
+offset_top = 8.0
+offset_right = 700.0
+offset_bottom = 30.0
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 4
+text = "全部由场景节点摆出来（PixelWorld / PixelBody2D / Camera2D / CanvasLayer）"
