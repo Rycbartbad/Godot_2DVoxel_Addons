@@ -60,28 +60,68 @@ func _draw() -> void:
 	draw_line(Vector2(-6, 0), Vector2(6, 0), c, 1.0)
 	draw_line(Vector2(0, -6), Vector2(0, 6), c, 1.0)
 	draw_circle(Vector2.ZERO, 2.0, c)
-	# 画出**真实形状的外接**，而不是凭 rect_size 猜一个。
+	# 🔥 用**缓存**的外接，绝不在这里调 build_shape()。
+	#
+	# ⚠️⚠️ 我在这里犯过一个严重的性能错误：直接调 build_shape() 来拿外接。
+	#    而 _draw() 是**每次画布重绘**都会跑的 —— Ground 是 800x40，
+	#    也就是每次重绘都跑 32000 次 set_pixel。表现是"用了节点层的场景卡很多"
+	#    （demo 场景没有 PixelBody2D，所以不受影响，对比之下更明显）。
+	#    凡是画的东西，必须来自缓存，不能在 _draw() 里现算。
+	var aabb := _gizmo_aabb()
 	#
 	# ⚠️⚠️ 这里曾经画的是 Rect2(-Vector2(rect_size) * 0.5, rect_size) —— 以**原点为中心**。
 	#    那是错的：形状从 (0,0) 开始铺，「原点 = 左上角」。
 	#    结果编辑器里看起来就是「碰撞箱在中心、精灵图在左上角」，
 	#    让人以为是引擎对齐错了 —— 其实是这个抓手画错了。
 	#    教训：**调试可视化本身画错，比没有可视化更糟**，它会把人引到错误的方向。
-	var shape := build_shape()
-	if not shape.is_empty():
-		var aabb := shape.local_aabb()
+	if aabb.size.x > 0 and aabb.size.y > 0:
 		var col := Color(0.4, 0.8, 1.0, 0.8) if is_static else Color(0.3, 1.0, 0.5, 0.7)
 		draw_rect(Rect2(Vector2(aabb.position), Vector2(aabb.size)), col, false, 1.0)
 		# 原点在左上角：明确标出来
 		draw_circle(Vector2(aabb.position), 1.5, col)
 
-@export var source: Source = Source.RECT
+
+## 形状外接的缓存。_draw() 每帧都要用，而 build_shape() 可能很贵
+## （Ground 是 800x40 = 32000 像素），所以必须缓存。
+var _aabb_cache := Rect2i()
+var _aabb_valid := false
+
+
+func _gizmo_aabb() -> Rect2i:
+	if not _aabb_valid:
+		var shape := build_shape()
+		_aabb_cache = shape.local_aabb() if not shape.is_empty() else Rect2i()
+		_aabb_valid = true
+	return _aabb_cache
+
+
+## 形状属性变了就调它让缓存失效（导出属性的 setter 会自动调）
+func invalidate_gizmo() -> void:
+	_aabb_valid = false
+	queue_redraw()
+
+@export var source: Source = Source.RECT:
+	set(v):
+		source = v
+		invalidate_gizmo()
 
 @export_group("形状")
-@export var rect_size := Vector2i(16, 16)      ## source=RECT
-@export var radius := 8.0                      ## source=CIRCLE
-@export var texture: Texture2D                 ## source=TEXTURE
-@export_range(1, 254) var alpha_threshold := 128
+@export var rect_size := Vector2i(16, 16):     ## source=RECT
+	set(v):
+		rect_size = v
+		invalidate_gizmo()
+@export var radius := 8.0:                     ## source=CIRCLE
+	set(v):
+		radius = v
+		invalidate_gizmo()
+@export var texture: Texture2D:                ## source=TEXTURE
+	set(v):
+		texture = v
+		invalidate_gizmo()
+@export_range(1, 254) var alpha_threshold := 128:
+	set(v):
+		alpha_threshold = v
+		invalidate_gizmo()
 
 @export_group("物理")
 ## 材质 id（决定颜色和密度）。0 是"空"，不能用作实体材质。

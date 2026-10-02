@@ -145,11 +145,16 @@ func _live_ids() -> Dictionary:
 	return d
 
 
-## 把本节点里的调试叠加层也指到这个世界（省得每个叠加层手动指定）
+## 把本节点里的调试叠加层也指到这个世界，并让它重绘一次。
+##
+## ⚠️ 用 set_world() 方法而不是直接赋 c.world —— 直接赋会报
+##    "Invalid assignment of property or key 'world'"，而且报错信息不指向真因。
+##    方法调用没有这个歧义，也顺便把「注入世界 + 重绘一次」绑成一件事
+##    （叠加层在编辑器里不每帧重绘，必须有人叫它画）。
 func _sync_overlays() -> void:
 	for c in get_children():
-		if c != renderer and "world_source" in c:
-			c.world = world
+		if c != renderer and c.has_method("set_world"):
+			c.set_world(world)
 
 
 ## 子节点在编辑器里被拖动/旋转时由 PixelBody2D 调用。

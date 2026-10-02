@@ -44,7 +44,18 @@ extends Node2D
 @export var contact_normal_len := 12.0
 @export var font_size := 12
 
+## 被叠加的世界（PWorld）。编辑器里由 PixelWorld 通过 set_world() 注入。
 var world = null
+
+
+## 注入世界并重绘一次。
+##
+## ⚠️ 用显式方法而不是直接赋 c.world —— 直接赋在某些情况下会报
+##    "Invalid assignment of property or key 'world'"，而且报错信息不指向真因。
+##    方法调用没有这个歧义，也顺便把"赋值 + 重绘"绑成一件事。
+func set_world(w) -> void:
+	world = w
+	refresh()
 ## 统计文字的字号要按相机 zoom 反算，否则拉近之后字会占满整个屏幕
 var font_size_draw := 12.0
 
