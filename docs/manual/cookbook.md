@@ -7,6 +7,7 @@
 ## 1. 建一个可玩场景
 
 ```gdscript
+const PixelPhysics = preload("res://addons/pixel_destruction/pixel_physics.gd")
 var px := PixelPhysics.new()
 add_child(px)                                  # 加进树里就自动 _physics_process
 px.configure({"gravity": Vector2(0, 900)})     # 想改默认值才需要
