@@ -44,14 +44,14 @@ godot --headless --editor --quit --path .     # 扫描一次，注册扩展
 > （实测 `sleep_box` 场景 0/12 → 10/12 清醒）。详见
 > [docs/development_log.md](docs/development_log.md) 坑 36。所以请确保 dll 可用。
 
-## 构建原生加速（可选，不装会自动回退 GDScript）
+## 构建原生加速
 
 ```bash
 cd gdext
 g++ -O2 -std=c++17 -ffp-contract=off -shared -static-libgcc -static-libstdc++ -o fastphys.dll fastphys.cpp
 ```
 
-⚠️ `-ffp-contract=off` 不能省：少了它编译器会把浮点乘加融合成 FMA，与 GDScript 路径立刻分叉。
+`-ffp-contract=off` 不能省：少了它编译器会把浮点乘加融合成 FMA，与 GDScript 路径立刻分叉。
 构建前先关掉占用 dll 的 Godot 进程，否则链接会报 Permission denied。
 
 ## 重新生成 addon
@@ -60,8 +60,7 @@ g++ -O2 -std=c++17 -ffp-contract=off -shared -static-libgcc -static-libstdc++ -o
 python tools/build_addon.py
 ```
 
-引擎的**真源是 `src/`**；addon 是生成物 —— 脚本只重生成模块目录，
-README/docs/examples 是手写的。
+引擎的**源码是 `src/`**；addon 是生成物 —— 脚本只重生成模块目录，
 
 ---
 

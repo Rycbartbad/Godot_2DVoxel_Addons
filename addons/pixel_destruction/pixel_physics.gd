@@ -38,6 +38,8 @@ const PBody := preload("res://addons/pixel_destruction/physics/pbody.gd")
 const PWorld := preload("res://addons/pixel_destruction/physics/pworld.gd")
 const PixelShape := preload("res://addons/pixel_destruction/core/pixel_shape.gd")
 const PixelRenderer := preload("res://addons/pixel_destruction/render/pixel_renderer.gd")
+const Query := preload("res://addons/pixel_destruction/physics/query.gd")
+const ShapeOps := preload("res://addons/pixel_destruction/core/shape_ops.gd")
 
 ## 世界（想直接调底层接口时用它，但优先用门面的方法）
 var world: PWorld
@@ -54,6 +56,7 @@ var _accum := 0.0
 
 func _init() -> void:
 	world = PWorld.new()
+	Query.attach(world)          # 查询是模块级的，建世界时挂上
 
 
 func _ready() -> void:
@@ -329,6 +332,185 @@ func release() -> void:
 
 func has_grab() -> bool:
 	return world.is_grabbing()
+
+
+# ============================================================ 查询
+
+## 像素级精确的射线检测 —— 直接走体素网格，所以能穿过像素画的空洞。
+## 返回 Query.Hit（hit / distance / point / normal / material / body / shape）。
+## radius > 0 时是"加粗射线"（扫掠一个半径 radius 的圆）。
+func raycast(origin: Vector2, direction: Vector2, max_dist: float,
+		radius: float = 0.0) -> Query.Hit:
+	return Query.raycast(origin, direction, max_dist, radius)
+
+
+## 离 origin 最近的实心像素。
+func closest_point(origin: Vector2, max_dist: float) -> Query.Hit:
+	return Query.closest_point(origin, max_dist)
+
+
+## 查询时排除某些刚体（一直生效到 query_clear_filters）。
+func query_reject_body(body: PBody) -> void:
+	Query.reject_body(body)
+
+
+func query_clear_filters() -> void:
+	Query.clear_filters()
+
+
+# ============================================================ 标签
+
+## 给刚体打标签，之后用 find_body / find_bodies 按名字找它。
+func set_tag(body: PBody, tag: String, value = null) -> void:
+	body.tags[tag] = value
+
+
+func has_tag(body: PBody, tag: String) -> bool:
+	return body.tags.has(tag)
+
+
+func tag_value(body: PBody, tag: String):
+	return body.tags.get(tag)
+
+
+func remove_tag(body: PBody, tag: String) -> void:
+	body.tags.erase(tag)
+
+
+func list_tags(body: PBody) -> Array:
+	return body.tags.keys()
+
+
+func find_body(tag: String) -> PBody:
+	return world.find_body(tag)
+
+
+func find_bodies(tag: String) -> Array:
+	return world.find_bodies(tag)
+
+
+func find_shapes(tag: String) -> Array:
+	return world.find_shapes(tag)
+
+
+# ============================================================ 刚体辅助
+
+## 重力缩放：0 = 不受重力，负数 = 反重力。
+func set_gravity_scale(body: PBody, scale: float) -> void:
+	body.gravity_scale = scale
+
+
+func set_velocity(body: PBody, v: Vector2) -> void:
+	body.linear_velocity = v
+	body.awake = true
+	body.sleep_timer = 0.0
+
+
+func set_angular_velocity(body: PBody, w: float) -> void:
+	body.angular_velocity = w
+	body.awake = true
+	body.sleep_timer = 0.0
+
+
+func set_active(body: PBody, active: bool) -> void:
+	body.awake = active
+	body.sleep_timer = 0.0
+
+
+func is_active(body: PBody) -> bool:
+	return body.awake
+
+
+## 刚体上某一点的世界速度（含转动贡献）。
+func velocity_at(body: PBody, world_point: Vector2) -> Vector2:
+	return body.velocity_at(world_point)
+
+
+func center_of_mass(body: PBody) -> Vector2:
+	return body.com_world()
+
+
+func bounds(body: PBody) -> Rect2:
+	return body.aabb
+
+
+## 是否已经被打碎（形状全空）。
+func is_broken(body: PBody) -> bool:
+	for s in body.shapes:
+		if not (s as PixelShape).is_empty():
+			return false
+	return true
+
+
+# ============================================================ 形状辅助
+
+func shape_body(shape: PixelShape) -> PBody:
+	return shape.owner_body
+
+
+func shape_bounds(shape: PixelShape) -> Rect2i:
+	return shape.local_aabb()
+
+
+func shape_size(shape: PixelShape) -> Vector2i:
+	return shape.local_aabb().size
+
+
+func shape_voxels(shape: PixelShape) -> int:
+	return shape.pixel_count()
+
+
+## **世界坐标**处的材质 id（0 = 空）。
+func shape_material_at(shape: PixelShape, world_point: Vector2) -> int:
+	return ShapeOps.material_at_position(shape, world_point)
+
+
+## 形状局部像素坐标处的材质 id。
+func shape_material_at_index(shape: PixelShape, x: int, y: int) -> int:
+	return shape.get_pixel(x, y)
+
+
+func set_shape_density(shape: PixelShape, d: float) -> void:
+	ShapeOps.set_density(shape, d)
+
+
+## 按连通性切分：最大的那块留在原形状，其余挂到同一刚体上并返回。
+func split_shape(shape: PixelShape) -> Array:
+	return ShapeOps.split(shape)
+
+
+## 把同一刚体里与本形状相邻的形状并进来。
+func merge_shape(shape: PixelShape) -> PixelShape:
+	return ShapeOps.merge(shape)
+
+
+func is_shape_touching(a: PixelShape, b: PixelShape) -> bool:
+	return ShapeOps.is_touching(a, b)
+
+
+func is_shape_disconnected(shape: PixelShape) -> bool:
+	return ShapeOps.is_disconnected(shape)
+
+
+func shape_closest_point(shape: PixelShape, world_point: Vector2) -> Query.Hit:
+	return ShapeOps.closest_point(shape, world_point)
+
+
+func create_shape(body: PBody, ref: PixelShape = null) -> PixelShape:
+	return ShapeOps.create(body, ref)
+
+
+func clear_shape(shape: PixelShape) -> void:
+	ShapeOps.clear(shape)
+
+
+func copy_shape_content(src: PixelShape, dst: PixelShape) -> void:
+	ShapeOps.copy_content(src, dst)
+
+
+## 用矩形填一段像素（material = 0 等价于擦除）。
+func draw_shape_box(shape: PixelShape, rect: Rect2i, material: int = 1) -> void:
+	ShapeOps.draw_box(shape, rect, material)
 
 
 # ============================================================ 推进与渲染

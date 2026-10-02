@@ -47,6 +47,8 @@ static func compute(shape: PixelShape, density_of: Callable = Callable()) -> Pro
 			var d := 1.0
 			if density_of.is_valid():
 				d = density_of.call(c.mat[i])
+			# 形状级的密度倍率（Teardown 的 SetShapeDensity）。默认 1.0，不影响既有行为。
+			d *= shape.density_scale
 			m += d
 			sx += d * px
 			sy += d * py

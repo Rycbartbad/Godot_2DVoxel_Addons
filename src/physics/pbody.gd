@@ -60,6 +60,16 @@ var pseudo_angular_velocity := 0.0
 var accum_force := Vector2.ZERO
 var accum_torque := 0.0
 
+## ---- Teardown 对齐用的字段 ----
+##
+## 重力缩放（Teardown 的 SetBodyGravityScale）。0 = 不受重力，负数 = 反重力。
+var gravity_scale := 1.0
+## Teardown 风格的标签：tag -> value（value 可以任意，含 null）。
+## 用来让游戏逻辑"按标签找物体"，而不是自己维护一张 id 表。
+var tags := {}
+## 人类可读的说明（Teardown 的 GetDescription/SetDescription），纯给逻辑用。
+var description := ""
+
 
 func pseudo_velocity_at(world_point: Vector2) -> Vector2:
 	var r := world_point - com_world()
@@ -191,6 +201,9 @@ func make_static() -> void:
 ## 组合律：并行的组合形状用平行轴定理逐块累加。
 func rebuild(shape_list: Array, density_of: Callable = Callable(), max_rects: int = 64) -> void:
 	shapes = shape_list
+	for s0 in shape_list:
+		if s0 != null:
+			s0.owner_body = self     # Teardown 的 GetShapeBody 靠它
 	rects.clear()
 	# 静态体不需要质量属性（逆质量恒为 0，质心也不参与求解）。
 	# 擦地形时每帧都会 rebuild，跳过逐像素扫描是实打实的收益。

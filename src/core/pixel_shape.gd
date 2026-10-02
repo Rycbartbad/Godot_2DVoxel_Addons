@@ -12,6 +12,14 @@ const PixelChunk := preload("res://src/core/pixel_chunk.gd")
 ## local chunk 坐标 -> PixelChunk
 var chunks: Dictionary = {}
 
+## 这个 Shape 的密度倍率（Teardown 的 SetShapeDensity / GetShapePalette 那一套）。
+## 质量 = Σ(材质密度) * density_scale。默认 1.0，不影响既有行为。
+var density_scale := 1.0
+## 拥有它的刚体，由 PBody.rebuild 写入（Teardown 的 GetShapeBody）。
+## ⚠️ 一个 Shape 只应属于一个刚体；如果同一个 Shape 被塞进两个刚体，
+##    这里只会记住最后一个。
+var owner_body = null
+
 static func make_key(cx: int, cy: int) -> int:
 	return (cx << 32) | (cy & 0xFFFFFFFF)
 
@@ -98,18 +106,35 @@ func fill_rect(rect: Rect2i, material: int) -> void:
 
 ## 把整个形状的像素**线性平移**（局部空间里的平移，不动刚体）。
 ## 拖拽编辑、把碎片错位摆放时用得上。
+##
+## ⚠️ 单位是**像素**，不是 chunk。第一版直接把 dx 加在 chunk 坐标上，
+## 结果 translate_pixels(0, -4) 实际位移了 -32（4 x 8）——
+## 而且它不会报错，只会让"两个形状该相邻却不相邻"这类判定莫名其妙地失败。
 func translate_pixels(dx: int, dy: int) -> void:
 	if dx == 0 and dy == 0:
 		return
-	var moved := chunks
-	chunks = {}
-	for k: int in moved:
-		var c: PixelChunk = moved[k]
+	var out := {}
+	for k: int in chunks:
+		var c: PixelChunk = chunks[k]
 		if c.occ == 0:
 			continue
-		var bx := key_x(k) + dx
-		var by := key_y(k) + dy
-		chunks[make_key(bx, by)] = c
+		var bx := key_x(k) << 3
+		var by := key_y(k) << 3
+		var bits := c.occ
+		while bits != 0:
+			var i := Bits.first_bit_index(bits)
+			bits &= bits - 1
+			var px := bx + (i & 7) + dx
+			var py := by + (i >> 3) + dy
+			var cx := px >> 3
+			var cy := py >> 3
+			var key := make_key(cx, cy)
+			var dst: PixelChunk = out.get(key)
+			if dst == null:
+				dst = PixelChunk.new()
+				out[key] = dst
+			dst.set_pixel(px - (cx << 3), py - (cy << 3), c.mat[i])
+	chunks = out
 
 
 ## 材质直方图：material id -> 像素数（不含 0）。

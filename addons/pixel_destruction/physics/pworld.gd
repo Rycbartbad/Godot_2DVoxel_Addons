@@ -291,6 +291,45 @@ func remove_body(body: PBody) -> void:
 	bodies.erase(body)
 
 
+## ---------- 标签查询 ----------
+##
+## 让游戏逻辑"按名字找东西"，而不是自己维护一张 id -> 刚体 的表
+## （那张表一旦漏掉删除分支就会变成悬空引用）。
+## 标签存在 PBody.tags 里：tag -> value（value 可以是任意值，含 null）。
+
+func find_bodies(tag: String) -> Array:
+	var out: Array = []
+	for b: PBody in bodies:
+		if b.tags.has(tag):
+			out.append(b)
+	return out
+
+
+func find_body(tag: String) -> PBody:
+	for b: PBody in bodies:
+		if b.tags.has(tag):
+			return b
+	return null
+
+
+## 带某个标签的刚体所拥有的全部形状。
+func find_shapes(tag: String) -> Array:
+	var out: Array = []
+	for b: PBody in find_bodies(tag):
+		for s in b.shapes:
+			out.append(s)
+	return out
+
+
+## 与矩形范围相交的刚体。
+func bodies_in(bounds: Rect2) -> Array:
+	var out: Array = []
+	for b: PBody in bodies:
+		if not b.rects.is_empty() and bounds.intersects(b.aabb):
+			out.append(b)
+	return out
+
+
 func step(dt: float) -> void:
 	for b in bodies:
 		b.refresh_com()
@@ -369,7 +408,7 @@ func _integrate_forces(dt: float) -> void:
 	for b: PBody in bodies:
 		if b.is_static or not b.awake:
 			continue
-		b.linear_velocity += gravity * dt
+		b.linear_velocity += gravity * (b.gravity_scale * dt)
 		# 外力/外力矩（持久累加器，由调用方 clear_forces() 管理，见 PBody 的说明）。
 		# 与 gravity 一样是"加速度"语义，乘 dt 后进速度。
 		if b.accum_force != Vector2.ZERO:

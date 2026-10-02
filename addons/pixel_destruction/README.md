@@ -189,6 +189,10 @@ docs/               架构与精度纪律
 | 破坏 | `carve_circle(c, r, mat_delta?, burst?)` · `carve_rect(c, half, ...)` · `cut(from, to, r, ...)` · `explode(c, r, power, ...)` · `paint_circle(c, r, mat)` |
 | 抓取 | `grab_at(world_point, accel?)` · `drag_to(world_point)` · `release()` · `has_grab()` |
 | 运行 | `step(delta)`（固定步长累加器）· `step_once(dt)` · `renderer()` · `resync()` |
+| **查询** | `raycast(origin, dir, max_dist, radius?)` **像素级精确** · `closest_point(origin, max_dist)` · `query_reject_body(body)` · `query_clear_filters()` |
+| **标签** | `set_tag(body, tag, value?)` · `has_tag` · `tag_value` · `remove_tag` · `list_tags` · `find_body(tag)` · `find_bodies(tag)` · `find_shapes(tag)` |
+| **刚体辅助** | `set_gravity_scale` · `set_velocity` · `set_angular_velocity` · `set_active` · `is_active` · `velocity_at` · `center_of_mass` · `bounds` · `is_broken` |
+| **形状辅助** | `shape_body` · `shape_bounds/size/voxels` · `shape_material_at(shape, world_point)` · `shape_material_at_index` · `set_shape_density` · `split_shape` · `merge_shape` · `is_shape_touching` · `is_shape_disconnected` · `shape_closest_point` · `create_shape` · `clear_shape` · `copy_shape_content` · `draw_shape_box` |
 
 字段：`world`（底层 `PWorld`，想直接调底层接口时用）、
 `auto_step`、`auto_render`。
