@@ -46,12 +46,13 @@ func _notification(what: int) -> void:
 	# 否则画面上的像素和碰撞形状停在旧位置，看起来像"拖不动"。
 	# （NOTIFICATION_TRANSFORM_CHANGED 只在 position/rotation/scale 变化时发，
 	#   而且要 _enter_tree 里 set_notify_transform(true) 打开才会发。）
-	# scale 也是变换的一部分 —— 拖缩放手柄同样要让抓手缓存失效
+	# ⚠️ 拖动**只要同步位形**，不要走重烘焙（那条路 50~70 ms/次，拖动会卡死）。
+	#    只有"形状内容变了"才需要重烘焙 —— 那由形状子节点的 setter 触发。
 	if what == NOTIFICATION_TRANSFORM_CHANGED and Engine.is_editor_hint():
 		invalidate_gizmo()
 		var p := get_parent()
-		if p != null and p.has_method("on_child_moved"):
-			p.on_child_moved()
+		if p != null and p.has_method("on_child_transformed"):
+			p.on_child_transformed()
 
 
 func _draw() -> void:

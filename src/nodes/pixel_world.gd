@@ -71,6 +71,7 @@ var world = null
 var renderer: PixelRenderer = null
 var _accum := 0.0
 var _rebuild_queued := false
+var _transform_queued := false
 ## 与 world.bodies 一一对应的节点（用来判断谁自带精灵）
 var _body_nodes: Array = []
 
@@ -229,6 +230,47 @@ func _sync_overlays() -> void:
 ##
 ## ⚠️ 拖动一次会连续发很多 NOTIFICATION_TRANSFORM_CHANGED，
 ##    每次都全量重建会卡（每个刚体约 0.2 ms）。这里防抖成"帧末重建一次"。
+## 子节点**只是被拖动**（位置/旋转变了）—— 不做重烘焙，只同步位形。
+##
+## ⚠️⚠️ 这是编辑器拖动卡顿的根因所在。
+##
+## 之前拖动和"形状变了"走同一条路（on_child_moved -> rebuild），而 rebuild 要：
+##     build_shape()  32000 像素的地面 ~38 ms
+##     add_body()     贪心分解 + 质量属性 ~11 ms
+##     建贴图          ~24 ms（prune({}) 会清掉全部贴图缓存 —— 重烘焙产生新 body id，
+##                            缓存按 id 存，所以每次都得从零重建）
+## 合计约 50~70 ms/次，拖动时每帧一次 -> 十几 FPS，看起来就是卡死。
+##
+## 但拖动**根本不需要重烘焙**：形状没变，变的只是刚体的位置和旋转。
+## 所以这里只改 position/rotation，代价是几个赋值。
+##
+## 复用 _rebuild_queued 做防抖 —— 两者都是"本帧内积压多次只做一次"。
+func on_child_transformed() -> void:
+	if not Engine.is_editor_hint() or _transform_queued:
+		return
+	_transform_queued = true
+	_sync_transforms_deferred.call_deferred()
+
+
+func _sync_transforms_deferred() -> void:
+	_transform_queued = false
+	if not is_inside_tree() or not Engine.is_editor_hint() or world == null:
+		return
+	for i in _body_nodes.size():
+		if i >= world.bodies.size():
+			break
+		var node = _body_nodes[i]
+		if node == null:
+			continue
+		var b = world.bodies[i]
+		b.position = node.position
+		b.rotation = node.rotation
+		b.update_aabb()
+		b.compute_swept_aabb(0.0)
+		if renderer != null:
+			renderer.sync(b)
+
+
 func on_child_moved() -> void:
 	if not Engine.is_editor_hint() or _rebuild_queued:
 		return
