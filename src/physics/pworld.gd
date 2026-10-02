@@ -1174,8 +1174,9 @@ class Contact:
 	## 与 impulse 一起构成这一对刚体本子步的总冲量。
 	var tangent_impulse := 0.0
 
-	## 内部：这一对刚体的键，用来把求解器的冲量对回到接触事件上
-	var _pair_key := 0
+	## 内部：有效质量 1/(1/m_a + 1/m_b)（静态体视作无穷大质量）。
+	## 冲量 = m_eff × 相对法向速度的**变化量**，所以求解前要把 m_eff 存下来。
+	var _m_eff := 0.0
 
 	## **剪切比**：0 = 纯压缩（法向穿过材料厚度方向），1 = 纯剪切。
 	##
@@ -1243,7 +1244,27 @@ static func _project_span(box: Rect2, t: Vector2) -> Vector2:
 	return Vector2(m - h, m + h)
 
 
-## 把求解器算出的**真实冲量**回填到本子步的接触事件上。
+## 用**求解前后的相对速度变化量**算出真实冲量，回填到本子步的接触事件上。
+##
+## ## 为什么是这么算的
+##
+## 冲量的定义就是**动量变化**：J = m_eff · Δv。所以不需要从求解器内部把
+## normal_impulse 掏出来 —— 求解前记下接近速度（采集时已经有了），
+## 求解后再测一次相对法向速度，差值乘有效质量就是冲量。
+##
+## ## 为什么不用求解器的 normal_impulse
+##
+## 第一版是遍历流形取 Solver.Point.normal_impulse。那在**默认配置下完全空转**：
+## 默认 use_native_solve && use_native_broadphase → _packed_manifolds = true →
+## _broadphase_native() 把 manifolds 置空，冲量留在 C++ 里且**不回写**。
+## 于是遍历的是一个空数组，Contact.impulse 永远是近似值、tangent_impulse 恒为 0，
+## 而且不报任何错。
+##
+## 现在这个算法**对两条路径都成立** —— 它只看速度，不关心冲量是在哪算的。
+## 顺便还解决了近似值的最大毛病（偏心撞击高估，因为忽略转动项）：
+## velocity_at() 取的是接触点处的速度，本来就含转动贡献。
+##
+## 旧文档（保留说明为何废弃）：
 ##
 ## ## 为什么要这一步
 ##
@@ -1267,43 +1288,25 @@ var _substep_contact_begin := 0
 func _fill_contact_impulses() -> void:
 	if not fill_contact_impulses_enabled or contacts.is_empty():
 		return
-	# (a,b) 对 -> [法向冲量和, 切向冲量和]
-	var acc := {}
-	for m: Solver.Manifold in manifolds:
-		if m.points.is_empty():
-			continue
-		var key := Solver.make_key(m.a.id, 0, m.b.id, 0)
-		var n := 0.0
-		var t := 0.0
-		for p: Solver.Point in m.points:
-			n += p.normal_impulse
-			t += p.tangent_impulse
-		var e: Array = acc.get(key, [0.0, 0.0])
-		e[0] += n
-		e[1] += t
-		acc[key] = e
-	# 同一个刚体对可能有多个接触点（一个流形两个点 -> 两个 Contact），
-	# 把这一对的总冲量**平均**分给各点：求和之后仍是真实总冲量，
-	# 单点读到的也是同量级的值。
-	# ⚠️ 只统计**本子步**的接触。contacts 是整步累积的（每步开头才清），
-	#    而本函数每个子步都跑一次 —— 用整步的计数当除数，冲量会被多除子步数倍
-	#    （实测 16 子步那一帧每个事件只有真值的 1/7，而且 7 个事件被写成同一个值）。
-	var counts := {}
+	# 只处理**本子步**新增的接触（contacts 整步累积，本函数每子步跑一次）
 	for i in range(_substep_contact_begin, contacts.size()):
 		var c: Contact = contacts[i]
-		var ka := c.a.id
-		var kb := c.b.id
-		var key := Solver.make_key(ka, 0, kb, 0) if ka < kb else Solver.make_key(kb, 0, ka, 0)
-		c._pair_key = key
-		counts[key] = counts.get(key, 0) + 1
-	for i in range(_substep_contact_begin, contacts.size()):
-		var c: Contact = contacts[i]
-		var e: Array = acc.get(c._pair_key, [])
-		if e.is_empty():
+		if c._m_eff <= 0.0:
 			continue
-		var cn := float(counts.get(c._pair_key, 1))
-		c.impulse = e[0] / cn
-		c.tangent_impulse = e[1] / cn
+		# 求解后的相对速度（同样取接触点处，含转动贡献）
+		var rel := c.b.velocity_at(c.point) - c.a.velocity_at(c.point)
+		var vn := -rel.dot(c.normal)
+		# 冲量 = m_eff × (接近速度 - 分离速度)，夹到非负：
+		# 求解器可能过冲（把接近变成离开），那时冲量就是全部吃掉的动量
+		var jn := c._m_eff * maxf(0.0, c.approach - vn)
+		# 切向同理 —— 摩擦冲量。它是「磨」这种破坏的关键
+		# （盾被慢慢削薄，不是被撞穿，是摩擦做功）。
+		var t := Vector2(-c.normal.y, c.normal.x)
+		var jt := c._m_eff * absf(rel.dot(t))
+		if jn > 0.0 or jt > 0.0:
+			c.impulse = jn
+			c.tangent_impulse = jt
+
 
 
 ## 算出这一对接触的应力相关量：冲量、接触宽度、剪切比。
@@ -1316,6 +1319,10 @@ func _fill_contact_stress(c: Contact, a: PBody, b: PBody, rel: Vector2,
 	var mb := 0.0 if b.is_static else b.mass
 	var inv := (1.0 / ma if ma > 0.0 else 0.0) + (1.0 / mb if mb > 0.0 else 0.0)
 	var m_eff := (1.0 / inv) if inv > 0.0 else 0.0
+	c._m_eff = m_eff
+	# 先按「接近速度全部被吃掉」填一个上界（就是以前的近似值），
+	# 求解之后 _fill_contact_impulses 会用**实际动量变化**把它替换成真值。
+	# 保留这一步是为了让「求解器没跑到这一对」（被 sleep 掉）时仍有可用值。
 	c.impulse = m_eff * absf(c.approach)
 	c.contact_width = _contact_width(a, b, c.point, c.normal, separation)
 	if material_compress.is_empty() and material_shear.is_empty():
