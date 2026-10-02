@@ -40,8 +40,8 @@ jobs:
       - name: 打包
         run: |
           set -e
-          if [[ "@D@{GITHUB_REF}" == refs/tags/* ]]; then
-            python tools/package_addon.py --version "@D@{GITHUB_REF_NAME}"
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            python tools/package_addon.py --version "${GITHUB_REF_NAME}"
           else
             python tools/package_addon.py
           fi
@@ -59,6 +59,58 @@ jobs:
         with:
           files: pixel_destruction*.zip
           generate_release_notes: true
+
+  ## API 参考：用 Godot 自带的 --doctool --gdscript-docs 导出结构，
+  ## 再由 tools/gen_api_docs.py 拼成 Markdown（结构取自 XML，排版取自原始注释）。
+  docs:
+    runs-on: ubuntu-latest
+    if: ${{ vars.GODOT_VERSION != '' }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: 下载 Godot
+        run: |
+          set -e
+          V="${{ vars.GODOT_VERSION }}"
+          curl -fsSL -o godot.zip \
+            "https://github.com/godotengine/godot/releases/download/${V}/Godot_v${V}-stable_linux.x86_64.zip"
+          unzip -q godot.zip
+          mv "Godot_v${V}-stable_linux.x86_64" godot
+          chmod +x godot
+
+      - name: 生成 API 参考
+        env:
+          GODOT_BIN: ./godot
+        run: python tools/gen_api_docs.py
+
+      - name: 文档覆盖率写进任务摘要
+        run: cat docs/api/_coverage.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: api-docs
+          path: docs/api
+          if-no-files-found: error
+
+      - uses: actions/configure-pages@v5
+        if: github.ref == 'refs/heads/main'
+
+      - uses: actions/upload-pages-artifact@v3
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: docs/api
+
+      - uses: actions/deploy-pages@v4
+        if: github.ref == 'refs/heads/main'
+        id: deployment
 
   ## 引擎回归：跑 Godot 无头测试。
   ## Godot 版本由仓库变量 GODOT_VERSION 控制，没设就跳过 ——

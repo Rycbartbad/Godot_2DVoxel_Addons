@@ -194,6 +194,12 @@ var _bp_out := PackedByteArray()
 var _bp_cap := 256
 ## 诊断用：_broadphase 两个阶段各花多久（收集候选 vs 求解）
 var bp_collect_us := 0
+## 宽相细分：GDScript 侧准备（扫掠 AABB + 排序 + 编码） vs 纯 C++ 调用
+var bp_encode_us := 0
+var bp_native_us := 0
+var bp_sweep_us := 0     ## 扫掠 AABB
+var bp_sort_us := 0      ## 排序
+var bp_prep_us := 0      ## 编码打包表
 var bp_resolve_us := 0
 var _batch := SolveBatch.new()
 var max_threads := 8
@@ -622,6 +628,8 @@ func _broadphase_native(dt: float) -> void:
 		if not b0.awake and not b0.is_static:
 			continue
 		b0.compute_swept_aabb(dt)
+	var _t_sweep := Time.get_ticks_usec()
+	bp_sweep_us = _t_sweep - t_full
 	var n := bodies.size()
 	var idx: Array = []
 	for i in n:
@@ -647,6 +655,8 @@ func _broadphase_native(dt: float) -> void:
 	var order_arr: Array = idx.duplicate()
 	order_arr.sort_custom(func(x: int, y: int) -> bool:
 		return _bp_sort_key[x] < _bp_sort_key[y])
+	bp_sort_us = Time.get_ticks_usec() - _t_sweep
+	var _t_enc := Time.get_ticks_usec()
 	var order_count: int = order_arr.size()
 	var need_body := NATIVE_BP_HEADER + n * NATIVE_BODY_STRIDE
 	if _bp_body.size() != need_body:
@@ -701,6 +711,9 @@ func _broadphase_native(dt: float) -> void:
 			_broadphase_gs_fallback(dt)
 			return
 		_bp_phys = ClassDB.instantiate("FastPhys")
+	bp_prep_us = Time.get_ticks_usec() - _t_enc        # 编码阶段
+	bp_encode_us = Time.get_ticks_usec() - t_full      # 到这里为止全是 GDScript 侧的准备
+	var _t_native := Time.get_ticks_usec()
 	# 输出容量：C++ 侧被截断时会返回正好 cap 条，靠这一点检测并扩容重试
 	var res := PackedByteArray()
 	for attempt in 8:
@@ -714,6 +727,7 @@ func _broadphase_native(dt: float) -> void:
 		if res.decode_s32(0) < _bp_cap:
 			break
 		_bp_cap *= 2
+	bp_native_us = Time.get_ticks_usec() - _t_native      # 纯 C++ 宽相
 	var total := res.decode_s32(0)
 	_bp_cap = maxi(32, total * 2)
 	_bp_count = total

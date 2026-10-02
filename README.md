@@ -85,6 +85,38 @@ python tools/check_addon.py     # 校验自洽：路径改写、内部引用、�
 > 模板里的 preload 路径是**装好之后**的路径，在仓库里解析不了。
 ---
 
+## API 参考（生成物，不进仓库）
+
+用 **Godot 自带的文档工具**导出结构，再由 `tools/gen_api_docs.py` 拼成 Markdown：
+
+```
+godot --doctool <out> --gdscript-docs res://src     # 官方工具导出 XML（权威结构）
+        |
+        v  tools/gen_api_docs.py
+docs/api/README.md        索引 + 模块分组
+docs/api/<类名>.md        每个类一页
+docs/api/_coverage.md     文档覆盖率（哪些公开成员没写注释）
+```
+
+本地生成：
+
+```bash
+python tools/gen_api_docs.py            # 生成到 docs/api/
+python tools/gen_api_docs.py --check    # 只查覆盖率，有未文档化的公开成员就非零退出
+```
+
+**为什么是「XML + 源码」的混合方案**：Godot 的 `--gdscript-docs` 有个硬伤——
+描述文本里的**换行被压平成了空格**，注释里的 `##   · xxx` 列表项会连成一整段。
+所以结构（签名/类型/默认值/继承）取自 XML，**排版取自原始 `##` 注释**，两边按符号名对齐。
+
+> 判定「文件头注释」和「符号注释」靠的是**注释与声明之间有没有空行** ——
+> 不区分的话文件头会漏进第一个常量的文档里（实测踩过）。
+
+**CI**（`.github/workflows/ci.yml` 的 `docs` 任务）生成后：
+把覆盖率写进任务摘要、上传 `api-docs` artifact，并在 `main` 上部署到 **GitHub Pages**。
+
+---
+
 ## 目录
 
 ```

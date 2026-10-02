@@ -11,7 +11,7 @@ extends RefCounted
 ##   · 距离是沿射线方向的距离，不是射线长度。
 
 ## ⚠️ 这里必须用 src/ 路径：addon 里的同名脚本是**另一份资源**，
-## 用 addon 路径做类型标注会让 "类型 pbody.gd 赋值给类型 pbody.gd" 直接报错
+## 用 addon 路径做类型标注会让"类型 pbody.gd 赋值给类型 pbody.gd"直接报错
 ## （构建脚本负责在生成 addon 时把这几行改写成 addon 路径）。
 const PBody := preload("res://src/physics/pbody.gd")
 const PixelShape := preload("res://src/core/pixel_shape.gd")

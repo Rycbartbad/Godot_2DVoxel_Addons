@@ -76,7 +76,11 @@ func _row(kind: String, settle: int) -> void:
 	for r in rows:
 		print("   %-20s %8.3f ms  %5.1f%%" % [r[0], float(r[1]) / 1000.0, 100.0 * float(r[1]) / tot])
 	print("   %-20s %8.3f ms" % ["合计", tot / 1000.0])
-	print("   宽相内部分解: collect %.3f / resolve %.3f ms" % [w.bp_collect_us / 1000.0, w.bp_resolve_us / 1000.0])
+	print("   宽相内部分解: collect %.3f / resolve %.3f ms | GDScript准备 %.3f + 纯C++ %.3f" % [
+		w.bp_collect_us / 1000.0, w.bp_resolve_us / 1000.0,
+		w.bp_encode_us / 1000.0, w.bp_native_us / 1000.0])
+	print("     准备细分: 扫掠AABB %.3f + 排序 %.3f + 编码 %.3f ms" % [
+		w.bp_sweep_us / 1000.0, w.bp_sort_us / 1000.0, w.bp_prep_us / 1000.0])
 
 func _initialize() -> void:
 	_row("pile:20:12", 150)
