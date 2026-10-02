@@ -1,10 +1,20 @@
 extends SceneTree
 ## 手册自检：把手册里出现的 API 名字全部拿去和真实代码对一遍。
 ## 教错 API 的手册比没有手册更糟。
-const Facade := preload("res://addons/pixel_destruction/pixel_physics.gd")
-const PixelShape := preload("res://addons/pixel_destruction/core/pixel_shape.gd")
-const PWorld := preload("res://addons/pixel_destruction/physics/pworld.gd")
-const PBody := preload("res://addons/pixel_destruction/physics/pbody.gd")
+## ⚠️ 用**运行时 load** 而不是 preload。
+##
+## addon 是**构建产物**（tools/build_addon.py 生成），默认不在项目树里 ——
+## 它的 class_name 与 src/ 必然重名，住在项目树里会让编辑器报
+## "Class X hides a global script class"，而且会级联到编译失败。
+## 所以它构建完就移出项目树（CI 里也一样）。
+##
+## preload 是**编译期**的：文件不在就直接解析失败，连整个脚本都加载不了。
+## 运行时 load 缺席时返回 null，可以优雅跳过。
+const ADDON := "res://addons/pixel_destruction/"
+var Facade: GDScript = null
+var PixelShape: GDScript = null
+var PWorld: GDScript = null
+var PBody: GDScript = null
 
 var _bad: Array = []
 
@@ -25,6 +35,15 @@ func _check_prop(obj_name: String, obj, names: Array) -> void:
 			_bad.append("%s.%s (属性)" % [obj_name, n])
 
 func _initialize() -> void:
+	# addon 缺席就跳过 —— 它是构建产物，不在项目树里是**正常状态**。
+	Facade = load(ADDON + "pixel_physics.gd")
+	PixelShape = load(ADDON + "core/pixel_shape.gd")
+	PWorld = load(ADDON + "physics/pworld.gd")
+	PBody = load(ADDON + "physics/pbody.gd")
+	if Facade == null:
+		print("=== 跳过：addon 未构建（python tools/build_addon.py 生成后再跑）===")
+		quit(0)
+		return
 	var f = Facade.new()
 	var w = PWorld.new()
 	var b = PBody.new()

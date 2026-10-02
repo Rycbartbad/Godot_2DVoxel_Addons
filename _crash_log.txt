@@ -1,7 +1,0 @@
-Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org
-
-=== 拖动时的形状重算次数 ===
-  第一次 rebuild（缓存冷）: 1 次
-  再 rebuild 两次:          多算了 0 次
-  OK 缓存生效 —— 拖动不再重算形状
-  改 rect_size 后再 rebuild: 多算了 1 次（应当 >= 1）
