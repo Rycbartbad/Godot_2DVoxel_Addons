@@ -10,15 +10,28 @@ const Bits := preload("res://src/core/pixel_bits.gd")
 
 var occ := 0
 var mat: PackedByteArray = PackedByteArray()
+## 逐体素的**辅助表**，引擎不解释它的语义。
+##
+## 游戏层拿它放损伤、引信计时、信号强度、温度…… 引擎只保证它跟 occ/mat
+## 一起被复制、切分、保留。
+##
+## ⚠️ 为什么不把损伤编码进材质 id 的高位：那会污染材质表，
+##    而且在切分/复制/blit 时极容易丢。独立一张表就没有这个问题。
+##
+## 约定：set_pixel **不动** aux（改材质时通常想保留损伤）；
+##       clear_pixel 会把 aux 归零（像素没了，它的历史也没意义了）。
+var aux: PackedByteArray = PackedByteArray()
 
 func _init() -> void:
 	mat.resize(Bits.PIXELS)
+	aux.resize(Bits.PIXELS)
 
 func clone():
 	# 不能在本脚本内用自身类名做类型（没有 class_name），用脚本反射构造。
 	var c = get_script().new()
 	c.occ = occ
 	c.mat = mat.duplicate()
+	c.aux = aux.duplicate()
 	return c
 
 func is_empty() -> bool:
@@ -40,6 +53,7 @@ func set_pixel(x: int, y: int, material: int) -> void:
 func clear_pixel(x: int, y: int) -> void:
 	occ &= ~Bits.bit(x, y)
 	mat[y * Bits.SIZE + x] = 0
+	aux[y * Bits.SIZE + x] = 0
 
 func apply_keep_mask(keep: int) -> void:
 	## keep 掩码语义与 Teardown 的 remove mask 一致：bit 1 = 保留，0 = 删除。
@@ -51,6 +65,7 @@ func apply_keep_mask(keep: int) -> void:
 	while removed != 0:
 		var i := Bits.first_bit_index(removed)
 		mat[i] = 0
+		aux[i] = 0
 		removed &= removed - 1
 
 func blit_into(target, mask: int) -> void:
@@ -60,4 +75,5 @@ func blit_into(target, mask: int) -> void:
 		var i := Bits.first_bit_index(m)
 		target.occ |= 1 << i
 		target.mat[i] = mat[i]
+		target.aux[i] = aux[i]
 		m &= m - 1

@@ -331,6 +331,8 @@ func bodies_in(bounds: Rect2) -> Array:
 
 
 func step(dt: float) -> void:
+	if contact_events_enabled:
+		contacts.clear()          # 按**步**清空；子步会往同一个列表里追加
 	for b in bodies:
 		b.refresh_com()
 	# 自适应子步：把"一步跨过薄物体"从根上消掉
@@ -383,6 +385,7 @@ func _substep(dt: float) -> void:
 		b0.clear_pseudo()
 	_integrate_forces(dt)
 	_broadphase(dt)
+	_collect_contacts()      # 求解**之前**采集：带的是"撞击前的接近速度"
 	_wake_pass()
 	_solve(dt)
 	_integrate_transforms(dt)
@@ -979,6 +982,98 @@ func _wake_pair(a: PBody, b: PBody) -> void:
 	if mover.is_static or not mover.is_slow(sleep_linear * 2.0, sleep_surface * 2.0):
 		sleeper.awake = true
 		sleeper.sleep_timer = 0.0
+
+
+## ---------- 接触事件 ----------
+##
+## 游戏层做"高速碰撞触发""挨打反应"需要知道**这一步发生了哪些接触、撞得多猛**。
+## 引擎在这里把数据摆出来，但**不解释它** —— "多猛算高速""高速要怎样"是游戏规则。
+##
+## ⚠️ 三点约定，用之前必须知道：
+##
+## 1. **默认关闭**。开了就有每步构造事件的分配开销（对象分配在 GDScript 里不便宜）。
+##
+## 2. 事件在**求解之前**采集，所以带的是"撞击前的接近速度"而不是冲量。
+##    冲量在原生求解器内部，GDScript 侧拿不到；而"接近速度"恰恰是
+##    "高速碰撞"这类触发条件真正想要的量（冲量还受质量和恢复系数影响）。
+##
+## 3. 有子步时，**同一个配对可能在一步里出现多次**（每个子步一次）。
+##    引擎按步清空，不跨子步去重 —— 要"每步只触发一次"请游戏层自己按 is_new 过滤。
+##    列表有上限（max_contacts），超了就不再记，避免子步多时爆内存。
+var contact_events_enabled := false
+var max_contacts := 512
+## 本步的接触事件（Contact 数组）。step() 开头清空，各子步往里追加。
+var contacts: Array = []
+
+var _contact_prev := {}
+
+
+## 一次接触。字段都是**求解前**的状态。
+class Contact:
+	var a: PBody
+	var b: PBody
+	## 世界坐标接触点（取流形的第一个点；两点流形取中点意义不大，游戏一般只用它做特效位置）
+	var point := Vector2.ZERO
+	## 世界坐标法向，**由 a 指向 b**
+	var normal := Vector2.ZERO
+	## 沿法向的接近速度：**正 = 正在靠近**，单位 px/s。这就是"撞得多猛"。
+	var approach := 0.0
+	## 这一步才接触上（上一步不在这对里）。做"首次撞击"触发用。
+	var is_new := false
+
+
+func _contact_add(a: PBody, b: PBody, point: Vector2, normal: Vector2) -> void:
+	if contacts.size() >= max_contacts:
+		return
+	var c := Contact.new()
+	c.a = a
+	c.b = b
+	c.point = point
+	c.normal = normal
+	# 相对速度要取**接触点处**的速度（含转动贡献），不能用质心速度 ——
+	# 一个高速旋转的物体，质心可能几乎不动，但它的边缘撞得很狠。
+	var rel := b.velocity_at(point) - a.velocity_at(point)
+	c.approach = -rel.dot(normal)
+	var ka := a.id
+	var kb := b.id
+	var key := (ka << 32) | (kb & 0xFFFFFFFF) if ka < kb else (kb << 32) | (ka & 0xFFFFFFFF)
+	c.is_new = not _contact_prev.has(key)
+	contacts.append(c)
+
+
+## 采集本子步的接触。两条路径（打包流形 / 对象流形）共用 _contact_add，
+## 判定与换算都只写一次 —— 这个项目在"同一规则写两处"上栽过太多次（坑 18/31/36）。
+func _collect_contacts() -> void:
+	if not contact_events_enabled:
+		return
+	var seen := {}
+	if _packed_manifolds:
+		# 打包流形布局：+0 ia, +4 ib, +16/24 normal(f64), +32 count, +40 起 2 个点(各 5 个 f64)
+		for k in _bp_count:
+			var base := 8 + k * NATIVE_MAN_STRIDE
+			var ia := _bp_res.decode_s32(base)
+			var ib := _bp_res.decode_s32(base + 4)
+			var cnt := _bp_res.decode_s32(base + 32)
+			if cnt <= 0:
+				continue
+			var a: PBody = bodies[ia]
+			var b: PBody = bodies[ib]
+			var n := Vector2(_bp_res.decode_double(base + 16), _bp_res.decode_double(base + 24))
+			var pt := Vector2(_bp_res.decode_double(base + 40), _bp_res.decode_double(base + 48))
+			_contact_add(a, b, pt, n)
+			var ka := a.id
+			var kb := b.id
+			seen[(ka << 32) | (kb & 0xFFFFFFFF) if ka < kb else (kb << 32) | (ka & 0xFFFFFFFF)] = true
+	else:
+		for m: Solver.Manifold in manifolds:
+			if m.points.is_empty():
+				continue
+			var p0: Solver.Point = m.points[0]
+			_contact_add(m.a, m.b, p0.position, m.normal)
+			var ka2 := m.a.id
+			var kb2 := m.b.id
+			seen[(ka2 << 32) | (kb2 & 0xFFFFFFFF) if ka2 < kb2 else (kb2 << 32) | (ka2 & 0xFFFFFFFF)] = true
+	_contact_prev = seen
 
 
 ## ---------- 求解 ----------

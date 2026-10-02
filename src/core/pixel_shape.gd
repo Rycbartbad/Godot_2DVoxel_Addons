@@ -12,6 +12,67 @@ const PixelChunk := preload("res://src/core/pixel_chunk.gd")
 ## local chunk 坐标 -> PixelChunk
 var chunks: Dictionary = {}
 
+## ---- 脏区域跟踪 ----
+##
+## 记录"本 tick 哪些 chunk 被写过"。元胞自动机这类逐体素模拟**不能每 tick 扫全部体素**
+## （240 个碎片 × 16 像素 = 3840 个体素，全扫必崩），必须只处理变过的地方。
+##
+## ⚠️ 直接改 chunk.mat / chunk.occ（批量写入，性能需要）时**不会自动标记**，
+##    那种路径要自己调 mark_dirty()。逐像素的 set_pixel / set_aux 会自动标记。
+var _dirty: Dictionary = {}
+
+
+## 标记一个 chunk 为脏（chunk 坐标）。已经脏了就早退，热路径上只有一次查表。
+func mark_dirty(cx: int, cy: int) -> void:
+	var k := make_key(cx, cy)
+	if not _dirty.has(k):
+		_dirty[k] = true
+
+
+func mark_dirty_key(k: int) -> void:
+	if not _dirty.has(k):
+		_dirty[k] = true
+
+
+## 有没有待处理的脏块。世界层靠它快速跳过干净的形状。
+func has_dirty() -> bool:
+	return not _dirty.is_empty()
+
+
+## 本 tick 被写过的 chunk key（PackedInt64Array，可直接拿去遍历）。
+func dirty_chunks() -> PackedInt64Array:
+	var out := PackedInt64Array()
+	out.resize(_dirty.size())
+	var i := 0
+	for k: int in _dirty:
+		out[i] = k
+		i += 1
+	return out
+
+
+func clear_dirty() -> void:
+	_dirty.clear()
+
+
+## 读/写逐体素辅助表。引擎不解释语义（见 PixelChunk.aux 的说明）。
+func get_aux(x: int, y: int) -> int:
+	var cx := x >> 3
+	var cy := y >> 3
+	var c: PixelChunk = chunks.get(make_key(cx, cy))
+	if c == null:
+		return 0
+	return c.aux[(y - (cy << 3)) * Bits.SIZE + (x - (cx << 3))]
+
+
+func set_aux(x: int, y: int, v: int) -> void:
+	var cx := x >> 3
+	var cy := y >> 3
+	var c: PixelChunk = chunks.get(make_key(cx, cy))
+	if c == null:
+		return
+	c.aux[(y - (cy << 3)) * Bits.SIZE + (x - (cx << 3))] = v
+	mark_dirty(cx, cy)
+
 ## 这个 Shape 的密度倍率（Teardown 的 SetShapeDensity / GetShapePalette 那一套）。
 ## 质量 = Σ(材质密度) * density_scale。默认 1.0，不影响既有行为。
 var density_scale := 1.0
@@ -48,6 +109,7 @@ func set_pixel(x: int, y: int, material: int) -> void:
 	var cx := x >> 3
 	var cy := y >> 3
 	chunk_or_create(cx, cy).set_pixel(x - (cx << 3), y - (cy << 3), material)
+	mark_dirty(cx, cy)
 
 ## 只在像素原本为空时写入，返回是否真的新增（画笔需要统计"新增了多少像素"）。
 func add_pixel(x: int, y: int, material: int) -> bool:
@@ -59,6 +121,7 @@ func add_pixel(x: int, y: int, material: int) -> bool:
 	if (c.occ & Bits.bit(lx, ly)) != 0:
 		return false
 	c.set_pixel(lx, ly, material)
+	mark_dirty(cx, cy)
 	return true
 
 
@@ -68,6 +131,7 @@ func clear_pixel(x: int, y: int) -> void:
 	var c: PixelChunk = chunks.get(make_key(cx, cy))
 	if c != null:
 		c.clear_pixel(x - (cx << 3), y - (cy << 3))
+		mark_dirty(cx, cy)
 		if c.is_empty():
 			chunks.erase(make_key(cx, cy))
 
@@ -196,3 +260,4 @@ func blit_mask_from(src: PixelChunk, key: int, mask: int) -> void:
 	## split 用：把 src 里 mask 内的像素按 key 复制进本 Shape。
 	var target := chunk_or_create(key_x(key), key_y(key))
 	src.blit_into(target, mask)
+	mark_dirty_key(key)
