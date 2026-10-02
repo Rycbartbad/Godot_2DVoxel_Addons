@@ -120,6 +120,14 @@ static func attach(world) -> void:
 	_reject.clear()
 
 
+## 注销。**必须在世界销毁时调用** —— 否则这个静态数组会一直持有刚体引用，
+## Godot 退出时会报 "resources still in use at exit" / "Orphan StringName"。
+static func detach(world = null) -> void:
+	if world == null or _bodies == world.bodies:
+		_bodies = []
+	_reject.clear()
+
+
 ## 查询时排除某些刚体（一直生效到 clear_filters）。
 static func reject_body(b) -> void:
 	if not _reject.has(b):

@@ -2534,6 +2534,63 @@ tests/validation_contacts.gd       6 passed   默认关闭 / 接近速度 / 转�
 
 ---
 
+### 交付 · 游戏层原语第 3 层：体素遍历原语 ★★★★
+
+引擎负责"**怎么走**"，规则由游戏层给（谓词 + 访问者都是 Callable）。
+这样"蓝线传信号""绿线生长""红色蔓延"能共用同一套遍历，
+而引擎完全不知道这些概念。
+
+@@@
+PixelShape.neighbors(x, y, diagonal?) -> Array
+PixelShape.component_map() -> { count, chunks: { key: PackedInt32Array(64) } }
+PixelShape.flood(from, matches, visit, diagonal?) -> int
+Destruction.components(shape) -> { 分量序号: { chunk_key: 掩码 } }
+```
+
+#### 关键：连通性判定**只有一份**
+
+@@component_map()@@ 底层走的是 @@Destruction.components()@@，也就是 @@split()@@ 用的**同一份**计算 ——
+为此把 @@_assemble@@ 里的分组逻辑抽成了 @@_group()@@，两边共用。
+
+> 不这么做就得写第二份连通性判定，而它的细节（对角不算连接、跨 chunk 只查 +X/+Y 避免重复）
+> 一旦分叉，两边会给出不同的答案。这个项目在"同一规则写两处"上栽过太多次（坑 18/31/36）。
+
+#### 实测抓到的 API 陷阱
+
+**GDScript 的 lambda 按值捕获局部变量** —— @@visit@@ 里改一个局部标量不会传出去：
+
+@@@gdscript
+var count := 0
+shape.flood(from, Callable(), func(_x, _y, _m, _d):
+    count += 1        # ✗ 改的是副本，外面永远是 0
+    return true)
+```
+
+累积结果必须用 **Array / Dictionary / 对象成员**（引用类型）。
+症状很隐蔽：visit 明明被调用了，外面的计数还是 0 —— 测试第一版就是这么挂的。
+已写进 @@flood@@ 的文档。
+
+#### 验证
+
+@@@
+tests/validation_traversal.gd   17 passed
+  邻域 / 三个连通分量区分 / 跨 chunk 同分量 / 空像素 -1
+  flood 不跨连通体 / 走满长线 / matches 谓词 / 拒绝起点 / 空起点
+  visit 收到距离 / 返回 false 立即停止 / 与 split 结果一致
+```
+
+#### 顺带消除一个泄漏警告
+
+Godot 退出时报 @@resources still in use at exit@@ / @@Orphan StringName: RefCounted (static: 1)@@ ——
+根因是 @@Query@@ 的注册表是**静态变量**，一直持有刚体引用。
+
+改成 **@@PWorld._init()@@ 自己登记、@@_notification(NOTIFICATION_PREDELETE)@@ 自己注销** ——
+让拥有者负责生命周期，调用方就没有"记得注销"这件事。
+
+另外把 7 个新/改文件都过了一遍 @@--check-only@@：**全部干净**（无 unused / shadow / narrowing）。
+
+---
+
 ## 4.4 修复后的诚实备注
 
 仍有已知瑕疵，记在这里以免下次重新发现：

@@ -8,6 +8,7 @@ extends RefCounted
 
 const Bits := preload("res://src/core/pixel_bits.gd")
 const PixelChunk := preload("res://src/core/pixel_chunk.gd")
+const Destruction := preload("res://src/core/destruction.gd")
 
 ## local chunk 坐标 -> PixelChunk
 var chunks: Dictionary = {}
@@ -261,3 +262,108 @@ func blit_mask_from(src: PixelChunk, key: int, mask: int) -> void:
 	var target := chunk_or_create(key_x(key), key_y(key))
 	src.blit_into(target, mask)
 	mark_dirty_key(key)
+
+
+## ---- 体素遍历原语 ----
+##
+## 引擎负责"怎么走"，**规则由游戏层给**（谓词 + 访问者都是 Callable）。
+## 这样"蓝线传信号""绿线生长""红色蔓延"能共用同一套遍历，
+## 而引擎完全不知道这些概念。
+
+const OFFSETS_4: Array = [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
+const OFFSETS_8: Array = [
+	Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1),
+	Vector2i(1, 1), Vector2i(1, -1), Vector2i(-1, 1), Vector2i(-1, -1)]
+
+
+## 邻域像素坐标。⚠️ 每次调用都会新建数组 ——
+## 逐像素的热循环里请直接内联 OFFSETS_4/OFFSETS_8，别调这个。
+func neighbors(x: int, y: int, diagonal := false) -> Array:
+	var out: Array = []
+	for off: Vector2i in (OFFSETS_8 if diagonal else OFFSETS_4):
+		out.append(Vector2i(x + off.x, y + off.y))
+	return out
+
+
+## 每像素的**连通分量序号**（-1 = 空）。
+##
+## 返回 { "count": n, "chunks": { chunk_key: PackedInt32Array(64) } }。
+## 一次算好之后，"这个像素属于哪个连通体"就是 O(1) ——
+## 比每次重跑一遍连通性判定便宜得多。
+##
+## 底层走的是 Destruction.components()，也就是 split() 用的**同一份**计算。
+func component_map() -> Dictionary:
+	var groups := Destruction.components(self)
+	var out := {}
+	var ci := 0
+	for idx in groups:
+		var g: Dictionary = groups[idx]
+		for k: int in g:
+			var arr: PackedInt32Array
+			if out.has(k):
+				arr = out[k]
+			else:
+				arr = PackedInt32Array()
+				arr.resize(Bits.PIXELS)
+				arr.fill(-1)
+				out[k] = arr
+			var mask: int = g[k]
+			while mask != 0:
+				var i := Bits.first_bit_index(mask)
+				mask &= mask - 1
+				arr[i] = ci
+		ci += 1
+	return {"count": ci, "chunks": out}
+
+
+## 沿连通体素做 BFS。**谓词和访问者都由游戏层提供** —— 引擎只负责"怎么走"。
+##
+##   matches(x, y, material, dist) -> bool   能不能踏进这个像素
+##   visit(x, y, material, dist) -> bool     访问它；**返回 false 就停止整趟遍历**
+##
+## 返回访问到的像素数。起点为空、或被 matches 拒绝时返回 0。
+##
+## 典型用法：
+##   蓝线传信号 —— visit 里按 dist 衰减，matches 里限材质
+##   绿线生长   —— visit 里改 aux/mat（改完记得 mark_dirty）
+##   红色蔓延   —— visit 里收集待爆体素，遍历结束后统一处理
+##
+## ⚠️ **GDScript 的 lambda 按值捕获局部变量** —— visit 里改一个局部标量
+##    （比如 `var count := 0` 然后 count += 1）**不会传出去**。
+##    要累积结果请用 Array / Dictionary / 对象成员（引用类型）。
+##    实测症状：visit 明明被调用了，外面的计数还是 0。
+func flood(from: Vector2i, matches: Callable, visit: Callable, diagonal := false) -> int:
+	var m0 := get_pixel(from.x, from.y)
+	if m0 == 0:
+		return 0
+	if matches.is_valid() and not matches.call(from.x, from.y, m0, 0):
+		return 0
+	var seen := {}
+	seen[make_key(from.x, from.y)] = true
+	var queue: Array = [from]
+	var dists: Array = [0]
+	var head := 0
+	var count := 0
+	var offsets: Array = OFFSETS_8 if diagonal else OFFSETS_4
+	while head < queue.size():
+		var p: Vector2i = queue[head]
+		var d: int = dists[head]
+		head += 1
+		count += 1
+		if visit.is_valid() and not visit.call(p.x, p.y, get_pixel(p.x, p.y), d):
+			return count
+		for off: Vector2i in offsets:
+			var nx := p.x + off.x
+			var ny := p.y + off.y
+			var k := make_key(nx, ny)
+			if seen.has(k):
+				continue
+			var m := get_pixel(nx, ny)
+			if m == 0:
+				continue
+			if matches.is_valid() and not matches.call(nx, ny, m, d + 1):
+				continue
+			seen[k] = true
+			queue.append(Vector2i(nx, ny))
+			dists.append(d + 1)
+	return count

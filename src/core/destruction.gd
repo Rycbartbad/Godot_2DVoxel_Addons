@@ -340,14 +340,19 @@ static func _component_slice(shape: PixelShape, keys: Array, lo: int, hi: int) -
 
 
 ## ---------- 接缝归并 + 组装（CPU / GPU 两条路径共用） ----------
-static func _assemble(shape: PixelShape, keys: Array, parts: Dictionary, min_pixels: int) -> Array:
+## 连通分量归组：返回 { 分组序号: { chunk_key: 掩码 } }。
+##
+## 这是 split() 内部用的那份计算 —— **不要另写一份**。连通性判定的细节
+## （对角不算连接、跨 chunk 只查 +X/+Y 避免重复）一旦分叉，两边会给出不同的答案，
+## 而这个项目在"同一规则写两处"上栽过太多次（坑 18/31/36）。
+static func _group(shape: PixelShape, keys: Array, parts: Dictionary) -> Dictionary:
 	var comp_masks: Dictionary = parts["comp_masks"]
 	var node_of: Dictionary = parts["node_of"]
 	var node_chunk: Array = parts["node_chunk"]
 	var node_mask: Array = parts["node_mask"]
 	var node_count := node_chunk.size()
 	if node_count == 0:
-		return []
+		return {}
 
 	# union-find（Array 在 GDScript 里按引用传递，PackedInt32Array 是值拷贝）
 	var parent: Array = []
@@ -401,6 +406,29 @@ static func _assemble(shape: PixelShape, keys: Array, parts: Dictionary, min_pix
 			groups[root] = g
 		var k2: int = node_chunk[i2]
 		g[k2] = g.get(k2, 0) | int(node_mask[i2])
+	return groups
+
+
+## 连通分量标注（公共入口）。返回 { 分量序号: { chunk_key: 掩码 } }，序号重排为 0..n-1
+## —— union-find 的 root 是内部编号，不适合外露。
+##
+## 游戏层拿它做"这条蓝线是哪一条""哪些体素属于同一个连通体"。
+static func components(shape: PixelShape) -> Dictionary:
+	var keys: Array = shape.chunks.keys()
+	if keys.is_empty():
+		return {}
+	var groups := _group(shape, keys, _components_cpu(shape, keys))
+	var out := {}
+	var i := 0
+	for root: int in groups:
+		out[i] = groups[root]
+		i += 1
+	return out
+
+
+static func _assemble(shape: PixelShape, keys: Array, parts: Dictionary, min_pixels: int) -> Array:
+	var groups := _group(shape, keys, parts)
+
 
 	# 快路径：只有一个连通分量 => 破坏没有把东西切开。
 	# 直接返回原 Shape，省掉整趟逐像素拷贝（实测是最贵的一步）。

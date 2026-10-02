@@ -14,6 +14,7 @@ const PixelShape := preload("res://src/core/pixel_shape.gd")
 const Grab := preload("res://src/physics/grab.gd")
 const Sweep := preload("res://src/physics/sweep.gd")
 const SolveBatch := preload("res://src/physics/solve_batch.gd")
+const Query := preload("res://src/physics/query.gd")
 
 var bodies: Array = []
 var shapes_needing_coarse_proxy := 0
@@ -244,6 +245,21 @@ var _next_id := 1
 ## 想让石头比木头重就 set_material_density(1, 2.5)。
 var material_density := PackedFloat32Array()
 var _density_fn: Callable = Callable()
+
+
+## 世界自己登记到查询模块，销毁时自己注销。
+##
+## ⚠️ 为什么不让调用方手动 attach：Query 的注册表是**静态变量**，
+## 忘了注销就会一直持有刚体引用，Godot 退出时报
+## "resources still in use at exit" / "Orphan StringName: RefCounted (static: 1)"。
+## 让拥有者负责生命周期，调用方就没有"记得注销"这件事。
+func _init() -> void:
+	Query.attach(self)
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_PREDELETE:
+		Query.detach(self)
 
 
 ## 设置某材质的密度（会自动扩容表，中间没设过的按 1.0 算）。
