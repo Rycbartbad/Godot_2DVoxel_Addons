@@ -22,6 +22,12 @@ import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ADDON = os.path.join(ROOT, "addons", "pixel_destruction")
+# 产物默认被 tools/build_addon.py --verify 移到项目树外（住在树里会让编辑器报
+# class_name 重名并级联到编译失败）。所以树里找不到就去树外找 ——
+# 否则 CI 会在打包这一步失败，而错误信息完全指不到真正的原因。
+_ALT = os.path.abspath(os.path.join(ROOT, "..", "_addon_build"))
+if not os.path.isdir(ADDON) and os.path.isdir(_ALT):
+    ADDON = _ALT
 ## 固定时间戳：否则同一个源码每次打包出来的字节都不同（Release 附件会失去可比性）
 FIXED_DATE = (2026, 1, 1, 0, 0, 0)
 
