@@ -193,7 +193,7 @@ func _draw_stats(bodies: Array, font: Font) -> void:
 			world.manifolds.size(), world.last_contacts, world.last_substeps],
 		"总动量 (%.1f, %.1f)  总角动量 %.1f  总动能 %.1f" % [
 			world.total_momentum().x, world.total_momentum().y,
-			world.total_angular_momentum(world.center_of_massworld()),
+			world.total_angular_momentum(world.center_of_mass_world()),
 			world.total_kinetic_energy()],
 	])
 	# ⚠️ _draw() 画的是**世界坐标**，直接写 (8,18) 会跑到镜头外面去
