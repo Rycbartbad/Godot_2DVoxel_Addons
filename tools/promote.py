@@ -30,6 +30,7 @@ TESTS = [
     "validation_sweep", "validation_query", "validation_api", "validation_api2",
     "validation_voxel_layer", "validation_contacts", "validation_traversal",
     "validation_dynamics", "validation_nodes", "validation_alignment",
+    "validation_shape_plugin", "validation_stress",
 ]
 
 
