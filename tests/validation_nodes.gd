@@ -40,6 +40,10 @@ func _initialize() -> void:
 
 	# ---- 拖动的两条契约 ----
 	print("=== 拖动契约 ===")
+	# ⚠️ 先钉住"通知真的开着"。只手动发 notification() 能骗过测试，
+	#    但骗不过编辑器 —— 拖动时形状不跟着走就是这么来的。
+	_c("transform 通知已开启（否则拖动不会触发重烘焙）",
+		a.is_transform_notification_enabled())
 	var old_id: int = pw.world.bodies[0].id
 	var first_body = pw.world.bodies[0]
 	a.position = Vector2(200, 60)

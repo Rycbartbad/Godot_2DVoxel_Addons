@@ -157,5 +157,52 @@ func _initialize() -> void:
 	_c("局部 (0,0) 在任意旋转下都映射到原点", p00r.is_equal_approx(b3.position),
 		"%s vs %s" % [str(p00r), str(b3.position)])
 
+	# ---- D. 原点约定：三种形状来源必须一致 ----
+	#
+	# ⚠️ 这条是**用户发现**的 bug：CIRCLE 曾经从 -radius 开始铺像素
+	#    （原点在圆心），而 RECT/TEXTURE 从 (0,0) 开始（原点在左上角）。
+	#    同一个 position 因此指向不同位置 —— 表现就是"碰撞箱和精灵图对不上"。
+	print("=== D. 三种形状来源的原点必须都在左上角 ===")
+	var PB2D := preload("res://src/nodes/pixel_body_2d.gd")
+	# 造一张 8x8 的贴图，右下半实心
+	var img := Image.create(8, 8, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0, 0, 0, 0))
+	for y in range(4, 8):
+		for x in range(4, 8):
+			img.set_pixel(x, y, Color(1, 1, 1, 1))
+	var tex := ImageTexture.create_from_image(img)
+
+	# ⚠️ 不变量是**「没有像素落在负坐标」**（原点在左上角），
+	#    不是"外接盒必须从 (0,0) 起" —— 圆的左边缘像素本来就在 (1,1)，
+	#    因为 (0,0) 到圆心 (6.5,6.5) 的距离 9.19 > 半径 6.5，它是空的。
+	#    把这两件事搞混会写出一个"看起来对但会误报"的断言。
+	for c in [["RECT", PB2D.Source.RECT], ["CIRCLE", PB2D.Source.CIRCLE],
+			["TEXTURE", PB2D.Source.TEXTURE]]:
+		var n2 := PB2D.new()
+		n2.source = c[1]
+		n2.rect_size = Vector2i(16, 16)
+		n2.radius = 6.5
+		n2.texture = tex
+		var sh: PixelShape = n2.build_shape()
+		var negative := 0
+		var aabb: Rect2i = sh.local_aabb()
+		for y in range(aabb.position.y - 2, aabb.end.y + 2):
+			for x in range(aabb.position.x - 2, aabb.end.x + 2):
+				if x < 0 or y < 0:
+					if sh.get_pixel(x, y) != 0:
+						negative += 1
+		_c("%s 没有像素落在负坐标（原点=左上角）" % c[0], negative == 0,
+			"外接 %s，负坐标像素 %d" % [str(aabb), negative])
+		n2.free()
+
+	# TEXTURE 的关键性质：图片左上角 = 刚体原点（留白也保留）
+	var nt := PB2D.new()
+	nt.source = PB2D.Source.TEXTURE
+	nt.texture = tex
+	var st: PixelShape = nt.build_shape()
+	_c("TEXTURE 保留图片留白（实心在右下 4x4）",
+		st.get_pixel(0, 0) == 0 and st.get_pixel(5, 5) != 0)
+	nt.free()
+
 	print("=== %d passed, %d failed ===" % [_pass, _fail])
 	quit(0 if _fail == 0 else 1)
