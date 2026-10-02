@@ -1,5 +1,10 @@
+@tool
 extends Node2D
 ## 像素渲染层。
+##
+## @@tool@@ 是为了**在场景编辑器里也能看见像素**（甲方要求）。
+## 本类是无状态的 —— 只按 @@sync(body)@@ 给的刚体重建贴图，自己不推进物理，
+## 所以加 @@tool@@ 是安全的：编辑器里画的就是场景里已有的那些刚体。
 ##
 ## 设计要点（见框架文档第 5 节）：
 ##   逻辑 chunk = 8x8（物理/破坏的粒度）
@@ -36,6 +41,17 @@ var _bounds := {}         # body.id -> Rect2i
 
 func _ready() -> void:
 	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+
+## 一次同步全部刚体（含回收已消失的）。
+##
+## ⚠️ 与逐帧路径的区别：逐帧路径靠 prune(_live_ids()) 回收，
+##    而这里**不能**那样做 —— 编辑器里 @tool 的 _ready 只跑一次，
+##    如果按"当前世界里的 id"去 prune，会把上一次构建留下的贴图误删。
+##    所以这里只做增量同步，不回收。
+func sync_all(bodies: Array) -> void:
+	for b in bodies:
+		sync(b)
+
 
 ## 回收已经不存在的 Body 对应的 Sprite（分裂销毁 / 预算淘汰都会用到）
 func prune(live: Dictionary) -> void:

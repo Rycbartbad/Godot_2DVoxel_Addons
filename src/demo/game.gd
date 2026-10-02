@@ -1,4 +1,9 @@
+@tool
 extends Node2D
+## @@tool@@ 是为了**在场景编辑器里就能看到关卡**（甲方要求）。
+##
+## 编辑器里只做一件事：把世界和关卡**建出来**，然后交给 PixelRenderer / 调试叠加层去画。
+## 绝不推进物理、不跑输入、不写截图 —— 否则编辑器会被污染，而且存盘时把结果写进去。
 ## 2D 像素破坏沙盒 —— Aseprite 式操作
 ##
 ##   左键拖动   = 绘制（加像素）
@@ -56,6 +61,7 @@ var _shot_at := -1
 
 
 func _ready() -> void:
+	var editing := Engine.is_editor_hint()
 	world = PWorld.new()
 	world.gravity = Vector2(0.0, 600.0)
 	renderer = PixelRenderer.new()
@@ -71,7 +77,12 @@ func _ready() -> void:
 	# 显示分辨率补偿：体素尺寸不变、取景不变，只是每个体素画到更多真实像素上。
 	# 基准高度 540 对应"1 体素 = voxel_world_size 像素"的历史观感，
 	# 换到 1080p 时 zoom 自动翻倍，于是画面构图完全一致、只是更细腻。
+	# ⚠️ 编辑器里视口尺寸/缩放可能拿不到有效值，zoom 为 0 会让 Godot 报
+	#    "Zoom level must be different from 0" 并且相机失效。
+	#    这里兜一下底，编辑器预览用 1.0 就够（预览不需要精确取景）。
 	var s0 := PixelScale.get_scale() * PixelScale.render_scale()
+	if s0 <= 0.0 or not is_finite(s0):
+		s0 = 1.0
 	camera = Camera2D.new()
 	camera.position = Vector2(310, 175)
 	camera.zoom = Vector2(s0, s0)
@@ -87,6 +98,11 @@ func _ready() -> void:
 	add_child(hud)
 
 	_build_level()
+	# ⚠️ 编辑器里到此为止：不跑输入、不截图、不推进物理。
+	#    关卡已经建好，渲染器和调试叠加层会把它们画出来。
+	if editing:
+		renderer.sync_all(world.bodies)
+		return
 	if OS.get_cmdline_user_args().has("--shot"):
 		_shot_at = 260      # 重力调慢后要给它落地的时间
 		_demo_blast()
@@ -143,6 +159,9 @@ func _build_level() -> void:
 # ---------------------------------------------------------------- 主循环
 
 func _process(delta: float) -> void:
+	# ⚠️ 编辑器里不推进物理、不处理输入
+	if Engine.is_editor_hint():
+		return
 	_fps_accum += delta
 	_fps_frames += 1
 	if _fps_accum >= 0.5:

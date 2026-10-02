@@ -1,3 +1,4 @@
+@tool
 class_name PixelPhysics
 extends Node2D
 ## pixel_destruction 的**门面** —— 调用方只需要认识这一个类。
@@ -59,11 +60,36 @@ func _init() -> void:
 	Query.attach(world)          # 查询是模块级的，建世界时挂上
 
 
+## 编辑器里是否自动重绘。构建世界的脚本（@tool）在编辑器里摆好刚体之后，
+## 由本节点把它们画出来 —— 这样在场景编辑器里就能直接看到像素和碰撞形状。
+##
+## ⚠️ 编辑器里**只画、绝不 step**：@tool 的 _physics_process 在编辑器里也会跑，
+##    一旦推进物理就会污染场景，而且存盘时把结果写进去（很隐蔽的坏味道）。
+@export var redraw_in_editor := true
+
+## 编辑器里把调试叠加层也一起重绘
+@export var editor_redraw_overlay := true
+
+
 func _ready() -> void:
 	set_physics_process(true)
+	# 编辑器里不进 _physics_process，但要在资源变化时重绘
+	if Engine.is_editor_hint():
+		set_process(redraw_in_editor)
+
+
+func _process(_delta: float) -> void:
+	# 只有编辑器会走到这里（运行时 _process 是关的）
+	if not Engine.is_editor_hint():
+		return
+	if redraw_in_editor:
+		resync()
 
 
 func _physics_process(delta: float) -> void:
+	# ⚠️ 编辑器里绝不推进物理
+	if Engine.is_editor_hint():
+		return
 	if auto_step:
 		step(delta)
 
