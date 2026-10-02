@@ -16,6 +16,7 @@ extends Node2D
 const Bits := preload("res://src/core/pixel_bits.gd")
 const PixelChunk := preload("res://src/core/pixel_chunk.gd")
 const PixelShape := preload("res://src/core/pixel_shape.gd")
+const PixelShading := preload("res://src/render/pixel_shading.gd")
 const PBody := preload("res://src/physics/pbody.gd")
 const PixelScale := preload("res://src/core/pixel_scale.gd")
 
@@ -42,6 +43,11 @@ var _bounds := {}         # body.id -> Rect2i
 ## 位置/旋转变化不在此列 —— 那些只改 node.transform，不需要重做贴图。
 var _rev := {}           # body.id -> 上次建贴图时的内容版本
 var _warned_material := false
+
+## 逐像素着色（边沿压暗 + 顶面提亮 + 色调扰动）。见 PixelShading 的说明。
+##
+## 这是**烘进贴图**的，所以运行时零开销；关掉它画面会变成每个材质一块纯色。
+var shading := true
 
 
 ## 所有形状的 revision 之和 —— 任何一处像素改动都会让它变。
@@ -270,6 +276,11 @@ func _build_texture_impl(shapes: Array, aabb: Rect2i, cache_key: int):
 						push_warning("PixelRenderer: 材质 id %d 超出调色板（只有 %d 项），已夹到末项。请在材质表里补上。" % [mi, palette.size()])
 					mi = palette.size() - 1
 				var col: Color = palette[mi]
+				if shading:
+					# ⚠️ 坐标要用**形状局部**的：gx/gy 是贴图局部，
+					#    查四邻域必须加上外接盒原点，否则边沿会沿着贴图边界算，
+					#    表现为形状内部凭空出现一条暗线。
+					col = PixelShading.shade(s, gx + ox, gy + oy, col)
 				var o := (gy * w + gx) * 4
 				data[o] = int(col.r * 255.0)
 				data[o + 1] = int(col.g * 255.0)
