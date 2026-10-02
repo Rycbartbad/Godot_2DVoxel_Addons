@@ -151,6 +151,30 @@ def main() -> int:
                             % (os.path.relpath(fp, ROOT).replace(os.sep, "/"),
                                i + 1, line.strip()))
 
+    # 2e) 引用了 @tool 才该有的 API 的脚本，自己必须是 @tool。
+    #
+    # ⚠️ 真实案例：debug_overlay.gd 定义了 set_world() / refresh()，
+    #    并被 PixelWorld（@tool）在编辑器里调用，但它自己没有 @tool。
+    #    编辑器里它是个 **placeholder instance** —— 脚本根本不跑，
+    #    调用会报 "Attempt to call a method on a placeholder instance"。
+    #    症状还包括"节点在场景里但什么都不画"，很难联想到是缺 @tool。
+    for root, _dirs, files in os.walk(SRC):
+        for name in sorted(files):
+            if not name.endswith(".gd"):
+                continue
+            fp = os.path.join(root, name)
+            with open(fp, encoding="utf-8") as f:
+                lines = f.read().split("\n")
+            if lines and "@tool" in lines[0]:
+                continue
+            body = "\n".join(lines)
+            # 用 is_editor_hint 说明作者本意就是"要在编辑器里跑"
+            if "is_editor_hint" in body:
+                errors.append(
+                    "%s 用了 Engine.is_editor_hint() 但没有 @tool —— "
+                    "编辑器里它是 placeholder instance，脚本不会跑"
+                    % os.path.relpath(fp, ROOT).replace(os.sep, "/"))
+
     # 3) 所有内部引用都要能解析
     refs = 0
     for dirpath, _dirs, files in os.walk(OUT):
