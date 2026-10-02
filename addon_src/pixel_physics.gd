@@ -430,6 +430,73 @@ func center_of_mass(body: PBody) -> Vector2:
 	return body.com_world()
 
 
+## ---- 动力学量 ----
+##
+## ⚠️ 符号约定（2D，Godot 的 y 轴向下）：
+##   角速度为正 = 屏幕上**顺时针**转；角动量的符号与它一致。
+
+
+func mass_of(body: PBody) -> float:
+	return body.mass
+
+
+func inertia_of(body: PBody) -> float:
+	return body.inertia
+
+
+## 角速度，弧度/秒（正 = 屏幕上顺时针）。
+func angular_velocity_of(body: PBody) -> float:
+	return body.angular_velocity
+
+
+## 线动量 p = m·v。
+func momentum(body: PBody) -> Vector2:
+	return body.linear_momentum()
+
+
+## 角动量 L = I·ω，关于**质心**。
+func angular_momentum(body: PBody) -> float:
+	return body.angular_momentum()
+
+
+## 关于世界某点的角动量：L = I·ω + r × m·v。
+## 判断"绕某个轴转不转"要用这个（比如绕钉子摆动的木板）。
+func angular_momentum_about(body: PBody, world_point: Vector2) -> float:
+	return body.angular_momentum_about(world_point)
+
+
+## 动能 ½m|v|² + ½Iω²。
+func kinetic_energy(body: PBody) -> float:
+	return body.kinetic_energy()
+
+
+## 力矩**冲量**（角冲量），一次性改变角速度。
+## 持续力矩用 spin()（每帧调）。
+func torque_impulse(body: PBody, t: float) -> void:
+	body.apply_torque_impulse(t)
+
+
+## 给整个系统做守恒检查用：总动量 / 关于质心的总角动量 / 总动能 / 整体质心。
+##
+## ⚠️ 只有**没有外力**（重力、摩擦、阻尼）时总量才守恒。本引擎有线性阻尼
+##    （每步 ×1/(1+0.35·dt)），所以长时间会缓慢衰减 —— 短窗口内检查才准。
+func total_momentum() -> Vector2:
+	return world.total_momentum()
+
+
+func total_angular_momentum(about: Vector2 = Vector2.INF) -> float:
+	var p := world.center_of_mass_world() if about == Vector2.INF else about
+	return world.total_angular_momentum(p)
+
+
+func total_kinetic_energy() -> float:
+	return world.total_kinetic_energy()
+
+
+func system_center_of_mass() -> Vector2:
+	return world.center_of_mass_world()
+
+
 func bounds(body: PBody) -> Rect2:
 	return body.aabb
 

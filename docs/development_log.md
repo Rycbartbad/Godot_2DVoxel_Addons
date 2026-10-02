@@ -2720,6 +2720,77 @@ GDScript 运行时容忍这个环（测试全绿），但**编辑器的脚本扫
 - **删除类修复要连状态一起清。** 停掉产生坏状态的代码 ≠ 坏状态消失。
 
 
+---
+
+## 动力学量接口（甲方要求）★★★★
+
+**甲方要求**：可以施加力矩，读取角速度/动量/角动量等数据。
+
+### 现状核对（先查再写，不凭记忆）
+
+| 项 | 状态 |
+|---|---|
+| 施加力矩 | **已有** add_torque / apply_torque_impulse / PixelPhysics.spin |
+| 角速度 | **已有** angular_velocity |
+| 动量 | **缺** |
+| 角动量 | **缺** |
+
+### 补上的接口
+
+```
+PBody.linear_momentum()                  p = m·v
+PBody.angular_momentum()                 L = I·ω（关于质心）
+PBody.angular_momentum_about(point)      L = I·ω + r × m·v（关于任意点）
+PBody.kinetic_energy()                   ½m|v|² + ½Iω²
+PWorld.total_momentum()                  总动量（守恒检查用）
+PWorld.total_angular_momentum(about)     总角动量
+PWorld.total_kinetic_energy()            总动能
+PWorld.center_of_mass_world()            系统质心
+
+PixelPhysics.momentum / angular_momentum / angular_momentum_about / kinetic_energy
+PixelPhysics.mass_of / inertia_of / angular_velocity_of / torque_impulse
+PixelPhysics.total_momentum / total_angular_momentum / total_kinetic_energy / system_center_of_mass
+```
+
+### 验证（16 项，全部与解析解对照）
+
+tests/validation_dynamics.gd —— 甲方要的是「能读」，但**读出来的数必须对**，
+所以每条都跟解析解比，而不是「跑起来不报错」：
+
+```
+单步 Δω = τ·(1/I)·dt·damp          逐位精确
+力矩冲量 Δω = J/I                   逐位精确
+p = m·v                             float32 精度内一致
+平动体关于原点的 L = r × p          逐位精确
+E = ½m|v|² + ½Iω²                  逐位精确
+总动量/总角动量守恒（计入阻尼）       <2% / <5%
+静态体动量/角动量/动能为 0           ✓
+忘了 clear_forces 会越加越大         ✓（把契约本身钉住）
+```
+
+### 写这套测试时踩到的三个坑（都值得记）
+
+1. **add_torque 是持久累加器，引擎不会自动清。** 第一版忘了 clear_forces()，
+   实测比解析解大 30 倍 —— 力矩每步累积，角速度呈二次增长。
+   契约本身没错（一步里可能切多个子步），但**直接调 PWorld.step 就得自己清**，
+   走 PixelPhysics.step 才由它代劳。已把这条钉进断言。
+
+2. **线阻尼是 0.35，角阻尼是 0.6** —— 两个不一样（_integrate_forces 里两行相邻）。
+   拿错会得到 ~12% 的偏差，而且看起来「差不多对」，很能骗人。
+   为了排除子步对阻尼作用次数的影响，最终用**单步精确断言**钉死积分本身。
+
+3. **linear_momentum() 走 Vector2 * float，会被截断到 float32。**
+   容差得给 1e-6 而不是 1e-12 —— 本项目的老坑（Vector2 * real_t 先截标量再乘）。
+
+> 另外：诊断脚本里用 %+.3e 打印误差，结果**格式化静默失败、原样打出格式串** ——
+> GDScript 的 % 不支持 %e / %g，这条我自己写进 pitfalls.md 又踩了一次。
+
+### 手册同步
+
+docs/manual/README.md 的决策表新增「动力学量」一节，含符号约定（y 轴向下、顺时针为正）
+和上面两个坑；tests/check_manual_api.gd 把这些方法名也纳入校验，防止手册写错。
+
+
 ## 4.4 修复后的诚实备注
 
 仍有已知瑕疵，记在这里以免下次重新发现：

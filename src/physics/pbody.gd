@@ -130,6 +130,45 @@ func apply_torque_impulse(t: float) -> void:
 	angular_velocity += inv_inertia * t
 
 
+## ---- 动力学量 ----
+##
+## ⚠️ 符号约定（2D，Godot 的 y 轴向下）：
+##   · 角速度 ω 为正 = 屏幕上**顺时针**转；
+##   · 二维叉积 a.cross(b) = a.x*b.y - a.y*b.x 在这个坐标系下同样顺时针为正；
+##   · 所以下面所有角动量的符号与 ω 一致，不需要额外取负。
+##
+## ⚠️ 静态体的 mass / inertia 是 0，动量和动能都返回 0 —— 这是对的：
+##   静态体吸收冲量但不运动，不参与动量交换。
+
+
+## 线动量 p = m·v。
+##
+## 二维里刚体的总线动量恒为 m·v_com，与参考点无关（转动不贡献线动量）。
+func linear_momentum() -> Vector2:
+	return linear_velocity * mass
+
+
+## 角动量 L = I·ω，关于**质心**。
+##
+## 关于其它点要用 angular_momentum_about() —— 那不是加个常数，而是多一项 r × p。
+func angular_momentum() -> float:
+	return inertia * angular_velocity
+
+
+## 关于世界坐标中某点的角动量：L = I_com·ω + r × (m·v_com)，r 从该点指向质心。
+##
+## 用途：判断物体"绕某个轴转不转"。一块木板绕钉住的端点摆动时，
+## 关于**钉子**的角动量才有意义，关于质心算出来的不是同一回事。
+func angular_momentum_about(world_point: Vector2) -> float:
+	var r := com_world() - world_point
+	return inertia * angular_velocity + r.cross(linear_velocity * mass)
+
+
+## 动能 E = ½m|v|² + ½Iω²（平动 + 转动）。
+func kinetic_energy() -> float:
+	return 0.5 * mass * linear_velocity.length_squared() 		+ 0.5 * inertia * angular_velocity * angular_velocity
+
+
 ## 一次性"推一下"：等价于让力 force 作用 dt 秒。
 ## 只在确实想要瞬时推力时用它；**持续力请用 add_force**（见 accum_force 的说明）。
 func apply_force_once(force: Vector2, world_point: Vector2, dt: float) -> void:

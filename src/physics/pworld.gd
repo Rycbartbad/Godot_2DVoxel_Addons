@@ -1022,6 +1022,57 @@ func _wake_pair(a: PBody, b: PBody) -> void:
 		sleeper.sleep_timer = 0.0
 
 
+## ---------- 动量统计 ----------
+##
+## 甲方要求"能读动量/角动量"。单体量在 PBody 上，这里给**总量** ——
+## 总量是守恒检查的判据（碰撞前后应当相等，除非有重力/摩擦/阻尼在做功）。
+
+
+## 全部动态体的总线动量 Σ m·v。
+func total_momentum() -> Vector2:
+	var s := Vector2.ZERO
+	for b: PBody in bodies:
+		if b.is_static:
+			continue
+		s += b.linear_momentum()
+	return s
+
+
+## 全部动态体关于世界某点的总角动量 Σ (I·ω + r × m·v)。
+##
+## ⚠️ 关于**原点**的角动量与关于**质心**的角动量是不同的量，而且只有关于
+##    质心（或固定点）的角动量在无外力矩时才守恒。做守恒检查时请传质心。
+func total_angular_momentum(about := Vector2.ZERO) -> float:
+	var s := 0.0
+	for b: PBody in bodies:
+		if b.is_static:
+			continue
+		s += b.angular_momentum_about(about)
+	return s
+
+
+## 全部动态体的总动能。
+func total_kinetic_energy() -> float:
+	var s := 0.0
+	for b: PBody in bodies:
+		if b.is_static:
+			continue
+		s += b.kinetic_energy()
+	return s
+
+
+## 全部动态体的质心（按质量加权）。做守恒检查时传它当参考点。
+func center_of_mass_world() -> Vector2:
+	var m := 0.0
+	var s := Vector2.ZERO
+	for b: PBody in bodies:
+		if b.is_static:
+			continue
+		m += b.mass
+		s += b.com_world() * b.mass
+	return s / m if m > 0.0 else Vector2.ZERO
+
+
 ## ---------- 接触事件 ----------
 ##
 ## 游戏层做"高速碰撞触发""挨打反应"需要知道**这一步发生了哪些接触、撞得多猛**。

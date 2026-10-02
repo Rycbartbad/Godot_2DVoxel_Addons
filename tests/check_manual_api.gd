@@ -41,6 +41,10 @@ func _initialize() -> void:
 		"grab_at", "drag_to", "release", "has_grab",
 		"set_tag", "find_body", "find_bodies", "find_shapes", "tag_value", "has_tag", "remove_tag",
 		"shape_material_at", "center_of_mass", "step", "resync", "renderer",
+		# 动力学量（甲方要求）
+		"spin", "torque_impulse", "angular_velocity_of", "momentum", "angular_momentum",
+		"angular_momentum_about", "kinetic_energy", "mass_of", "inertia_of",
+		"total_momentum", "total_angular_momentum", "total_kinetic_energy", "system_center_of_mass",
 	])
 	# world / auto_step / auto_render 是**属性**不是方法，走 _check_prop
 	_check_prop("PixelPhysics", f, ["world"])

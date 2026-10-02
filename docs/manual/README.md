@@ -99,6 +99,45 @@ func _physics_process(delta):
 | 整块换材质 | `px.set_body_material(body, from, to)` |
 | 逐像素读写 | `shape.get_pixel / set_pixel / get_aux / set_aux` |
 
+### 动力学量（甲方要的：力矩 / 角速度 / 动量 / 角动量）
+
+| 我要 | 用 |
+|---|---|
+| 施加**持续力矩**（每帧调） | `px.spin(body, torque)` |
+| 施加**力矩冲量**（一次性） | `px.torque_impulse(body, j)` |
+| 读角速度 | `px.angular_velocity_of(body)` |
+| 读线动量 | `px.momentum(body)` |
+| 读角动量（关于质心） | `px.angular_momentum(body)` |
+| 读角动量（关于任意点） | `px.angular_momentum_about(body, p)` |
+| 读动能 | `px.kinetic_energy(body)` |
+| 读质量 / 转动惯量 | `px.mass_of(body)` / `px.inertia_of(body)` |
+| **守恒检查**（总动量/总角动量/总动能） | `px.total_momentum()` / `px.total_angular_momentum()` |
+
+**符号约定**（2D，Godot 的 y 轴向下）：
+
+- 角速度为正 = 屏幕上**顺时针**转
+- 二维叉积 `a.cross(b) = a.x*b.y - a.y*b.x` 在这个坐标系下同样顺时针为正
+- 所以角动量的符号与角速度一致，不需要额外取负
+
+**两个必须知道的坑**：
+
+1. **`add_torque` 是持久累加器，引擎不会自动清** —— 忘了 `clear_forces()` 力矩会越加越大、
+   角速度呈二次增长。走 `px.step()` 由它代劳；直接调 `world.step()` 就得自己清。
+2. **线阻尼是 `0.35`，角阻尼是 `0.6`** —— 两个不一样，拿错会得到 ~12% 的偏差，
+   而且看起来「差不多对」，很能骗人。
+
+**关于任意点的角动量**：L = I·ω + r × m·v。`px.angular_momentum(body)` 是**关于质心**的，
+判断「绕某个轴转不转」要用 `angular_momentum_about` —— 比如绕钉子摆动的木板。
+
+**守恒检查**只有**无外力**时才成立。本引擎有阻尼，所以短窗口内检查才准：
+
+```gdscript
+var p0 := px.total_momentum()
+# ... 跑几步 ...
+var p1 := px.total_momentum()
+# 有阻尼时按 damp^steps 衰减，别期望严格相等
+```
+
 ### 让东西动
 
 | 我要 | 用 |
