@@ -1,4 +1,9 @@
-[gd_scene load_steps=9 format=3]
+; ⚠️ 这一行必须保留 uid=。
+; 用编辑器/工具**整体重写** .tscn 时最容易漏掉它，而 Godot 的 .godot/uid_cache.bin
+; 里还留着旧映射 —— 于是启动时报 "Unrecognized UID: uid://..." 并反复刷屏。
+; 场景文件本身没有 uid= 是合法的（Godot 下次保存时会补一个），
+; 但**已有的引用会断**，所以重写时要把原 uid 抄回来。
+[gd_scene load_steps=9 format=3 uid="uid://baw7ln87c7kj6"]
 
 [ext_resource type="Script" path="res://src/nodes/pixel_world.gd" id="1_world"]
 [ext_resource type="Script" path="res://src/nodes/pixel_body_2d.gd" id="2_body"]
