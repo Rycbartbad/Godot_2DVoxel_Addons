@@ -60,10 +60,20 @@ func _draw() -> void:
 	draw_line(Vector2(-6, 0), Vector2(6, 0), c, 1.0)
 	draw_line(Vector2(0, -6), Vector2(0, 6), c, 1.0)
 	draw_circle(Vector2.ZERO, 2.0, c)
-	if is_static:
-		# 静态体额外画一个方框，一眼区分
-		var s := Vector2(rect_size)
-		draw_rect(Rect2(-s * 0.5, s), Color(0.4, 0.7, 1.0, 0.5), false, 1.0)
+	# 画出**真实形状的外接**，而不是凭 rect_size 猜一个。
+	#
+	# ⚠️⚠️ 这里曾经画的是 Rect2(-Vector2(rect_size) * 0.5, rect_size) —— 以**原点为中心**。
+	#    那是错的：形状从 (0,0) 开始铺，「原点 = 左上角」。
+	#    结果编辑器里看起来就是「碰撞箱在中心、精灵图在左上角」，
+	#    让人以为是引擎对齐错了 —— 其实是这个抓手画错了。
+	#    教训：**调试可视化本身画错，比没有可视化更糟**，它会把人引到错误的方向。
+	var shape := build_shape()
+	if not shape.is_empty():
+		var aabb := shape.local_aabb()
+		var col := Color(0.4, 0.8, 1.0, 0.8) if is_static else Color(0.3, 1.0, 0.5, 0.7)
+		draw_rect(Rect2(Vector2(aabb.position), Vector2(aabb.size)), col, false, 1.0)
+		# 原点在左上角：明确标出来
+		draw_circle(Vector2(aabb.position), 1.5, col)
 
 @export var source: Source = Source.RECT
 

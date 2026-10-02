@@ -24,6 +24,13 @@ func _ready() -> void:
 	cam.make_current()
 	if Engine.is_editor_hint():
 		return
+	if OS.get_cmdline_user_args().has("--shot"):
+		await get_tree().create_timer(0.8).timeout
+		var img := get_viewport().get_texture().get_image()
+		img.save_png("res://nodes_shot.png")
+		print("SHOT saved")
+		get_tree().quit()
+		return
 	var label := Label.new()
 	label.position = Vector2(12, 8)
 	label.text = "全部由场景节点摆出来（PixelWorld + PixelBody2D）—— 没有生成代码"
