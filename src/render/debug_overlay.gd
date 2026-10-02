@@ -106,8 +106,7 @@ func _resolve_world() -> void:
 		world = src.world
 	else:
 		world = null
-	if OS.get_cmdline_user_args().has("--shot"):
-		print("[DebugOverlay] src=%s world=%s" % [src, world != null])
+
 
 
 ## 世界里的刚体（没有世界就返回空，编辑器里没摆 PixelPhysics 时不该报错）

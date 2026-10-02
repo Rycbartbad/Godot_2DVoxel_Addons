@@ -7,17 +7,3 @@ Vulkan 1.4.351 - Forward+ - Using Device #0: NVIDIA - NVIDIA GeForce RTX 5060 La
 [FastPhys] 已注册方法 broadphase
 [FastPhys] 已注册方法 solve
 [FastPhys] 已注册方法 clear_warm
-[PixelWorld] 烘焙 6 个刚体（场景节点 -> RefCounted，之后热循环不碰 Node）
-[PixelWorld] 烘焙 6 个刚体（场景节点 -> RefCounted，之后热循环不碰 Node）
-[PixelWorld] 烘焙 6 个刚体（场景节点 -> RefCounted，之后热循环不碰 Node）
-[PixelWorld] 烘焙 6 个刚体（场景节点 -> RefCounted，之后热循环不碰 Node）
-[PixelWorld] 烘焙 6 个刚体（场景节点 -> RefCounted，之后热循环不碰 Node）
-[PixelWorld] 烘焙 6 个刚体（场景节点 -> RefCounted，之后热循环不碰 Node）
-[PixelWorld] 烘焙 6 个刚体（场景节点 -> RefCounted，之后热循环不碰 Node）
-[PixelWorld] 烘焙 6 个刚体（场景节点 -> RefCounted，之后热循环不碰 Node）
-[PixelWorld] 烘焙 6 个刚体（场景节点 -> RefCounted，之后热循环不碰 Node）
-[PixelWorld] 烘焙 6 个刚体（场景节点 -> RefCounted，之后热循环不碰 Node）
-[PixelWorld] 烘焙 6 个刚体（场景节点 -> RefCounted，之后热循环不碰 Node）
-[PixelWorld] 烘焙 6 个刚体（场景节点 -> RefCounted，之后热循环不碰 Node）
-[PixelWorld] 烘焙 6 个刚体（场景节点 -> RefCounted，之后热循环不碰 Node）
-[PixelWorld] 烘焙 6 个刚体（场景节点 -> RefCounted，之后热循环不碰 Node）

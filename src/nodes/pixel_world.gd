@@ -49,6 +49,11 @@ const PixelBody2D := preload("res://src/nodes/pixel_body_2d.gd")
 @export_group("运行")
 @export var auto_step := true
 @export var auto_render := true
+## 是否在每次重建时打印烘焙数量。
+##
+## ⚠️ 默认 **false**：编辑器里拖一下就会重建一次，日志会刷屏。
+##    排查"节点没被烘焙""数量不对"时再打开。
+@export var log_bake := false
 
 var world = null
 var renderer: PixelRenderer = null
@@ -102,7 +107,8 @@ func rebuild() -> void:
 		renderer.prune({})
 		renderer.sync_all(world.bodies)
 	_sync_overlays()
-	print("[PixelWorld] 烘焙 %d 个刚体（场景节点 -> RefCounted，之后热循环不碰 Node）" % n)
+	if log_bake:
+		print("[PixelWorld] 烘焙 %d 个刚体（场景节点 -> RefCounted，之后热循环不碰 Node）" % n)
 
 
 func _density_of(material: int) -> float:
