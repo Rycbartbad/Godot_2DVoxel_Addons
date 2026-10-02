@@ -39,22 +39,25 @@ jobs:
 
       - name: 打包
         run: |
-          cd addons
-          zip -qr ../pixel_destruction.zip pixel_destruction
-          cd ..
-          unzip -l pixel_destruction.zip | tail -3
+          set -e
+          if [[ "@D@{GITHUB_REF}" == refs/tags/* ]]; then
+            python tools/package_addon.py --version "@D@{GITHUB_REF_NAME}"
+          else
+            python tools/package_addon.py
+          fi
+          ls -l pixel_destruction*.zip
 
       - uses: actions/upload-artifact@v4
         with:
           name: pixel_destruction-addon
-          path: pixel_destruction.zip
+          path: pixel_destruction*.zip
           if-no-files-found: error
 
       - name: 打 tag 时发布 Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: pixel_destruction.zip
+          files: pixel_destruction*.zip
           generate_release_notes: true
 
   ## 引擎回归：跑 Godot 无头测试。
