@@ -326,7 +326,9 @@ SetShapeScale / SetCollision / SetVehicleMaxSteerAngle / SetSunLength ...
 | 游戏内 Mod 管理器 | 新建 mod、编辑、F5 测试关卡、F4 回编辑器、发布 Workshop |
 | 内置 Mod（Make local copy） | 官方示例是最好的模板 |
 | `DebugPrint / DebugWatch / DebugLine / DebugCross / DebugTransform` | 引擎内调试输出与 3D 调试绘制 |
-| **VS Code Lua 补全** | Teardown 官方**未**提供 .lua 定义文件；社区把 api.xml 转成 JSON/定义供补全（见社区调研笔记） |
+| **VS Code 补全** | 官方**未**提供 `.lua` 定义文件。社区方案：[Teardown Intellisense](https://marketplace.visualstudio.com/items?itemName=GhoustUser.teardown-intellisense)（2026-02 版本覆盖 **606 个函数 / 16 别名**，含 `server/client/Vec3/Quat` 类、`#include` 跳转；**仅当工作区根目录有 `info.txt` 时才启用**） |
+| **社区 JSON 文档** | [funlennysub/teardown-api-docs-json](https://github.com/funlennysub/teardown-api-docs-json)：`stable_api.json` / `exp_api.json`，结构 = `{version, baseURL, api:[{category, desc, functions:[{name, def, arguments, return, info, example}]}]}`，**但版本停在 0.8.0（仅 277 函数 / 20 分类）**，做 IDE 工具可参考其 schema，数据请以官方 api.xml 为准 |
+| 本项目自带 | `docs/teardown_api_research/` 下的 `teardown_api_full.md`（609 函数全参数说明+示例+属性表）与 `api_index.md`（速查）均由官方 api.xml 生成，比社区 JSON 新 |
 | 官方视频教程 | 12 集编辑器 + 10 集脚本基础 + 10 集联机脚本（见 [modding index](https://teardowngame.com/modding/index.html)） |
 
 ---
