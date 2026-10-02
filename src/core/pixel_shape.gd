@@ -8,7 +8,11 @@ extends RefCounted
 
 const Bits := preload("res://src/core/pixel_bits.gd")
 const PixelChunk := preload("res://src/core/pixel_chunk.gd")
-const Destruction := preload("res://src/core/destruction.gd")
+# ⚠️ **绝对不要**在这里 preload destruction.gd。
+# destruction.gd 已经 preload 了本文件，再加一条反向 preload 就成环 ——
+# GDScript 运行时能容忍，但**编辑器的脚本扫描器会无限递归然后无声段错误**
+# （实测：编辑器启动 17 秒后消失，退出码 0xC0000005，没有任何报错信息）。
+# 需要 Destruction 的功能（连通分量）放在 ShapeOps 里，它同时依赖两边、不成环。
 
 ## local chunk 坐标 -> PixelChunk
 var chunks: Dictionary = {}
@@ -283,37 +287,6 @@ func neighbors(x: int, y: int, diagonal := false) -> Array:
 	for off: Vector2i in (OFFSETS_8 if diagonal else OFFSETS_4):
 		out.append(Vector2i(x + off.x, y + off.y))
 	return out
-
-
-## 每像素的**连通分量序号**（-1 = 空）。
-##
-## 返回 { "count": n, "chunks": { chunk_key: PackedInt32Array(64) } }。
-## 一次算好之后，"这个像素属于哪个连通体"就是 O(1) ——
-## 比每次重跑一遍连通性判定便宜得多。
-##
-## 底层走的是 Destruction.components()，也就是 split() 用的**同一份**计算。
-func component_map() -> Dictionary:
-	var groups := Destruction.components(self)
-	var out := {}
-	var ci := 0
-	for idx in groups:
-		var g: Dictionary = groups[idx]
-		for k: int in g:
-			var arr: PackedInt32Array
-			if out.has(k):
-				arr = out[k]
-			else:
-				arr = PackedInt32Array()
-				arr.resize(Bits.PIXELS)
-				arr.fill(-1)
-				out[k] = arr
-			var mask: int = g[k]
-			while mask != 0:
-				var i := Bits.first_bit_index(mask)
-				mask &= mask - 1
-				arr[i] = ci
-		ci += 1
-	return {"count": ci, "chunks": out}
 
 
 ## 沿连通体素做 BFS。**谓词和访问者都由游戏层提供** —— 引擎只负责"怎么走"。

@@ -217,7 +217,7 @@ func propagate(shape: PixelShape, source: Vector2i, power: int) -> void:
 要知道「这条蓝线是哪一条」用 `component_map()`：
 
 ```gdscript
-var cm := shape.component_map()             # { count, chunks: { key: PackedInt32Array(64) } }
+var cm := ShapeOps.component_map(shape)             # { count, chunks: { key: PackedInt32Array(64) } }
 var arr: PackedInt32Array = cm["chunks"][PixelShape.make_key(0, 0)]
 var which_line: int = arr[3 * 8 + 5]        # 局部像素 (5, 3) 属于哪条线（-1 = 空）
 ```

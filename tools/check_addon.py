@@ -17,6 +17,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "addons", "pixel_destruction")
+SRC = os.path.join(ROOT, "src")
 
 MODULES = ["physics", "core", "render", "gpu"]
 REQUIRED = [
@@ -63,6 +64,67 @@ def main() -> int:
                 errors.append("%s/%s 里残留 res://src/ 路径（路径改写漏了）" % (mod, name))
             if len(body.strip()) == 0:
                 errors.append("%s/%s 是空文件" % (mod, name))
+
+    # 2b) 不许有重复 UID。
+    #
+    # addons/pixel_destruction/ 和 src/ 是同一棵 Godot 项目树下的两份拷贝，
+    # 一旦把 src/ 的 .uid 复制过来，Godot 4.4+ 会报
+    #   "UID duplicate detected between res://src/... and res://addons/..."
+    # 并且**编辑器直接打不开**。这条闸门就是防它复发的。
+    src_uids = {}
+    for root, _dirs, files in os.walk(SRC):
+        for name in files:
+            if name.endswith(".uid"):
+                with open(os.path.join(root, name), encoding="utf-8") as f:
+                    src_uids[f.read().strip()] = name
+    dup = []
+    for root, _dirs, files in os.walk(OUT):
+        for name in files:
+            if name.endswith(".uid"):
+                with open(os.path.join(root, name), encoding="utf-8") as f:
+                    v = f.read().strip()
+                if v in src_uids:
+                    dup.append("%s 与 src/ 的 %s 重复" % (name, src_uids[v]))
+    if dup:
+        errors.append("有 %d 个重复 UID（Godot 会拒绝打开项目）: %s"
+                      % (len(dup), "; ".join(dup[:3])))
+
+    # 2c) 源码里不许有 preload 环。
+    #
+    # ⚠️ 这不是洁癖：GDScript 运行时能容忍 preload 环，但**编辑器的脚本扫描器会
+    #    无限递归然后无声段错误** —— 实测编辑器启动 17 秒后消失、退出码 0xC0000005、
+    #    没有任何报错。而且 headless 跑测试完全正常，非常难查。
+    #    （真实案例：pixel_shape.gd 为了 component_map 反向 preload 了 destruction.gd。）
+    graph = {}
+    for root, _dirs, files in os.walk(SRC):
+        for name in files:
+            if not name.endswith(".gd"):
+                continue
+            fp = os.path.join(root, name)
+            with open(fp, encoding="utf-8") as f:
+                body = f.read()
+            deps = set(re.findall(r'preload\("res://([^"]+\.gd)"\)', body))
+            graph[os.path.relpath(fp, ROOT).replace(os.sep, "/")] = deps
+    seen, stack, cycles = set(), [], []
+
+    def visit(node):
+        if node in stack:
+            cycles.append(" -> ".join(stack[stack.index(node):] + [node]))
+            return
+        if node in seen:
+            return
+        seen.add(node)
+        stack.append(node)
+        for dep in sorted(graph.get(node, ())):
+            if dep in graph:
+                visit(dep)
+        stack.pop()
+
+    for node in sorted(graph):
+        visit(node)
+    if cycles:
+        errors.append("有 %d 个 preload 环（编辑器会无声段错误）: %s"
+                      % (len(cycles), cycles[0]))
 
     # 3) 所有内部引用都要能解析
     refs = 0

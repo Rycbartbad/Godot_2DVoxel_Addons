@@ -130,7 +130,21 @@ static func sat_signed(a: OBB, b: OBB) -> Dictionary:
 ## GDScript 改了、C++ 的调用点没改，3610 个流形里 115 个点位不同（法向/深度/
 ## 分离度全对，只有点位错）。在推测接触被正确调参之前，两边都用这个旧公式。
 static func speculative_point(a: OBB, b: OBB, n: Vector2) -> Vector2:
-	return (support(a, n) + support(b, -n)) * 0.5
+	# 切向：取**两盒切向重叠区间的中心**。
+	#
+	# ⚠️ 不要写成"A 的支撑点再夹进 B 的跨度"：support() 返回的是**角点**，
+	#    夹进一个很宽的 B（比如一整块地面）等于没夹，接触点就停在 A 的**边缘**上，
+	#    力臂不对称 —— 实测一块 16x16 的箱子落在平地上会横向漂移 0.758 像素。
+	#    取重叠区间的中心则在面贴面时正好落在接触面中心、力臂为 0。
+	var t := Vector2(-n.y, n.x)
+	var ha := absf(a.u.dot(t)) * a.h.x + absf(a.v.dot(t)) * a.h.y
+	var hb := absf(b.u.dot(t)) * b.h.x + absf(b.v.dot(t)) * b.h.y
+	var ca := a.center.dot(t)
+	var cb := b.center.dot(t)
+	var ta := (maxf(ca - ha, cb - hb) + minf(ca + ha, cb + hb)) * 0.5
+	# 法向：取两支撑点法向坐标的中点（它们之间就是那点间隙）
+	var nm := (support(a, n).dot(n) + support(b, -n).dot(n)) * 0.5
+	return n * nm + t * ta
 
 
 ## 沿 dir 的最远点（支撑点）

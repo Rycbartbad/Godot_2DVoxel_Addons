@@ -14,6 +14,12 @@ addons/pixel_destruction/
 pixel_destruction*.zip
 # API 参考同样是生成物（tools/gen_api_docs.py），由 CI 产出并发布
 docs/api/
+# 诊断时用的临时输出
+_edit_out.txt
+_edit_err.txt
+_e_o.txt
+_e_e.txt
+.godot_bak/
 # ⚠️ Windows 的 fastphys.dll **提交进仓库**（0.5 MB）：
 #   没有它就只能走 GDScript 回退路径，而回退路径目前与原生路径**不等价**
 #   （实测 sleep_box 0/12 -> 10/12 清醒）。开箱可用比"仓库里不放二进制"更重要。

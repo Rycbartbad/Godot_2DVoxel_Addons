@@ -54,7 +54,11 @@ func _initialize() -> void:
 	_check_prop("PBody", b, ["shapes"])
 	_check("PixelShape", s, ["get_pixel", "set_pixel", "get_aux", "set_aux", "clear_pixel",
 		"fill_rect", "count_by_material", "dirty_chunks", "has_dirty", "clear_dirty",
-		"mark_dirty", "mark_dirty_key", "flood", "component_map", "neighbors"])
+		"mark_dirty", "mark_dirty_key", "flood", "neighbors"])
+	# component_map 在 ShapeOps 上（PixelShape 不能 preload Destruction，会成环）
+	var so = preload("res://addons/pixel_destruction/core/shape_ops.gd").new()
+	if not so.has_method("component_map"):
+		_bad.append("ShapeOps.component_map")
 	_check_prop("PixelShape", s, ["chunks"])
 	# 静态成员
 	for n in ["make_key", "key_x", "key_y", "OFFSETS_4", "OFFSETS_8"]:

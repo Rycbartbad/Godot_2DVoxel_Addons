@@ -143,7 +143,25 @@ static inline int clip_segment(V2 p1, V2 p2, V2 n, double offset, V2 out[2]) {
 static inline V2 speculative_point(const OBB &a, const OBB &b, V2 n) {
 	V2 pa = obb_support(a, n);
 	V2 pb = obb_support(b, vneg(n));
-	return vmul(vadd(pa, pb), 0.5f);
+	// 与 collide.gd 的 speculative_point 逐位等价：切向取两盒重叠区间中心 + 法向取中点
+	V2 t = v2(-n.y, n.x);
+	double au = (double)vdot(a.u, t);
+	if (au < 0.0) au = -au;
+	double av = (double)vdot(a.v, t);
+	if (av < 0.0) av = -av;
+	double ha = au * (double)a.h.x + av * (double)a.h.y;
+	double bu = (double)vdot(b.u, t);
+	if (bu < 0.0) bu = -bu;
+	double bv = (double)vdot(b.v, t);
+	if (bv < 0.0) bv = -bv;
+	double hb = bu * (double)b.h.x + bv * (double)b.h.y;
+	double ca = (double)vdot(a.center, t);
+	double cb = (double)vdot(b.center, t);
+	double lo = ca - ha; if (cb - hb > lo) lo = cb - hb;
+	double hi = ca + ha; if (cb + hb < hi) hi = cb + hb;
+	double ta = (lo + hi) * 0.5;
+	double nm = ((double)vdot(pa, n) + (double)vdot(pb, n)) * 0.5;
+	return vadd(vmul(n, (float)nm), vmul(t, (float)ta));
 }
 
 struct Pt { double px, py, depth, sep, feature; };

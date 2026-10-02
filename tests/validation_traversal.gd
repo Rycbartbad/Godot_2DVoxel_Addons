@@ -2,6 +2,7 @@ extends SceneTree
 ## 第 3 层验证：体素遍历原语（neighbors / component_map / flood）
 const PixelShape := preload("res://src/core/pixel_shape.gd")
 const Destruction := preload("res://src/core/destruction.gd")
+const ShapeOps := preload("res://src/core/shape_ops.gd")
 
 var _pass := 0
 var _fail := 0
@@ -25,7 +26,7 @@ func _initialize() -> void:
 	_c("8 邻域有 8 个", s.neighbors(5, 5, true).size() == 8)
 
 	print("=== component_map ===")
-	var cm := s.component_map()
+	var cm := ShapeOps.component_map(s)
 	_c("三个连通分量", int(cm["count"]) == 3, "count=%d" % int(cm["count"]))
 	var chunks: Dictionary = cm["chunks"]
 	# 块 A 在 (1,1)，块 B 在 (21,21)，长线在 (5,40)

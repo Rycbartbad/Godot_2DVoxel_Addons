@@ -207,3 +207,38 @@ static func is_touching(a: PixelShape, b: PixelShape) -> bool:
 ## 形状上离 world_point 最近的实心像素。返回 Query.Hit。
 static func closest_point(shape: PixelShape, world_point: Vector2) -> Query.Hit:
 	return Query.closest_point_on_shape(shape, world_point)
+
+
+## 每像素的**连通分量序号**（-1 = 空）。
+##
+## 返回 { "count": n, "chunks": { chunk_key: PackedInt32Array(64) } }。
+## 一次算好之后，"这个像素属于哪个连通体"就是 O(1) ——
+## 比每次重跑一遍连通性判定便宜得多。
+##
+## ⚠️ 为什么放在这里而不是 PixelShape：PixelShape 不能 preload Destruction
+## （Destruction 已经 preload 了 PixelShape，反向再加一条就成环，
+##  编辑器会因无限递归无声段错误）。本文件同时依赖两边，是放它的正确位置。
+##
+## 底层走的是 Destruction.components()，也就是 split() 用的**同一份**计算。
+static func component_map(shape: PixelShape) -> Dictionary:
+	var groups := Destruction.components(shape)
+	var out := {}
+	var ci := 0
+	for idx in groups:
+		var g: Dictionary = groups[idx]
+		for k: int in g:
+			var arr: PackedInt32Array
+			if out.has(k):
+				arr = out[k]
+			else:
+				arr = PackedInt32Array()
+				arr.resize(Bits.PIXELS)
+				arr.fill(-1)
+				out[k] = arr
+			var mask: int = g[k]
+			while mask != 0:
+				var i := Bits.first_bit_index(mask)
+				mask &= mask - 1
+				arr[i] = ci
+		ci += 1
+	return {"count": ci, "chunks": out}

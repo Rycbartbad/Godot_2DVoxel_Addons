@@ -64,7 +64,13 @@ var iterations := 10
 var parallel_min_per_color := 8
 var baumgarte := 0.15
 var penetration_slop := 0.5           # 像素
-var max_depenetration_speed := 100.0  # 像素/秒
+## 穿透修正（伪速度通道）的速度上限，像素/秒。
+##
+## ⚠️ 这个值在**推测接触真正生效之后**必须调小，否则两者会打架：
+##    深穿透时 100 px/s 的暴力挤出会把物体猛地推离接触面，重力再把它拉回来，
+##    和推测接触的"允许接近"形成振荡，最终把堆叠结构抖散（实测 20 塔 x 4 层直接塌）。
+##    20 px/s ≈ 每步 0.33 像素 —— 缓慢、单调地把穿透磨掉，不再产生回弹。
+var max_depenetration_speed := 20.0  # 像素/秒
 var restitution_velocity_threshold := 40.0
 var global_restitution := 0.0
 var global_friction := 0.5

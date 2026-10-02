@@ -88,11 +88,19 @@ def main() -> int:
                 body = f.read()
             with open(os.path.join(dd, name), "w", encoding="utf-8", newline="\n") as f:
                 f.write(rewrite(body))
-            # .uid 是 Godot 给脚本分配的稳定 id（场景按 UID 引用脚本）。
-            # 一起带上，免得使用方导入时各自生成不同的 UID。
-            uid = os.path.join(sd, name + ".uid")
-            if os.path.isfile(uid):
-                shutil.copyfile(uid, os.path.join(dd, name + ".uid"))
+            # ⚠️ **不要**把 src/ 的 .uid 复制过来。
+            #
+            # 曾经复制过，理由是"场景按 UID 引用脚本"。但那个理由在本项目不成立：
+            # addon 里没有任何 .tscn，全部引用都是 res:// 路径，没有一处用 UID。
+            #
+            # 而复制会造成**重复 UID**：addons/pixel_destruction/ 和 src/ 是同一棵
+            # Godot 项目树下的两份拷贝，Godot 4.4+ 对重复 UID 是硬错误 ——
+            # 编辑器直接打不开，报
+            #   "UID duplicate detected between res://src/... and res://addons/..."
+            # 实测 21 对重复。
+            #
+            # 使用方把 addon 拷进自己的项目时，Godot 会自己生成一套新的唯一 UID，
+            # 不需要我们替他决定。
             n += 1
         total += n
         print("  %-8s %2d 个脚本（生成）" % (mod, n))
