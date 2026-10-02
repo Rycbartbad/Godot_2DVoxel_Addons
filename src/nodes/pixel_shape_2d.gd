@@ -27,17 +27,84 @@ const PixelShape := preload("res://src/core/pixel_shape.gd")
 
 enum Source { RECT, CIRCLE, TEXTURE }
 
-@export var source: Source = Source.RECT
+@export var source: Source = Source.RECT:
+	set(v):
+		source = v
+		invalidate_shape()
 
 @export_group("形状")
-@export var rect_size := Vector2i(16, 16)      ## source=RECT
-@export var radius := 8.0                      ## source=CIRCLE
-@export var texture: Texture2D                 ## source=TEXTURE
-@export_range(1, 254) var alpha_threshold := 128
+@export var rect_size := Vector2i(16, 16):     ## source=RECT
+	set(v):
+		rect_size = v
+		invalidate_shape()
+@export var radius := 8.0:                     ## source=CIRCLE
+	set(v):
+		radius = v
+		invalidate_shape()
+@export var texture: Texture2D:                ## source=TEXTURE
+	set(v):
+		texture = v
+		invalidate_shape()
+@export_range(1, 254) var alpha_threshold := 128:
+	set(v):
+		alpha_threshold = v
+		invalidate_shape()
 
 @export_group("材质")
 ## 材质 id。决定颜色与密度（材质表在 PixelWorld 上）。
-@export_range(1, 254) var material_id := 1
+@export_range(1, 254) var material_id := 1:
+	set(v):
+		material_id = v
+		invalidate_shape()
+
+
+## ---- 形状缓存 ----
+##
+## ## 为什么缓存必须由框架做，而不是留给子类
+##
+## build_shape() 可能很贵：800x40 的地面是 **32000 次 set_pixel**。
+## 而编辑器里拖一下刚体，父 PixelWorld 就会**重建整个世界** ——
+## 也就是对每个形状重算一遍。**拖动卡顿的根因就在这里。**
+##
+## 子类只管实现 build_shape()，缓存由本类负责（setter 与变换通知会自动失效）。
+var _cache: PixelShape = null
+var _cache_valid := false
+
+
+func _enter_tree() -> void:
+	# ⚠️ 必须显式打开，否则 NOTIFICATION_TRANSFORM_CHANGED 不会发 ——
+	#    拖动本形状子节点时缓存就不会失效，形状停在旧位置。
+	set_notify_transform(true)
+
+
+func _notification(what: int) -> void:
+	# 变换（position/scale/rotation）变了，形状的生成结果就变了
+	if what == NOTIFICATION_TRANSFORM_CHANGED and Engine.is_editor_hint():
+		invalidate_shape()
+
+
+## 取形状（带缓存）。**PixelBody2D 用这个，不要直接调 build_shape()。**
+func get_shape() -> PixelShape:
+	if not _cache_valid:
+		_cache = build_shape()
+		_cache_valid = true
+	return _cache
+
+
+## 让缓存失效，并通知父世界重烘焙。
+##
+## ⚠️ 不通知父世界的话，编辑器里改 rect_size 会出现"抓手和精灵都变新了，
+##    但世界里的刚体还是旧尺寸"—— 画面与碰撞分叉，而且只有再拖一下节点才会好
+##    （改导出属性不发 TRANSFORM_CHANGED）。父世界有防抖，重复调用是安全的。
+func invalidate_shape() -> void:
+	_cache_valid = false
+	queue_redraw()
+	if Engine.is_editor_hint():
+		var p := get_parent()
+		while p != null and not p.has_method("on_child_moved"):
+			p = p.get_parent()
+		if p != null:
+			p.on_child_moved()
 
 
 ## ---- 接口：继承本类并重写它，就能提供任意形状 ----

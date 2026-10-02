@@ -58,10 +58,26 @@ func _draw() -> void:
 	# 编辑器里的抓手：没有可见图形的话节点很难选中和拖动。
 	if not Engine.is_editor_hint():
 		return
-	var c := Color(1.0, 0.75, 0.2, 0.95)
-	draw_line(Vector2(-6, 0), Vector2(6, 0), c, 1.0)
-	draw_line(Vector2(0, -6), Vector2(0, 6), c, 1.0)
-	draw_circle(Vector2.ZERO, 2.0, c)
+	# ⚠️ 先把绘制坐标系里的**缩放抵消掉**。
+	#
+	# 形状是**已经按 scale 生成过**的（见 build_shape），而 _draw() 的坐标
+	# 又会被本节点变换缩放一遍 —— 不抵消就是**双重缩放**，框会比碰撞体大 scale 倍。
+	#
+	# draw_set_transform 设的是**附加**在节点变换之上的局部变换，传 1/scale
+	# 正好抵消。之后画的都是"未缩放的局部坐标"，线宽 1.0 也永远是 1 像素。
+	# 旋转**不抵消** —— 形状外接应该跟着刚体转。
+	#
+	# ## 为什么不画自己画的原点准星了
+	#
+	# 以前这里画了一个十字 + 圆点表示原点。删掉了，两个原因：
+	#   1. **Godot 编辑器本来就画** —— 选中 Node2D 时就有原点指示，
+	#      自己再画一个是重复，而且两套视觉风格打架。
+	#   2. 想让它"看起来对"就得逐个补偿线宽/半径/半轴，漏一个就变形 ——
+	#      实际就是漏了：节点一 scale，十字变长、圆变椭圆。**重复造轮子还造歪了。**
+	#
+	# 想要**常驻**的原点标记（不依赖选中状态），用 Godot 原生的 Marker2D 子节点 ——
+	# 它就是为这件事存在的，零代码，而且跟着编辑器主题走。
+	draw_set_transform(Vector2.ZERO, 0.0, _inv_scale())
 	# 🔥 用**缓存**的外接，绝不在这里调 build_shape()。
 	#
 	# ⚠️⚠️ 我在这里犯过一个严重的性能错误：直接调 build_shape() 来拿外接。
@@ -76,17 +92,15 @@ func _draw() -> void:
 	#    结果编辑器里看起来就是「碰撞箱在中心、精灵图在左上角」，
 	#    让人以为是引擎对齐错了 —— 其实是这个抓手画错了。
 	#    教训：**调试可视化本身画错，比没有可视化更糟**，它会把人引到错误的方向。
+	# 坐标系已在上面用 draw_set_transform 抵消了缩放 —— 所以这里**直接用形状坐标**，
+	# 不需要任何补偿系数。形状的外接是多少就画多大，经过节点变换后正好贴住形状。
 	if aabb.size.x > 0 and aabb.size.y > 0:
 		var col := Color(0.4, 0.8, 1.0, 0.8) if is_static else Color(0.3, 1.0, 0.5, 0.7)
-		# ⚠️ _draw() 的坐标**会被节点变换缩放**，而形状已经按 scale 生成过了 ——
-		#    直接画就是**双重缩放**，框会比实际碰撞体大 scale 倍。
-		#    这里先除以 scale，经过节点变换之后才正好落在形状上。
-		var inv := Vector2(1.0 / _scale_abs().x, 1.0 / _scale_abs().y)
-		var p := Vector2(aabb.position) * inv
-		var sz := Vector2(aabb.size) * inv
-		draw_rect(Rect2(p, sz), col, false, 1.0 / maxf(0.01, maxf(_scale_abs().x, _scale_abs().y)))
-		# 原点在左上角：明确标出来
-		draw_circle(p, 1.5 * inv.x, col)
+		var p := Vector2(aabb.position)
+		var sz := Vector2(aabb.size)
+		draw_rect(Rect2(p, sz), col, false, 1.0)
+		# 原点在左上角：明确标出来（半径恒为 1.5，永远是圆）
+		draw_circle(p, 1.5, col)
 
 
 ## 节点 scale 的绝对值。
@@ -101,6 +115,12 @@ func _draw() -> void:
 ##    X/Y 各自下限为 1 像素。
 func _scale_abs() -> Vector2:
 	return Vector2(maxf(0.01, absf(scale.x)), maxf(0.01, absf(scale.y)))
+
+
+## 1/scale —— 给 _draw() 用来抵消节点缩放（见 _draw 的说明）
+func _inv_scale() -> Vector2:
+	var s := _scale_abs()
+	return Vector2(1.0 / s.x, 1.0 / s.y)
 
 
 ## 形状外接的缓存。_draw() 每帧都要用，而 build_shape() 可能很贵
@@ -264,7 +284,16 @@ func build_shape() -> PixelShape:
 func collect_shapes() -> Array:
 	var out: Array = []
 	for c in get_children():
-		if c.has_method("build_shape"):
+		# ⚠️ 优先用 get_shape()（带缓存）。拖动时父世界会重建整个世界，
+		#    直接调 build_shape() 就是每帧对每个形状重算一遍 —— 800x40 的地面
+		#    是 32000 次 set_pixel，拖动卡顿的根因。
+		#    仍然回退到 build_shape()：那是给自定义子类留的接口，
+		#    它们只要实现 build_shape() 就自动获得缓存。
+		if c.has_method("get_shape"):
+			var sh2 = c.get_shape()
+			if sh2 != null and not (sh2 as PixelShape).is_empty():
+				out.append(sh2)
+		elif c.has_method("build_shape"):
 			var sh = c.build_shape()
 			if sh != null and not (sh as PixelShape).is_empty():
 				out.append(sh)

@@ -1,49 +1,44 @@
-; ⚠️ 这一行必须保留 uid=。
-; 用编辑器/工具**整体重写** .tscn 时最容易漏掉它，而 Godot 的 .godot/uid_cache.bin
-; 里还留着旧映射 —— 于是启动时报 "Unrecognized UID: uid://..." 并反复刷屏。
-; 场景文件本身没有 uid= 是合法的（Godot 下次保存时会补一个），
-; 但**已有的引用会断**，所以重写时要把原 uid 抄回来。
-[gd_scene load_steps=9 format=3 uid="uid://baw7ln87c7kj6"]
+[gd_scene format=3 uid="uid://baw7ln87c7kj6"]
 
-[ext_resource type="Script" path="res://src/nodes/pixel_world.gd" id="1_world"]
-[ext_resource type="Script" path="res://src/nodes/pixel_body_2d.gd" id="2_body"]
-[ext_resource type="Script" path="res://src/render/debug_overlay.gd" id="3_overlay"]
-[ext_resource type="Script" path="res://src/demo/nodes_demo.gd" id="4_cam"]
+[ext_resource type="Script" uid="uid://c2ue2xs2ynpvn" path="res://src/nodes/pixel_world.gd" id="1_world"]
+[ext_resource type="Script" uid="uid://b81cn0blc3bc5" path="res://src/nodes/pixel_body_2d.gd" id="2_body"]
+[ext_resource type="Script" uid="uid://bo2s2jnttpp4b" path="res://src/render/debug_overlay.gd" id="3_overlay"]
+[ext_resource type="Script" uid="uid://cms8kixrpa4cp" path="res://src/nodes/pixel_material.gd" id="3_xktxc"]
+[ext_resource type="Script" uid="uid://dytpf6bddtu68" path="res://src/demo/nodes_demo.gd" id="4_cam"]
 [ext_resource type="Resource" path="res://materials/stone.tres" id="5_stone"]
 [ext_resource type="Resource" path="res://materials/wood.tres" id="6_wood"]
 [ext_resource type="Resource" path="res://materials/metal.tres" id="7_metal"]
 [ext_resource type="Resource" path="res://materials/brick.tres" id="8_brick"]
 
-[node name="NodesDemo" type="Node2D"]
+[node name="NodesDemo" type="Node2D" unique_id=1214596658]
 script = ExtResource("4_cam")
 
-[node name="PixelWorld" type="Node2D" parent="."]
+[node name="PixelWorld" type="Node2D" parent="." unique_id=702209692]
 script = ExtResource("1_world")
-materials = Array[Resource]([ExtResource("5_stone"), ExtResource("6_wood"), ExtResource("7_metal"), ExtResource("8_brick")])
+materials = Array[ExtResource("3_xktxc")]([ExtResource("5_stone"), ExtResource("6_wood"), ExtResource("7_metal"), ExtResource("8_brick")])
 
-[node name="Ground" type="Node2D" parent="PixelWorld"]
+[node name="Ground" type="Node2D" parent="PixelWorld" unique_id=1145720395]
 position = Vector2(-400, 200)
 script = ExtResource("2_body")
 rect_size = Vector2i(800, 40)
-material_id = 1
 is_static = true
 
-[node name="Box1" type="Node2D" parent="PixelWorld"]
+[node name="Box1" type="Node2D" parent="PixelWorld" unique_id=1811991561]
 position = Vector2(-120, 180)
 script = ExtResource("2_body")
 material_id = 2
 
-[node name="Box2" type="Node2D" parent="PixelWorld"]
-position = Vector2(-120, 164)
+[node name="Box2" type="Node2D" parent="PixelWorld" unique_id=301130582]
+position = Vector2(-144, 124)
 script = ExtResource("2_body")
 material_id = 2
 
-[node name="Box3" type="Node2D" parent="PixelWorld"]
-position = Vector2(-120, 148)
+[node name="Box3" type="Node2D" parent="PixelWorld" unique_id=1966708600]
+position = Vector2(-57, 78)
 script = ExtResource("2_body")
 material_id = 2
 
-[node name="Ball" type="Node2D" parent="PixelWorld"]
+[node name="Ball" type="Node2D" parent="PixelWorld" unique_id=1123877619]
 position = Vector2(-300, 100)
 script = ExtResource("2_body")
 source = 1
@@ -51,14 +46,14 @@ radius = 12.0
 material_id = 3
 initial_velocity = Vector2(180, 0)
 
-[node name="Wall" type="Node2D" parent="PixelWorld"]
-position = Vector2(131, 162)
+[node name="Wall" type="Node2D" parent="PixelWorld" unique_id=112161035]
+position = Vector2(72, 21)
 script = ExtResource("2_body")
 rect_size = Vector2i(24, 80)
 material_id = 4
 is_static = true
 
-[node name="DebugOverlay" type="Node2D" parent="PixelWorld"]
+[node name="DebugOverlay" type="Node2D" parent="PixelWorld" unique_id=1391735214]
 script = ExtResource("3_overlay")
 show_velocity = true
 show_angular = true
