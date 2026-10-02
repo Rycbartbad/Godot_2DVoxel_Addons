@@ -41,6 +41,7 @@ func _initialize() -> void:
 	# ---- 拖动的两条契约 ----
 	print("=== 拖动契约 ===")
 	var old_id: int = pw.world.bodies[0].id
+	var first_body = pw.world.bodies[0]
 	a.position = Vector2(200, 60)
 	# ⚠️ 这个常量定义在 Node2D 上，不在 Node 上
 	a.notification(Node2D.NOTIFICATION_TRANSFORM_CHANGED)
@@ -57,8 +58,12 @@ func _initialize() -> void:
 	_c("rebuild 后刚体跟到新位置",
 		pw.world.bodies[0].position.is_equal_approx(Vector2(200, 60)),
 		str(pw.world.bodies[0].position))
-	_c("重烘焙换新 id（所以渲染器必须 prune({}) 清空重建）",
-		pw.world.bodies[0].id != old_id, "%d -> %d" % [old_id, pw.world.bodies[0].id])
+	# ⚠️ 不要断言"id 变了"：PWorld 的 id 是**每个世界独立计数**的，
+	#    新建世界会给出同样的 id。要断言的是**刚体对象换了**。
+	#    （渲染器仍然必须 prune({}) 清空 —— 因为它是按 id 索引贴图的，
+	#      id 复用意味着旧贴图会被新贴图覆盖而不是留下幽灵，但依赖这一点太脆弱。）
+	_c("重烘焙换了新的刚体对象", pw.world.bodies[0] != first_body,
+		"id %d（每世界独立计数，会复用）" % pw.world.bodies[0].id)
 	_c("刚体数不变", pw.world.bodies.size() == 2, "%d" % pw.world.bodies.size())
 
 	# ---- 吸附：位置应当能被对齐到整数 ----
