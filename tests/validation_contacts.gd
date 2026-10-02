@@ -87,8 +87,12 @@ func _initialize() -> void:
 		for c in w2.contacts:
 			if (c.a == spin or c.b == spin) and absf(c.approach) > absf(spin_approach):
 				spin_approach = c.approach
-	_c("转动贡献被算进接近速度（不是只取质心速度）", absf(spin_approach) > 30.0,
-		"最大 %.1f px/s（质心几乎不动）" % spin_approach)
+	# ⚠️ 阈值是 >10 不是 >30：接触点改成"两盒切向重叠区间的中心"之后，
+	#    力臂比原来的角点小得多，转动贡献随之变小（实测 240 px/s 的端点速度
+	#    在接触点处只剩 15.9）。**这里要断言的是"转动贡献被算进去了"**，
+	#    即远大于 0 —— 质心速度在 0 附近，只取质心会得到 0。
+	_c("转动贡献被算进接近速度（不是只取质心速度）", absf(spin_approach) > 10.0,
+		"最大 %.1f px/s（质心几乎不动，只取质心会得到 0）" % spin_approach)
 
 	# ---- 法向由 a 指向 b ----
 	var w3 := PWorld.new()

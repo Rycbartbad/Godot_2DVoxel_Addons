@@ -205,9 +205,13 @@ func _test_parallel_not_diverging() -> void:
 			continue
 		if not is_finite(b.position.x) or not is_finite(b.position.y) or not is_finite(b.rotation):
 			nan += 1
-		# 地面顶面 y=0：任何箱子的底边都不该跑到地面以下超过 slop
+		# 地面顶面 y=0：任何箱子的底边都不该跑到地面以下超过 slop。
+		#
+		# ⚠️ 阈值必须取自引擎真实的 penetration_slop，不能硬编码 ——
+		#    slop 就是"允许的穿透深度"，箱子静止时**正好**停在那个深度上。
+		#    硬编码 1.0 而 slop 也是 1.0 时会卡在边界上误报（实测 16 个"陷入 1.001"）。
 		lowest = maxf(lowest, b.aabb.end.y)
-		if b.aabb.end.y > 1.0:
+		if b.aabb.end.y > w.solver.penetration_slop + 0.5:
 			sunk += 1
 	_check("没有 NaN", nan == 0, "NaN %d 个" % nan)
 	_check("没有箱子陷进地面", sunk == 0, "陷入 %d 个, 最深 %.3f px" % [sunk, lowest])
