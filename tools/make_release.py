@@ -24,6 +24,28 @@ tag 用 git 推就够了，但 **Release 是 GitHub 的元数据**，git 推不�
 
 脚本**从不打印 token**，出错信息里也会把它抹掉。
 
+## ⚠️ 已知环境问题：这台机器上 Python 的 urllib 连不上 api.github.com
+
+实测 `WinError 10054`（连接被重置），重试 4 次全失败 —— 但同一台机器上：
+
+  curl https://api.github.com/zen        -> HTTP 200
+  ssh -T git@github.com                  -> 认证成功
+  [System.Net.Dns]::GetHostAddresses     -> 正常解析
+
+所以**网络是通的**，是 Python 的 TLS/连接层被重置。urllib 路径在这台机器上不可用。
+
+绕过办法（已验证可用）：让 curl 发请求。
+
+  hdr=(-H "Authorization: Bearer $tok" -H "Accept: application/vnd.github+json")
+  curl -s @hdr "https://api.github.com/repos/OWNER/REPO/releases/tags/TAG"
+  curl -s -X PATCH @hdr -H "Content-Type: application/json" \
+       --data-binary '@payload.json' "https://api.github.com/repos/OWNER/REPO/releases/ID"
+
+payload.json 的内容是 {"name": TAG, "body": "<发布说明全文>"}。
+
+另外：**推 tag 时 GitHub 会自己建一个 Release**（正文是自动生成的 changelog 链接），
+所以 POST 几乎必然撞 already_exists —— 脚本已经处理成"改成更新正文"。
+
 ## 用法
 
   python tools/make_release.py v0.2.0              # 建 Release
@@ -36,6 +58,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -79,13 +102,29 @@ def call(method: str, path: str, tok: str, body=None):
     req.add_header("X-GitHub-Api-Version", "2022-11-28")
     if data:
         req.add_header("Content-Type", "application/json")
-    try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            return json.loads(r.read().decode("utf-8")), None
-    except urllib.error.HTTPError as e:
-        return None, "%s %s" % (e.code, e.read().decode("utf-8", "replace")[:400])
-    except Exception as e:                      # noqa: BLE001
-        return None, str(e)
+    # ⚠️ 网络类错误要重试，HTTP 状态码不要。
+    #    这台机器到 GitHub 经常 WinError 10054 / "Remote end closed connection"，
+    #    一次失败就报错很烦；但 4xx 重试多少次都一样，重试只会掩盖真问题。
+    last = ""
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return json.loads(r.read().decode("utf-8")), None
+        except urllib.error.HTTPError as e:
+                # 请求体可能已经被读过一次，重建一个
+            return None, "%s %s" % (e.code, e.read().decode("utf-8", "replace")[:400])
+        except Exception as e:                  # noqa: BLE001
+            last = str(e)
+            if attempt < 3:
+                print("  网络错误，重试 %d/3：%s" % (attempt + 1, last[:60]))
+                time.sleep(2.0 * (attempt + 1))
+                if data is not None:
+                    req = urllib.request.Request(API + path, data=data, method=method)
+                    req.add_header("Accept", "application/vnd.github+json")
+                    req.add_header("Authorization", "Bearer " + tok)
+                    req.add_header("X-GitHub-Api-Version", "2022-11-28")
+                    req.add_header("Content-Type", "application/json")
+    return None, last
 
 
 def main() -> int:
