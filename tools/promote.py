@@ -74,6 +74,21 @@ def main() -> int:
     head = run(["git", "rev-parse", "--short", "HEAD"]).stdout.strip()
     print("待推进的提交：%s" % head)
 
+    # 0.5) **文档同步闸门** —— 在测试之前跑。
+    #
+    # ⚠️ 「每次发布前先同步文档」这条规则，光写进文档挡不住 ——
+    #    本仓库已经证明过一次（AGENTS.md 写了「开发只在 main」，助手照样自己推进）。
+    #    所以做成闸门：文档不同步就不许推进。
+    if not args.force:
+        r = run([sys.executable, os.path.join(ROOT, "tools", "check_docs.py")])
+        doc_out = (r.stdout or "") + (r.stderr or "")
+        for line in doc_out.strip().splitlines():
+            print("  " + line)
+        if r.returncode != 0:
+            print("")
+            print("文档未同步 —— **拒绝推进 stable**。先把上面列的补齐。")
+            return 1
+
     if not args.force:
         godot = find_godot()
         if not godot:
