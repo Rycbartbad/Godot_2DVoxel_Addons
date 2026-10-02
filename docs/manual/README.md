@@ -1,0 +1,192 @@
+# 开发者手册
+
+## 这份手册 vs 自动生成的 API 参考
+
+| | 组织方式 | 回答的问题 |
+|---|---|---|
+| `docs/api/`（生成） | 按**类** | `PWorld` 有哪些方法？参数是什么？ |
+| **本手册**（手写） | 按**任务** | 我想做 X，该用哪个 API？怎么组合？ |
+
+参考是查的，手册是读的。先读手册建立模型，之后查参考。
+
+---
+
+## 心智模型
+
+```
+Body（刚体）    位置/旋转/速度/质量。物理只认识它。
+  └─ Shape[]   一组形状。一个刚体可以有好几块。
+       └─ PixelChunk[]   8x8 的像素块（稀疏表）。
+            ├─ occ : int64        占用位掩码（哪些像素是实心的）
+            ├─ mat : byte[64]     材质 id（1..255，0 = 空）
+            └─ aux : byte[64]     辅助表，引擎不解释语义（损伤/引信/信号…）
+```
+
+三个关键点：
+
+1. **物理只看见 OBB。** 像素团会被贪心分解成矩形，物理层拿到的是一堆 OBB。
+   所以你不需要为碰撞单独建形状 —— 画什么就是什么。
+2. **材质只是一个整数 id。** 颜色、密度、强度、混合规则**全部由游戏层持有**，
+   引擎只在需要时问你要密度（`PWorld.material_density`）。
+3. **`aux` 是给你用的。** 引擎不解释它，只保证它跟 `mat` 一起被复制、切分、保留。
+   损伤、引信计时、信号强度、温度都放这里 —— **不要编码进材质 id 的高位**。
+
+---
+
+## 坐标空间（最容易搞混的地方）
+
+| 空间 | 单位 | 怎么转 |
+|---|---|---|
+| **世界** | 像素 | 绝大多数 API 都用它：破坏、查询、施力、标签 |
+| **刚体局部** | 像素 | `body.to_local(p)` / `body.to_world(p)` |
+| **形状局部像素** | 整数格 | **和刚体局部是同一个空间** —— 形状没有独立变换 |
+
+> ⚠️ **形状没有自己的局部变换**（引擎的刻意简化）。像素直接活在刚体局部空间里，
+> 所以 `shape.get_pixel(x, y)` 的 `(x, y)` 就是刚体局部坐标取整。
+> 这也意味着 `ShapeOps.world_transform(shape)` 返回的就是刚体变换。
+
+**唯一的例外**是 `Destruction.Damage` —— 它的坐标是**形状局部像素空间**。
+世界坐标的破坏请用 `PixelPhysics.carve_circle` 那一组（内部帮你换算）。
+
+---
+
+## 一帧里发生什么
+
+```
+world.step(dt)
+  ├─ 按最快物体决定切几个子步（默认每子步位移 <= 2 像素）
+  └─ 每个子步：
+       清伪速度 -> 积分受力 -> 宽相+窄相 -> [采集接触事件] -> 唤醒 -> 求解
+       -> 积分变换 -> 更新 AABB -> 休眠
+```
+
+游戏层通常这样编排：
+
+```gdscript
+func _physics_process(delta):
+    # 1) 物理步进之前：跑你自己的体素模拟（元胞自动机），改 mat/aux
+    for body in px.bodies():
+        for shape in body.shapes:
+            voxel_tick(shape)          # 只处理 shape.dirty_chunks()
+    px.step(delta)                     # 2) 物理
+    for c in px.world.contacts:        # 3) 步进之后：读接触事件做反应
+        handle_contact(c)
+```
+
+---
+
+## 决策表：我要做 X，用哪个 API
+
+### 造东西
+
+| 我要 | 用 |
+|---|---|
+| 一块地面/墙 | `px.add_ground(rect, material)` |
+| 一个方块 | `px.spawn_rect(pos, size, material)` |
+| 一个圆盘 | `px.spawn_circle(pos, radius, material)` |
+| 任意像素团 | `px.spawn_shape(pos, shape)` |
+| 程序化生成（人形、房子） | `px.spawn_from_grid(pos, w, h, solid_fn, material)` |
+| 删掉一个物体 | `px.despawn(body)` |
+
+### 材质与颜色
+
+| 我要 | 用 |
+|---|---|
+| 定义一种材质（颜色+密度） | `px.define_material(id, color, density)` |
+| 查世界某点的材质 | `px.material_at(world_point)` |
+| 查形状上某点的材质 | `px.shape_material_at(shape, world_point)` |
+| 涂色（不破坏） | `px.paint_circle(center, radius, material)` |
+| 整块换材质 | `px.set_body_material(body, from, to)` |
+| 逐像素读写 | `shape.get_pixel / set_pixel / get_aux / set_aux` |
+
+### 让东西动
+
+| 我要 | 用 |
+|---|---|
+| 持续推（每帧调） | `px.push(body, force)` |
+| 在某点推（产生力矩） | `px.push_at(body, force, world_point)` |
+| 转 | `px.spin(body, torque)` |
+| 瞬间踢一脚 | `px.impulse(body, j, world_point?)` |
+| 失重 / 反重力 | `px.set_gravity_scale(body, 0.0)` |
+| 直接设速度 | `px.set_velocity(body, v)` |
+| 让一个物体不被物理推走 | `body.make_static()` |
+
+### 破坏
+
+| 我要 | 用 |
+|---|---|
+| 挖圆洞 | `px.carve_circle(center, radius)` |
+| 挖方洞 | `px.carve_rect(center, half_size)` |
+| 激光切割 | `px.cut(from, to, radius)` |
+| 爆炸（推开+破坏） | `px.explode(center, radius, power)` |
+| 只切分不破坏 | `px.split_shape(shape)` |
+| 合并相邻形状 | `px.merge_shape(shape)` |
+| 判断是否被打碎 | `px.is_broken(body)` |
+
+### 查询（射击、视线、范围）
+
+| 我要 | 用 |
+|---|---|
+| 打一条**像素级精确**的射线 | `px.raycast(origin, dir, max_dist, radius?)` |
+| 找最近的实心像素 | `px.closest_point(origin, max_dist)` |
+| 范围内的物体 | `px.bodies_in(bounds)` |
+| 查询时排除某些物体 | `px.query_reject_body(body)` |
+
+### 反应（事件）
+
+| 我要 | 用 |
+|---|---|
+| 知道这一步撞了什么、多猛 | `world.contact_events_enabled = true` 然后读 `world.contacts` |
+| 只处理「首次撞击」 | `c.is_new` |
+
+### 体素级模拟（元胞自动机 / 信号 / 生长）
+
+| 我要 | 用 |
+|---|---|
+| 只处理变过的区域 | `shape.dirty_chunks()` / `shape.has_dirty()` / `clear_dirty()` |
+| 沿连通体素走一遍 | `shape.flood(from, matches, visit)` |
+| 知道某像素属于哪个连通体 | `shape.component_map()` |
+| 邻域 | `PixelShape.OFFSETS_4 / OFFSETS_8`（热循环里直接内联，别调 `neighbors()`） |
+| 手动标脏（批量写入后） | `shape.mark_dirty(cx, cy)` |
+
+### 查找与组织
+
+| 我要 | 用 |
+|---|---|
+| 按名字找物体 | `px.set_tag(body, "crate")` + `px.find_body("crate")` |
+| 找一批 | `px.find_bodies(tag)` / `px.find_shapes(tag)` |
+| 拖动物体 | `px.grab_at(world_point)` / `px.drag_to(p)` / `px.release()` |
+
+---
+
+## 阅读路径
+
+| 你是 | 读这些 |
+|---|---|
+| **第一次用** | 本页 → `addons/pixel_destruction/examples/minimal.gd`（8 个断言的活文档） |
+| **要做玩法** | [cookbook.md](cookbook.md) —— 按任务的配方 |
+| **关心性能** | [performance.md](performance.md) —— 实测数字与选路 |
+| **踩坑了** | [pitfalls.md](pitfalls.md) —— API 误用清单 |
+| **要移植/改引擎** | `addons/pixel_destruction/docs/PRECISION.md` —— 浮点与移植纪律 |
+| **想懂管线** | `addons/pixel_destruction/docs/ARCHITECTURE.md` |
+
+---
+
+## 三十秒上手
+
+```gdscript
+var px := PixelPhysics.new()
+add_child(px)                                     # 加进树里就自动 _physics_process
+
+px.define_material(1, Color.SLATE_GRAY, 2.5)      # 石头
+px.define_material(2, Color.SANDY_BROWN, 0.6)     # 木头
+px.add_ground(Rect2(-400, 300, 800, 40), 1)
+
+var crate := px.spawn_rect(Vector2(0, 0), Vector2(20, 20), 2)
+px.set_tag(crate, "crate")
+
+# 射击：像素级精确，能穿过像素画里的空洞
+var hit := px.raycast(px.center_of_mass(crate) + Vector2(-100, 0), Vector2(1, 0), 300.0)
+if hit.hit:
+    px.explode(hit.point, 30.0, 400.0)            # 爆心/半径/速度增量
+```

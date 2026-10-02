@@ -85,6 +85,24 @@ python tools/check_addon.py     # 校验自洽：路径改写、内部引用、�
 > 模板里的 preload 路径是**装好之后**的路径，在仓库里解析不了。
 ---
 
+## 文档
+
+| 文档 | 给谁 | 组织方式 |
+|---|---|---|
+| [开发者手册](docs/manual/README.md) | **要用这个引擎做游戏的人** | 按**任务** |
+| [配方手册](docs/manual/cookbook.md) | 同上 | 可直接抄的代码 |
+| [性能手册](docs/manual/performance.md) | 同上 | 实测数字与选路 |
+| [陷阱清单](docs/manual/pitfalls.md) | 同上 | 症状 → 原因 → 正确做法 |
+| `docs/api/`（**生成**） | 查签名的人 | 按**类** |
+| `addons/pixel_destruction/docs/PRECISION.md` | 要移植/改引擎的人 | 浮点与移植纪律 |
+| `addons/pixel_destruction/docs/ARCHITECTURE.md` | 想懂管线的人 | 阶段拆解 |
+| `docs/api_alignment.md` | 关心能力边界的人 | 能力 ↔ 参考实现对照 + 缺口清单 |
+
+**手册里的 API 引用有自动校验**（`tests/check_manual_api.gd`）：把手册提到的每个方法/属性
+拿去和真实代码对一遍 —— 教错 API 的手册比没有手册更糟。已接进 CI。
+
+---
+
 ## API 参考（生成物，不进仓库）
 
 用 **Godot 自带的文档工具**导出结构，再由 `tools/gen_api_docs.py` 拼成 Markdown：

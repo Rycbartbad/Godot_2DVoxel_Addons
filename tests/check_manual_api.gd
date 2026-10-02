@@ -1,0 +1,74 @@
+extends SceneTree
+## 手册自检：把手册里出现的 API 名字全部拿去和真实代码对一遍。
+## 教错 API 的手册比没有手册更糟。
+const Facade := preload("res://addons/pixel_destruction/pixel_physics.gd")
+const PixelShape := preload("res://addons/pixel_destruction/core/pixel_shape.gd")
+const PWorld := preload("res://addons/pixel_destruction/physics/pworld.gd")
+const PBody := preload("res://addons/pixel_destruction/physics/pbody.gd")
+
+var _bad: Array = []
+
+func _check(obj_name: String, obj, names: Array) -> void:
+	for n in names:
+		if not obj.has_method(n):
+			_bad.append("%s.%s" % [obj_name, n])
+
+func _check_prop(obj_name: String, obj, names: Array) -> void:
+	for n in names:
+		var found := false
+		for p in obj.get_property_list():
+			# ⚠️ get_property_list() 的 name 是 StringName，直接和 String 比会不相等
+			if String(p["name"]) == n:
+				found = true
+				break
+		if not found:
+			_bad.append("%s.%s (属性)" % [obj_name, n])
+
+func _initialize() -> void:
+	var f = Facade.new()
+	var w = PWorld.new()
+	var b = PBody.new()
+	var s = PixelShape.new()
+
+	# ---- 手册里用到的 facade 方法 ----
+	_check("PixelPhysics", f, [
+		"configure", "define_material", "material_color", "material_density", "material_at",
+		"add_ground", "spawn_rect", "spawn_circle", "spawn_shape", "spawn_from_grid", "despawn",
+		"carve_circle", "carve_rect", "cut", "explode", "paint_circle", "set_body_material",
+		"split_shape", "merge_shape", "is_broken", "bodies",
+		"push", "push_at", "spin", "impulse", "set_gravity_scale", "set_velocity",
+		"raycast", "closest_point", "bodies_in", "query_reject_body", "query_clear_filters",
+		"grab_at", "drag_to", "release", "has_grab",
+		"set_tag", "find_body", "find_bodies", "find_shapes", "tag_value", "has_tag", "remove_tag",
+		"shape_material_at", "center_of_mass", "step", "resync", "renderer",
+	])
+	# world / auto_step / auto_render 是**属性**不是方法，走 _check_prop
+	_check_prop("PixelPhysics", f, ["world"])
+
+	# ---- 手册里用到的 world / body / shape 成员 ----
+	_check_prop("PWorld", w, ["contacts", "contact_events_enabled", "sleeping_enabled",
+		"ccd_max_substeps", "max_speculative_margin", "ccd_max_motion", "sleep_surface",
+		"material_density", "gravity"])
+	_check("PWorld", w, ["step"])
+	_check("PBody", b, ["to_local", "to_world", "velocity_at", "make_static"])
+	_check_prop("PBody", b, ["shapes"])
+	_check("PixelShape", s, ["get_pixel", "set_pixel", "get_aux", "set_aux", "clear_pixel",
+		"fill_rect", "count_by_material", "dirty_chunks", "has_dirty", "clear_dirty",
+		"mark_dirty", "mark_dirty_key", "flood", "component_map", "neighbors"])
+	_check_prop("PixelShape", s, ["chunks"])
+	# 静态成员
+	for n in ["make_key", "key_x", "key_y", "OFFSETS_4", "OFFSETS_8"]:
+		var ok := false
+		for p in s.get_property_list():
+			if String(p["name"]) == n:
+				ok = true
+		if not ok and s.get(n) == null:
+			_bad.append("PixelShape.%s (静态)" % n)
+
+	if _bad.is_empty():
+		print("=== 手册引用的 API 全部存在 ===")
+	else:
+		print("=== 有 %d 处对不上 ===" % _bad.size())
+		for x in _bad:
+			print("  " + x)
+	quit(0 if _bad.is_empty() else 1)
