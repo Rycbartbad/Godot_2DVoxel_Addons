@@ -19,6 +19,7 @@
     python tools/build_addon.py --out DIR  # 生成到别处
 """
 import argparse
+import subprocess
 import os
 import shutil
 import sys
@@ -74,6 +75,17 @@ def rewrite(text: str) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=DEFAULT_OUT, help="输出目录")
+    # ⚠️ --verify：构建 -> 自检 -> **自动移出项目树**，一条命令走完。
+    #
+    # 为什么要移出：addon 的 class_name 与 src/ **必然重名**，住在项目树里会让
+    # 编辑器报 "Class X hides a global script class" 并级联到编译失败。
+    # .gdignore 挡不住（只要有一个文件被加载，类就全局注册了），清 filesystem_cache 也没用。
+    #
+    # 但 check_addon.py 又必须能看到它 —— 所以顺序只能是：
+    #     在树内构建 -> 校验 -> 移出
+    # 让每个调用方自己记这个顺序是不现实的（我就在这上面翻过车），所以固化成一条命令。
+    ap.add_argument("--verify", action="store_true",
+                    help="构建后在树内自检，然后自动移到 ../_addon_build")
     args = ap.parse_args()
     out = os.path.abspath(args.out)
 
@@ -158,6 +170,26 @@ def main() -> int:
         print("  %-8s %2d 个源文件 + .gdextension.template（生成）" % ("native", n))
 
     print("已生成 %s" % os.path.relpath(out, ROOT))
+
+    if not args.verify:
+        return 0
+
+    # ---- --verify：自检，然后移出项目树 ----
+    rc = subprocess.call([sys.executable, os.path.join(ROOT, "tools", "check_addon.py")])
+    if rc != 0:
+        print("自检失败 —— **不移出**，先把问题修掉（产物留在原地便于排查）")
+        return rc
+
+    dest = os.path.abspath(os.path.join(ROOT, "..", "_addon_build"))
+    if os.path.isdir(dest):
+        shutil.rmtree(dest)
+    shutil.move(out, dest)
+    # addons/ 如果空了就删掉，别留一个空壳在项目树里
+    parent = os.path.dirname(out)
+    if os.path.isdir(parent) and not os.listdir(parent):
+        os.rmdir(parent)
+    print("产物已移出项目树 -> %s" % dest)
+    print("（住项目树里会让编辑器报 class_name 重名并级联编译失败）")
     return 0
 
 

@@ -62,14 +62,14 @@ g++ -O2 -std=c++17 -ffp-contract=off -shared -static-libgcc -static-libstdc++ -o
 src/ + gdext/       引擎真源
 addon_src/          手写模板（README / docs / examples / pixel_physics.gd）
         |
-        v  python tools/build_addon.py
+        v  python tools/build_addon.py --verify
 addons/pixel_destruction/     <- 构建产物（.gitignore）
 ```
 
 本地构建与校验：
 
 ```bash
-python tools/build_addon.py     # 生成
+python tools/build_addon.py --verify   # 构建 + 自检 + 移出项目树
 python tools/check_addon.py     # 校验自洽：路径改写、内部引用、空文件
 ```
 
@@ -229,14 +229,14 @@ g++ -O2 -std=c++17 -ffp-contract=off -shared -static-libgcc -static-libstdc++ -o
 src/ + gdext/       引擎真源
 addon_src/          手写模板（README / docs / examples / pixel_physics.gd）
         |
-        v  python tools/build_addon.py
+        v  python tools/build_addon.py --verify
 addons/pixel_destruction/     <- 构建产物（.gitignore）
 ```
 
 本地构建与校验：
 
 ```bash
-python tools/build_addon.py     # 生成
+python tools/build_addon.py --verify   # 构建 + 自检 + 移出项目树
 python tools/check_addon.py     # 校验自洽：路径改写、内部引用、空文件
 ```
 

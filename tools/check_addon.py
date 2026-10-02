@@ -41,7 +41,13 @@ REF = re.compile(r'res://addons/pixel_destruction/[A-Za-z0-9_./-]+\.(?:gd|tscn|t
 def main() -> int:
     errors = []
     if not os.path.isdir(OUT):
-        print("找不到生成目录 %s —— 先跑 tools/build_addon.py" % OUT)
+        print("找不到生成目录 %s" % OUT)
+        print("")
+        print("这是**正常状态**，不是错误：addon 是构建产物，它的 class_name 与 src/ 必然重名，")
+        print("住在项目树里会让编辑器报 Class X hides a global script class 并级联到编译失败。")
+        print("")
+        print("要构建并自检，用一条命令（构建 -> 校验 -> 自动移出）：")
+        print("    python tools/build_addon.py --verify")
         return 1
 
     # 1) 必需文件

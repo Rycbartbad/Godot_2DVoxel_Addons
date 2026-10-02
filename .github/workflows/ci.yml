@@ -24,17 +24,22 @@ jobs:
         with:
           python-version: "3.x"
 
-      - name: 构建 addon
-        run: python tools/build_addon.py
-
-      - name: 校验 addon 自洽
-        run: python tools/check_addon.py
+      # ⚠️ 构建 -> 校验 -> **自动移出项目树**，一条命令走完。
+      #
+      # 为什么必须移出：addon 的 class_name 与 src/ 必然重名，住在项目树里会让
+      # 编辑器报 "Class X hides a global script class" 并级联到编译失败。
+      # .gdignore 挡不住（只要有一个文件被加载，类就全局注册了）。
+      #
+      # 而 check_addon.py 又必须能在树内看到产物 —— 所以顺序不能拆开写，
+      # 让每个调用方自己记是不现实的（本地就在这上面翻过车）。--verify 固化了这个顺序。
+      - name: 构建 addon（构建 -> 自检 -> 移出项目树）
+        run: python tools/build_addon.py --verify
 
       - name: 二次构建必须完全一致（生成器要幂等）
         run: |
-          cp -r addons/pixel_destruction /tmp/first
-          python tools/build_addon.py
-          diff -r /tmp/first addons/pixel_destruction
+          cp -r ../_addon_build /tmp/first
+          python tools/build_addon.py --verify
+          diff -r /tmp/first ../_addon_build
           echo "幂等 OK"
 
       - name: 打包
