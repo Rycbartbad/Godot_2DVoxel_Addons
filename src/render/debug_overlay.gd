@@ -50,18 +50,30 @@ var font_size_draw := 12.0
 
 
 func _ready() -> void:
-	_resolveworld()
+	_resolve_world()
 	set_process(true)
 
 
 func _process(_dt: float) -> void:
-	# ⚠️ 只重画，**不推进物理**。编辑器里也走这条路。
+	# ⚠️⚠️ 编辑器里**绝对不要每帧 queue_redraw()**。
+	#    那会让编辑器的 2D 画布永不停歇地重画，而 _draw() 要遍历所有刚体、
+	#    画 OBB 四边形和接触点 —— 实测这是编辑器卡顿的主因之一。
+	#    编辑器里改成**按需重绘**：由 PixelWorld.rebuild() 调 refresh()。
+	if Engine.is_editor_hint():
+		return
 	if world == null:
-		_resolveworld()
+		_resolve_world()
 	queue_redraw()
 
 
-func _resolveworld() -> void:
+## 请求重绘一次（编辑器里由 PixelWorld.rebuild() 调用）
+func refresh() -> void:
+	if world == null:
+		_resolve_world()
+	queue_redraw()
+
+
+func _resolve_world() -> void:
 	var src: Node = null
 	if not world_source.is_empty():
 		src = get_node_or_null(world_source)
