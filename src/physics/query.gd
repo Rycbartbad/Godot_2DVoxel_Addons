@@ -271,6 +271,46 @@ static func _swept_circle_vs_body(b: PBody, origin: Vector2, d: Vector2, max_dis
 ## ⚠️ 不能直接遍历整个 AABB —— 一块 4000x40 的地面就是 16 万次像素检查。
 ## 先用"AABB 上的最近点"求出距离下界，把搜索半径收紧到 d0+2，
 ## 再按 chunk 级剔除（稀疏形状这一步就把绝大部分块跳掉了）。
+## **法向厚度**：从世界坐标某点出发、沿给定方向穿过材料，最厚的一段有多少像素。
+##
+## 用途是破坏判据：同一种材料**抗压远强于抗剪** —— 矛尖正面顶在盾面上是压缩，
+## 盾牌边缘横向切矛杆是剪切/弯曲。要区分这两者就得知道「法向穿过了多厚」。
+##
+## 做法就是沿射线逐像素走一遍数连续实心（体素数据现成的，不用建任何加速结构）。
+## 返回 0 表示这条线上没有材料。
+##
+## ⚠️ 从 point - dir*back 开始走而不是从 point 开始 —— 接触点可能落在
+##    表面外侧半个像素，直接从它出发会得到 0。
+static func thickness_at(body, world_point: Vector2, normal: Vector2,
+		max_steps: int = 96, back: int = 4) -> float:
+	if body == null or normal.length_squared() < 1.0e-12:
+		return 0.0
+	var n := normal.normalized()
+	# 局部方向：形状活在刚体局部空间，只有旋转没有缩放
+	var lp: Vector2 = body.to_local(world_point)
+	var ld: Vector2 = body.to_local(world_point + n) - lp
+	if ld.length_squared() < 1.0e-12:
+		return 0.0
+	ld = ld.normalized()
+	var shapes: Array = body.shapes
+	var best := 0
+	var run := 0
+	for i in range(-back, max_steps):
+		var q := lp + ld * float(i)
+		var solid := false
+		for s: PixelShape in shapes:
+			if s.get_pixel(int(floor(q.x)), int(floor(q.y))) != 0:
+				solid = true
+				break
+		if solid:
+			run += 1
+			if run > best:
+				best = run
+		else:
+			run = 0
+	return float(best)
+
+
 static func closest_point_on_shape(shape: PixelShape, origin: Vector2) -> Hit:
 	var res := _hit_none()
 	var ob: PBody = shape.owner_body

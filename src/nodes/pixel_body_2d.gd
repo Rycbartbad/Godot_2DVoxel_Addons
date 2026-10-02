@@ -46,7 +46,9 @@ func _notification(what: int) -> void:
 	# 否则画面上的像素和碰撞形状停在旧位置，看起来像"拖不动"。
 	# （NOTIFICATION_TRANSFORM_CHANGED 只在 position/rotation/scale 变化时发，
 	#   而且要 _enter_tree 里 set_notify_transform(true) 打开才会发。）
+	# scale 也是变换的一部分 —— 拖缩放手柄同样要让抓手缓存失效
 	if what == NOTIFICATION_TRANSFORM_CHANGED and Engine.is_editor_hint():
+		invalidate_gizmo()
 		var p := get_parent()
 		if p != null and p.has_method("on_child_moved"):
 			p.on_child_moved()
@@ -76,9 +78,29 @@ func _draw() -> void:
 	#    教训：**调试可视化本身画错，比没有可视化更糟**，它会把人引到错误的方向。
 	if aabb.size.x > 0 and aabb.size.y > 0:
 		var col := Color(0.4, 0.8, 1.0, 0.8) if is_static else Color(0.3, 1.0, 0.5, 0.7)
-		draw_rect(Rect2(Vector2(aabb.position), Vector2(aabb.size)), col, false, 1.0)
+		# ⚠️ _draw() 的坐标**会被节点变换缩放**，而形状已经按 scale 生成过了 ——
+		#    直接画就是**双重缩放**，框会比实际碰撞体大 scale 倍。
+		#    这里先除以 scale，经过节点变换之后才正好落在形状上。
+		var inv := Vector2(1.0 / _scale_abs().x, 1.0 / _scale_abs().y)
+		var p := Vector2(aabb.position) * inv
+		var sz := Vector2(aabb.size) * inv
+		draw_rect(Rect2(p, sz), col, false, 1.0 / maxf(0.01, maxf(_scale_abs().x, _scale_abs().y)))
 		# 原点在左上角：明确标出来
-		draw_circle(Vector2(aabb.position), 1.5, col)
+		draw_circle(p, 1.5 * inv.x, col)
+
+
+## 节点 scale 的绝对值。
+##
+## ## 为什么 scale 不是"把精灵拉大"
+##
+## 物理需要**整数体素**：碰撞矩形来自像素的贪心分解，像素是非负整数格点。
+## 所以拉伸只能体现在**形状生成**上 —— 按缩放后的尺寸重新铺一遍像素，
+## 尺寸四舍五入到整数。副作用是缩放不会产生"半像素"的碰撞体。
+##
+## ⚠️ scale 为 0 在 Godot 里是合法的（会把节点压扁），但对本节点没有意义，
+##    X/Y 各自下限为 1 像素。
+func _scale_abs() -> Vector2:
+	return Vector2(maxf(0.01, absf(scale.x)), maxf(0.01, absf(scale.y)))
 
 
 ## 形状外接的缓存。_draw() 每帧都要用，而 build_shape() 可能很贵
@@ -163,10 +185,12 @@ var body = null
 ##    引擎内部（贪心分解、质量属性、破坏、渲染）全部建立在"原点=左上角"之上。
 func build_shape() -> PixelShape:
 	var s := PixelShape.new()
+	# 节点的 scale 作为**形状生成的尺寸倍数**（见 _scaled_size 的说明）
+	var sc := _scale_abs()
 	match source:
 		Source.RECT:
-			var w := maxi(1, rect_size.x)
-			var h := maxi(1, rect_size.y)
+			var w := maxi(1, roundi(float(rect_size.x) * sc.x))
+			var h := maxi(1, roundi(float(rect_size.y) * sc.y))
 			s.fill_rect(Rect2i(0, 0, w, h), material_id)
 		Source.CIRCLE:
 			# ⚠️ 圆心放在 (r, r) 而不是 (0, 0) —— **原点必须在左上角**。
@@ -178,11 +202,16 @@ func build_shape() -> PixelShape:
 			#
 			# 统一约定（三条不变量，见 build_shape 的文档）：
 			#   局部像素 (0,0) 永远是形状的左上角 = 刚体原点 = 精灵贴图左上角。
-			var r := maxf(0.5, radius)
-			var ri := int(ceil(r))
-			for y in range(0, ri * 2 + 1):
-				for x in range(0, ri * 2 + 1):
-					if Vector2(float(x) - r, float(y) - r).length() <= r:
+			# scale 直接进半径 —— 非等比缩放时是**椭圆**，也就是"拉伸"效果
+			var rx := maxf(0.5, radius * sc.x)
+			var ry := maxf(0.5, radius * sc.y)
+			var w2 := int(ceil(rx)) * 2 + 1
+			var h2 := int(ceil(ry)) * 2 + 1
+			for y in h2:
+				for x in w2:
+					var nx := (float(x) - rx) / rx
+					var ny := (float(y) - ry) / ry
+					if nx * nx + ny * ny <= 1.0:
 						s.set_pixel(x, y, material_id)
 		Source.TEXTURE:
 			if texture == null:
@@ -197,9 +226,17 @@ func build_shape() -> PixelShape:
 					img.convert(Image.FORMAT_RGBA8)
 					var w2 := img.get_width()
 					var h2 := img.get_height()
-					for y2 in h2:
-						for x2 in w2:
-							if img.get_pixel(x2, y2).a * 255.0 >= float(alpha_threshold):
+					# scale 用**最近邻**采样（不插值）：
+					# 像素画的拉伸要保留硬边，插值出来的半透明边缘会让 alpha 阈值判断变得随机。
+					var ow := maxi(1, roundi(float(w2) * sc.x))
+					var oh := maxi(1, roundi(float(h2) * sc.y))
+					var sx := float(w2) / float(ow)
+					var sy := float(h2) / float(oh)
+					for y2 in oh:
+						var src_y := clampi(int(float(y2) * sy), 0, h2 - 1)
+						for x2 in ow:
+							var src_x := clampi(int(float(x2) * sx), 0, w2 - 1)
+							if img.get_pixel(src_x, src_y).a * 255.0 >= float(alpha_threshold):
 								s.set_pixel(x2, y2, material_id)
 	return s
 

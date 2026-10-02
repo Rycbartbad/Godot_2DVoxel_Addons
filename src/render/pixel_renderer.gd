@@ -131,14 +131,70 @@ static func _local_bounds(body) -> Rect2i:
 			box = box.merge(b)
 	return box
 
+## ---- 蓝图：不属于任何刚体、不参与物理的形状 ----
+##
+## 用途：游戏层「画完一笔先不固化」的预览层。蓝图不在 world.bodies 里 ——
+## 宽相扫不到、不受重力、不被破坏，纯粹是画面。solidify 时才 add_body。
+##
+## id 走负数区间（普通刚体 id 非负），避免撞号。
+var _blueprint_nodes := {}
+
+
+func sync_blueprint(id: int, shape: PixelShape, xform: Transform2D) -> void:
+	if shape == null or shape.is_empty():
+		forget_blueprint(id)
+		return
+	var key := -1 - absi(id)
+	var aabb: Rect2i = shape.local_aabb()
+	var node: Sprite2D = _blueprint_nodes.get(key)
+	if node == null:
+		node = Sprite2D.new()
+		node.centered = false
+		node.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		node.modulate = Color(1, 1, 1, 0.6)      # 半透明：一眼看出"还没固化"
+		add_child(node)
+		_blueprint_nodes[key] = node
+		_bounds[key] = Rect2i()
+	if _bounds[key] != aabb:
+		_bounds[key] = aabb
+		_textures.erase(key)
+	node.texture = _build_texture_impl([shape], aabb, key)
+	node.offset = Vector2(aabb.position)
+	node.transform = xform
+
+
+func forget_blueprint(id: int) -> void:
+	var key := -1 - absi(id)
+	var n: Node = _blueprint_nodes.get(key)
+	if n != null:
+		n.queue_free()
+	_blueprint_nodes.erase(key)
+	_textures.erase(key)
+	_bounds.erase(key)
+
+
+func clear_blueprints() -> void:
+	for key in _blueprint_nodes.keys():
+		var n: Node = _blueprint_nodes[key]
+		if n != null:
+			n.queue_free()
+		_textures.erase(key)
+		_bounds.erase(key)
+	_blueprint_nodes.clear()
+
+
 func _build_texture(body, aabb: Rect2i):
+	return _build_texture_impl(body.shapes, aabb, body.id)
+
+
+func _build_texture_impl(shapes: Array, aabb: Rect2i, cache_key: int):
 	var w: int = aabb.size.x
 	var h: int = aabb.size.y
 	var data := PackedByteArray()
 	data.resize(w * h * 4)
 	var ox: int = aabb.position.x
 	var oy: int = aabb.position.y
-	for s: PixelShape in body.shapes:
+	for s: PixelShape in shapes:
 		for k: int in s.chunks:
 			var c: PixelChunk = s.chunks[k]
 			var bx := (PixelShape.key_x(k) << 3) - ox
@@ -158,10 +214,10 @@ func _build_texture(body, aabb: Rect2i):
 				data[o + 2] = int(col.b * 255.0)
 				data[o + 3] = 255
 	var img := Image.create_from_data(w, h, false, Image.FORMAT_RGBA8, data)
-	var tex: ImageTexture = _textures.get(body.id)
+	var tex: ImageTexture = _textures.get(cache_key)
 	if tex == null:
 		tex = ImageTexture.create_from_image(img)
-		_textures[body.id] = tex
+		_textures[cache_key] = tex
 	else:
 		tex.update(img)
 	return tex

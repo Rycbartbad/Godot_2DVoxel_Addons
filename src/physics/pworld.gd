@@ -277,6 +277,43 @@ func _notification(what: int) -> void:
 
 
 ## 设置某材质的密度（会自动扩容表，中间没设过的按 1.0 算）。
+## ---- 材质强度表 ----
+##
+## 与 material_density 同构：下标即材质 id，缺省 0（= 不破坏，需要显式设）。
+##
+## 两种强度分开是因为**同一种材料抗压远强于抗剪** —— 这正是"矛能破盾、
+## 盾不能破矛"的物理来源：矛尖对盾面是压缩，盾缘对矛杆是剪切/弯曲。
+##
+## 单位是"应力"，即 冲量 / 接触宽度，与 Contact.impulse / Contact.contact_width 同量纲。
+var material_compress := PackedFloat32Array()
+var material_shear := PackedFloat32Array()
+
+
+## 设某材质的抗压/抗剪强度。shear 省略时取 compress 的 30%（多数固体的大致比例）。
+func set_material_strength(material: int, compress: float, shear: float = -1.0) -> void:
+	var s := compress * 0.3 if shear < 0.0 else shear
+	if material_compress.size() <= material:
+		var n := material + 1
+		material_compress.resize(n)
+		material_shear.resize(n)
+	material_compress[material] = compress
+	material_shear[material] = s
+
+
+func material_strength(material: int) -> Vector2:
+	if material < 0 or material >= material_compress.size():
+		return Vector2.ZERO
+	return Vector2(material_compress[material], material_shear[material])
+
+
+## 按 Contact 的 shear_ratio 插值出该用哪个强度。返回 0 表示"这个材质不破坏"。
+func strength_for(material: int, shear_ratio: float) -> float:
+	var s := material_strength(material)
+	if s.x <= 0.0 and s.y <= 0.0:
+		return 0.0
+	return lerpf(s.x, s.y, clampf(shear_ratio, 0.0, 1.0))
+
+
 func set_material_density(material: int, density: float) -> void:
 	if material < 0:
 		return
@@ -1110,6 +1147,100 @@ class Contact:
 	## 这一步才接触上（上一步不在这对里）。做"首次撞击"触发用。
 	var is_new := false
 
+	## ---- 接触冲量的**近似值**（单位：质量·像素/秒）----
+	##
+	## ⚠️ 这是近似，不是求解器里的真值。原生求解器的冲量留在 C++ 里拿不到，
+	##    所以这里按"有效质量 × 接近速度"估：
+	##        m_eff = 1 / (1/m_a + 1/m_b)      （静态体视作无穷大质量）
+	##        J ≈ m_eff · |approach|
+	##    忽略了转动项（力的作用线不通过质心时真值会偏小），所以对**偏心撞击**
+	##    会高估。做破坏判据够用 —— 破坏看的是量级不是精确值。
+	##
+	##    要精确值就得让 C++ 求解器把冲量写进输出缓冲，那是另一件事。
+	var impulse := 0.0
+
+	## 接触的**切向宽度**（像素）。用两刚体世界 AABB 在切向上的重叠近似。
+	##
+	## 用途：算应力 σ = impulse / contact_width。矛尖宽度小 → 应力大 → 能破盾。
+	var contact_width := 0.0
+
+	## **剪切比**：0 = 纯压缩（法向穿过材料厚度方向），1 = 纯剪切。
+	##
+	## 由"接触法向 vs 该处材料的厚度方向"决定。同一种材料抗压远强于抗剪，
+	## 所以这个值直接进破坏判据的强度插值。
+	## 需要先调 set_material_strength() 才有意义；没设时保持 0。
+	var shear_ratio := 0.0
+
+
+## **真实接触宽度**：沿接触切向从接触点向两侧走，数「两个形状都实心」的像素数。
+##
+## ⚠️ 不要用「两个刚体 AABB 在切向上的重叠」来近似 —— 我第一版就是这么写的，
+##    结果**看不出矛是尖的**：矛的 AABB 高 16、盾也是 16，算出来宽度相同，
+##    而宽体的质量大 16 倍，于是「盾的应力反而更大」，与物理完全相反。
+##
+##    这个量是破坏判据的分母，必须反映**真实接触面积**，所以直接数体素。
+##    矛尖只有几像素宽 → 应力大 → 破盾；盾面贴上来几十像素宽 → 应力小 → 不破。
+##
+## 代价是沿切向走 2*half+1 步、每步查两个形状的像素。只在开了接触事件时才算。
+func _contact_width(a: PBody, b: PBody, point: Vector2, normal: Vector2, half: int = 24) -> float:
+	var t := Vector2(-normal.y, normal.x)
+	# ⚠️ 采样要**各自往自己身体里挪半步**。
+	#    接触点正好落在两个形状的界面上，而 _solid_at 用的是 floor() ——
+	#    点恰好在边界上时会对两边都判成"空"，接触宽度恒为 0（实测就是这个症状）。
+	var ea := point - normal * 0.5
+	var eb := point + normal * 0.5
+	var n := 0
+	for i in range(-half, half + 1):
+		var off := t * float(i)
+		if _solid_at(a, ea + off) and _solid_at(b, eb + off):
+			n += 1
+	return float(n)
+
+
+static func _solid_at(body: PBody, world_point: Vector2) -> bool:
+	var lp := body.to_local(world_point)
+	var x := int(floor(lp.x))
+	var y := int(floor(lp.y))
+	for s: PixelShape in body.shapes:
+		if s.get_pixel(x, y) != 0:
+			return true
+	return false
+
+
+## 把世界 AABB 投影到方向 t 上，返回 [min, max] 区间。
+static func _project_span(box: Rect2, t: Vector2) -> Vector2:
+	var c := box.get_center()
+	var e := box.size * 0.5
+	var h := absf(t.x) * e.x + absf(t.y) * e.y
+	var m := c.dot(t)
+	return Vector2(m - h, m + h)
+
+
+## 算出这一对接触的应力相关量：冲量、接触宽度、剪切比。
+##
+## 剪切比需要**法向厚度**（要沿体素走一遍），所以只在调用方配过材质强度时才算 ——
+## 没配强度的话这一项毫无用处，白花时间。
+func _fill_contact_stress(c: Contact, a: PBody, b: PBody, rel: Vector2) -> void:
+	var ma := 0.0 if a.is_static else a.mass
+	var mb := 0.0 if b.is_static else b.mass
+	var inv := (1.0 / ma if ma > 0.0 else 0.0) + (1.0 / mb if mb > 0.0 else 0.0)
+	var m_eff := (1.0 / inv) if inv > 0.0 else 0.0
+	c.impulse = m_eff * absf(c.approach)
+	c.contact_width = _contact_width(a, b, c.point, c.normal)
+	if material_compress.is_empty() and material_shear.is_empty():
+		return
+	# 剪切比：法向穿过多厚 = 压缩；法向几乎不穿过厚度 = 剪切。
+	# 取两侧较薄的那个（谁先坏看谁）。
+	var ta := Query.thickness_at(a, c.point, c.normal)
+	var tb := Query.thickness_at(b, c.point, -c.normal)
+	var thin := ta if (ta > 0.0 and (tb <= 0.0 or ta < tb)) else tb
+	if thin <= 0.0:
+		c.shear_ratio = 0.0
+		return
+	# 法向"穿过"的厚度越薄，越是正面顶上去（压缩）；
+	# 用接触宽度 / 厚度 做剪切比的代理：宽而薄 = 弯曲/剪切。
+	c.shear_ratio = clampf(c.contact_width / (c.contact_width + thin), 0.0, 1.0)
+
 
 func _contact_add(a: PBody, b: PBody, point: Vector2, normal: Vector2) -> void:
 	if contacts.size() >= max_contacts:
@@ -1123,6 +1254,11 @@ func _contact_add(a: PBody, b: PBody, point: Vector2, normal: Vector2) -> void:
 	# 一个高速旋转的物体，质心可能几乎不动，但它的边缘撞得很狠。
 	var rel := b.velocity_at(point) - a.velocity_at(point)
 	c.approach = -rel.dot(normal)
+	# ⚠️ 必须在 c.approach **赋值之后**再算应力 —— _fill_contact_stress 读的就是它。
+	#    我第一版把这一句插在前面，结果冲量恒为 0（approach 还是默认值），
+	#    而且不会报任何错，只是"破坏判据永远不触发"。
+	# ---- 冲量近似 + 接触宽度（很便宜，总是算）----
+	_fill_contact_stress(c, a, b, rel)
 	var ka := a.id
 	var kb := b.id
 	var key := (ka << 32) | (kb & 0xFFFFFFFF) if ka < kb else (kb << 32) | (ka & 0xFFFFFFFF)
