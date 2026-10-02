@@ -291,7 +291,13 @@ var material_shear := PackedFloat32Array()
 
 ## 设某材质的抗压/抗剪强度。shear 省略时取 compress 的 30%（多数固体的大致比例）。
 func set_material_strength(material: int, compress: float, shear: float = -1.0) -> void:
-	var s := compress * 0.3 if shear < 0.0 else shear
+	# ⚠️ shear <= 0 一律按抗压的 30% 处理，**不允许真的设成 0**。
+	#
+	# 这套 API 里 0 的语义是「不参与破坏」（调用方用 strength_for() > 0 判断）。
+	# 如果 shear=0 被当成字面的 0，那么宽接触（shear_ratio → 1）算出的强度就是
+	# lerpf(100, 0, 1) = 0 → 调用方跳过 → **配了强度的材质在剪切方向永远不破坏**，
+	# 而且不报任何错。PixelMaterial.shear_strength = 0 正好会走到这条路。
+	var s := compress * 0.3 if shear <= 0.0 else shear
 	if material_compress.size() <= material:
 		var n := material + 1
 		material_compress.resize(n)
@@ -301,7 +307,10 @@ func set_material_strength(material: int, compress: float, shear: float = -1.0) 
 
 
 func material_strength(material: int) -> Vector2:
-	if material < 0 or material >= material_compress.size():
+	# ⚠️ 两张表的长度可能不同（material_shear 若被直接赋值就会更短），
+	#    只按其中一张做界检查会越界。
+	var n := mini(material_compress.size(), material_shear.size())
+	if material < 0 or material >= n:
 		return Vector2.ZERO
 	return Vector2(material_compress[material], material_shear[material])
 

@@ -4,6 +4,9 @@ class_name PixelShapePolygon2D
 #    addon 里也有一份同名脚本，靠全局 class_name 解析在缓存不一致时会失败
 #    （实测报 "Could not find base class PixelShape2D"）。路径是确定的。
 extends "res://src/nodes/pixel_shape_2d.gd"
+
+# ⚠️ ShapeOps 不是全局 class_name，必须 preload（PixelShape 是，所以上面没写）
+const ShapeOps := preload("res://src/core/shape_ops.gd")
 ## 用**任意多边形**填充像素 —— 演示「继承 PixelShape2D 就能加一种新形状」。
 ##
 ## ## 它证明了什么
@@ -83,4 +86,32 @@ func build_shape() -> PixelShape:
 			for x in range(x0, x1 + 1):
 				s.set_pixel(ox + x, oy + y, material_id)
 			j += 2
+	# ⚠️ inset 会把细颈收断。工字形 + inset=3 实测细颈整段消失，剩下两个不连通分量 ——
+	#    而引擎有个不变量：**形状必须 4 邻域连通**（破坏分裂、is_disconnected、
+	#    paint_circle 的注释都假设它成立）。违反了不会报错，只会在某处悄悄出问题。
+	#    所以这里检测并只保留最大分量，同时给出警告。
+	if not s.is_empty() and ShapeOps.is_disconnected(s):
+		# component_map 返回 {"count": n, "chunks": {分块键: PackedInt32Array(64) 组号}}
+		var cm := ShapeOps.component_map(s)
+		var counts := {}
+		for ck in cm["chunks"]:
+			var arr: PackedInt32Array = cm["chunks"][ck]
+			for cg in arr:
+				if cg >= 0:
+					counts[cg] = counts.get(cg, 0) + 1
+		var best := -1
+		var best_n := 0
+		for cg2 in counts:
+			if counts[cg2] > best_n:
+				best_n = counts[cg2]
+				best = cg2
+		push_warning("PixelShapePolygon2D: inset=%d 把形状切成了 %d 个不连通块，只保留最大的那块（%d 像素）。请调小 inset 或改顶点。" % [inset, counts.size(), best_n])
+		# 清掉不属于最大分量的像素
+		for ck2 in cm["chunks"]:
+			var arr2: PackedInt32Array = cm["chunks"][ck2]
+			var bx := PixelShape.key_x(ck2) << 3
+			var by := PixelShape.key_y(ck2) << 3
+			for i2 in 64:
+				if arr2[i2] >= 0 and arr2[i2] != best:
+					s.clear_pixel(bx + (i2 & 7), by + (i2 >> 3))
 	return s

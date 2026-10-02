@@ -445,4 +445,15 @@ static func _apply_pseudo(m: Manifold, p: Point, impulse: Vector2) -> void:
 
 
 static func make_key(ia: int, ra: int, ib: int, rb: int) -> int:
-	return ((ia & 0xFFFF) << 48) | ((ra & 0xFF) << 40) | ((ib & 0xFFFF) << 24) | ((rb & 0xFF) << 16)
+	# ⚠️⚠️ id 必须留够位宽：原来是 16 位（0xFFFF），id 一超过 65535 就会和旧 id 撞键，
+	#    于是一对**无关**的刚体共享同一份 warm-start 冲量 —— 表现为落地时莫名弹一下
+	#    或下陷。而每次 fracture 都给碎片发新 id，长时间破坏很容易越过 65535。
+	#    实测 make_key(1,0,70000,0) == make_key(1,0,4464,0) 为 true。
+	#
+	#    现在用 24 位 id（上限 1600 万）+ 8 位矩形下标，正好 64 位：
+	#        24 + 8 + 24 + 8 = 64
+	#    矩形下标本来就只有 0..63，8 位绰绰有余。
+	#
+	#    注意：这改变了键的**取值**，但因为旧写法在 id < 65536 时是单射的，
+	#    当前所有测试的行为逐位不变（基准未动）。
+	return ((ia & 0xFFFFFF) << 40) | ((ra & 0xFF) << 32) | ((ib & 0xFFFFFF) << 8) | (rb & 0xFF)
