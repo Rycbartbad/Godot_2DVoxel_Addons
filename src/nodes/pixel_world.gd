@@ -53,6 +53,7 @@ const PixelBody2D := preload("res://src/nodes/pixel_body_2d.gd")
 var world = null
 var renderer: PixelRenderer = null
 var _accum := 0.0
+var _rebuild_queued := false
 
 
 func _ready() -> void:
@@ -95,6 +96,10 @@ func rebuild() -> void:
 			world.add_body(node.bake(), [shape], dens)
 			n += 1
 	if auto_render:
+		# ⚠️ 必须先清空再重建：rebuild 会造出**新的 body.id**，
+		#    而渲染器按 id 索引贴图 —— 不清的话旧贴图会留在原地变成幽灵
+		#    （表现是"拖动之后原地还有一个不动的影子"）。
+		renderer.prune({})
 		renderer.sync_all(world.bodies)
 	_sync_overlays()
 	print("[PixelWorld] 烘焙 %d 个刚体（场景节点 -> RefCounted，之后热循环不碰 Node）" % n)
@@ -135,6 +140,24 @@ func _sync_overlays() -> void:
 	for c in get_children():
 		if c != renderer and "world_source" in c:
 			c.world = world
+
+
+## 子节点在编辑器里被拖动/旋转时由 PixelBody2D 调用。
+##
+## ⚠️ 拖动一次会连续发很多 NOTIFICATION_TRANSFORM_CHANGED，
+##    每次都全量重建会卡（每个刚体约 0.2 ms）。这里防抖成"帧末重建一次"。
+func on_child_moved() -> void:
+	if not Engine.is_editor_hint() or _rebuild_queued:
+		return
+	_rebuild_queued = true
+	_rebuild_deferred.call_deferred()
+
+
+func _rebuild_deferred() -> void:
+	_rebuild_queued = false
+	if not is_inside_tree() or not Engine.is_editor_hint():
+		return
+	rebuild()
 
 
 ## 场景节点 -> 烘焙出来的刚体（找不到返回 null）

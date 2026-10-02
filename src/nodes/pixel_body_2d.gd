@@ -26,6 +26,30 @@ const PixelShape := preload("res://src/core/pixel_shape.gd")
 
 enum Source { RECT, CIRCLE, TEXTURE }
 
+
+func _notification(what: int) -> void:
+	# 编辑器里拖动/旋转本节点时，立刻让父世界重烘焙 ——
+	# 否则画面上的像素和碰撞形状停在旧位置，看起来像"拖不动"。
+	# （NOTIFICATION_TRANSFORM_CHANGED 只在 position/rotation/scale 变化时发。）
+	if what == NOTIFICATION_TRANSFORM_CHANGED and Engine.is_editor_hint():
+		var p := get_parent()
+		if p != null and p.has_method("on_child_moved"):
+			p.on_child_moved()
+
+
+func _draw() -> void:
+	# 编辑器里的抓手：没有可见图形的话节点很难选中和拖动。
+	if not Engine.is_editor_hint():
+		return
+	var c := Color(1.0, 0.75, 0.2, 0.95)
+	draw_line(Vector2(-6, 0), Vector2(6, 0), c, 1.0)
+	draw_line(Vector2(0, -6), Vector2(0, 6), c, 1.0)
+	draw_circle(Vector2.ZERO, 2.0, c)
+	if is_static:
+		# 静态体额外画一个方框，一眼区分
+		var s := Vector2(rect_size)
+		draw_rect(Rect2(-s * 0.5, s), Color(0.4, 0.7, 1.0, 0.5), false, 1.0)
+
 @export var source: Source = Source.RECT
 
 @export_group("形状")
@@ -43,6 +67,12 @@ enum Source { RECT, CIRCLE, TEXTURE }
 @export var initial_angular_velocity := 0.0
 ## 是否参与休眠。静态体无所谓；动态体一般保持 true。
 @export var can_sleep := true
+
+## 拖动时是否把位置吸附到整数像素。
+##
+## ⚠️ 强烈建议开着：物理世界以**体素**为单位，位置带小数会让像素渲染和碰撞
+##    对不齐（表现为"画面上和碰撞形状差半个像素"，很难看出但很烦人）。
+@export var snap_to_pixel := true
 
 ## 烘焙出来的 PBody（RefCounted）。编辑器里是 null，运行时才有值。
 ##
