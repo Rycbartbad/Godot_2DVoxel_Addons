@@ -112,6 +112,16 @@ func _density_of(material: int) -> float:
 
 
 func _physics_process(delta: float) -> void:
+	# ⚠️⚠️ 编辑器里绝不推进物理。
+	#
+	# 陷阱：**定义 _physics_process 这个函数本身就会启用它**。
+	# _ready() 里那句
+	#     if Engine.is_editor_hint(): return
+	#     set_physics_process(true)
+	# 是**挡不住**它的 —— 方法一存在，Godot 每帧就会调。守卫必须写在函数体里。
+	# （这正是"编辑器里物体自己在动"的原因。）
+	if Engine.is_editor_hint():
+		return
 	if not auto_step:
 		return
 	_accum += delta

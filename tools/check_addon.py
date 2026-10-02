@@ -126,6 +126,31 @@ def main() -> int:
         errors.append("有 %d 个 preload 环（编辑器会无声段错误）: %s"
                       % (len(cycles), cycles[0]))
 
+    # 2d) @tool 脚本的每帧入口必须有编辑器守卫。
+    #
+    # ⚠️ 这类 bug 只会在**编辑器里**表现（物体自己在动、编辑器卡顿），
+    #    无头测试全绿也发现不了 —— 必须靠静态检查兜。
+    #    真实案例：PixelWorld._physics_process 没守卫，编辑器每帧都在 world.step()。
+    #    注意"定义 _physics_process 本身就会启用它"，_ready 里的守卫挡不住。
+    for root, _dirs, files in os.walk(SRC):
+        for name in sorted(files):
+            if not name.endswith(".gd"):
+                continue
+            fp = os.path.join(root, name)
+            with open(fp, encoding="utf-8") as f:
+                lines = f.read().split("\n")
+            if not lines or "@tool" not in lines[0]:
+                continue
+            for i, line in enumerate(lines):
+                if re.match(r"\s*func\s+(_process|_physics_process)\s*\(", line):
+                    body = "\n".join(lines[i:i + 10])
+                    if "is_editor_hint" not in body:
+                        errors.append(
+                            "%s:%d 的 %s 没有编辑器守卫（@tool 脚本会在编辑器里跑，"
+                            "必须用 Engine.is_editor_hint() 挡住）"
+                            % (os.path.relpath(fp, ROOT).replace(os.sep, "/"),
+                               i + 1, line.strip()))
+
     # 3) 所有内部引用都要能解析
     refs = 0
     for dirpath, _dirs, files in os.walk(OUT):
