@@ -34,8 +34,10 @@ const PixelShape := preload("res://src/core/pixel_shape.gd")
 ## 是否包含自己的形状？勾上则把本节点也算进形状来源（本节点一般没有形状，默认 false）
 @export var include_self := false
 ## 逐像素着色（边沿压暗 + 顶面提亮 + 色调扰动）。见 PixelShading 的说明。
-## 烘进贴图，运行时零开销。
-@export var shading := true
+##
+## ⚠️ **默认关闭** —— 见 PixelRenderer.shading 的说明（试过一版，读起来是噪点）。
+## 它烘进贴图，运行时零开销，需要体积感时再打开。
+@export var shading := false
 
 var _tex: ImageTexture = null
 var _sig := ""

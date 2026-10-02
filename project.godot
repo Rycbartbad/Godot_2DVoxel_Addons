@@ -19,9 +19,23 @@ config/features=PackedStringArray("4.7", "Forward Plus")
 
 window/size/viewport_width=1920
 window/size/viewport_height=1080
-window/size/window_width_override=1920
-window/size/window_height_override=1080
-window/stretch/mode="viewport"
+; ⚠️⚠️ stretch/mode 必须是 disabled，不能是 viewport。
+;
+; viewport 模式的语义是：**永远渲染在固定的 1920x1080 上，然后把整张画面
+; 缩放到窗口**。窗口一旦不是 16:9（或系统有 DPI 缩放），画面就被**拉伸** ——
+; 像素变成非正方形，而且糊。
+;
+; 对本引擎来说这层缩放完全是多余的：我们靠 **camera.zoom** 做像素放大
+; （见 PixelScale / 各 demo 的 _ready），视口本来就该等于窗口。
+; 关掉它之后：
+;   · 像素永远是正方形（相机 zoom 是各向同性的）
+;   · 窗口拉伸只会"看到更多/更少的场景"，绝不会变形
+;   · 没有二次重采样，边缘更利落
+;
+; 如果**确实**想要固定分辨率 + 黑边，那也应该用
+;   window/stretch/mode="canvas_items" + window/stretch/aspect="keep"
+; 而不是 viewport（viewport 会把整张帧缓冲连同 UI 一起缩放）。
+window/stretch/mode="disabled"
 
 [rendering]
 
