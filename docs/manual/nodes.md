@@ -217,6 +217,33 @@ zoom     = voxel_size * render_scale = voxel_size * (视口高 / 540)
 UI 用原生 `Control` + `Theme`。引擎只暴露**数据**
 （`px.momentum(body)`、`px.total_kinetic_energy()` 等），UI 去读。
 
+## 节点摆的 + 代码生成的，可以共存
+
+两条路落在**同一个 world** 上，互不打扰：
+
+```gdscript
+# ① 编辑器里摆的：PixelBody2D 挂在 PixelWorld 下面，rebuild() 时烘焙（只烘一次）
+
+# ② 运行时用代码加一个（增量，不重建世界）
+var node := PixelBody2D.new()
+node.position = Vector2(160, 40)
+node.rect_size = Vector2i(16, 16)
+pw.add_child(node)              # 必须是 PixelWorld 的子节点
+var body = pw.add_body_node(node)
+```
+
+> ⚠️ **加完运行时刚体后不要调 `rebuild()`** —— 它会 `PWorld.new()` 造一个**全新的世界**：
+> 运行时加的全没了、破坏状态（碎块/擦除）也全没了。`add_body_node()` /
+> `remove_body_node()` 这两个增量 API 就是为这件事存在的。
+
+契约由 [`tests/validation_mixed_bodies.gd`](../../tests/validation_mixed_bodies.gd) 钉住：
+代码加进去时**节点那个 body 对象必须还是同一个**（= 没重建世界）、两者质量一致、
+一起落地一起睡、运行时加的不会被清掉。
+
+（门面版 `PixelPhysics`（`spawn_box` 等）在 **addon** 里：`tools/build_addon.py` 生成到
+`addons/pixel_destruction/`，刻意不常驻项目树 —— 否则编辑器会报 class_name 重名。）
+
+
 ## 编辑器里能做什么
 
 | 操作 | 结果 |
