@@ -107,6 +107,36 @@ static func _build_grid(shape: PixelShape) -> Grid:
 	g.origin = aabb.position
 	var w := g.w
 	var h := g.h
+	# ---- 增量路径：缓存还在、aabb 没变、且有块级脏信息 ----
+	#
+	# ⚠️ 建网格要遍历 96 chunk x 100 行 = 9600 次，实测 8.71 ms，
+	#    是 decompose 的大头。而一次擦除只碰到约 30 个 chunk ——
+	#    只更新它们覆盖的区域，其余原样保留。
+	#
+	#    条件里每一项都是**保守**的：缓存不在、aabb 变了、没有脏信息，
+	#    任何一条不满足就退回全量重建。宁可慢，不能算错。
+	var cg = shape._rect_grid
+	if cg != null and cg.w == w and cg.h == h and cg.origin == aabb.position 			and shape.has_dirty() and shape._rect_grid_rev <= shape.range_revision:
+		var cells: PackedByteArray = cg.cells
+		for k: int in shape.dirty_chunks():
+			var bx := (PixelShape.key_x(k) << 3) - aabb.position.x
+			var by := (PixelShape.key_y(k) << 3) - aabb.position.y
+			var c2: PixelChunk = shape.chunks.get(k)
+			for y in 8:
+				var gy := by + y
+				if gy < 0 or gy >= h:
+					continue
+				var gb := gy * w
+				var row2 := 0 if c2 == null else Bits.row_bits(c2.occ, y)
+				for x in 8:
+					var gx := bx + x
+					if gx < 0 or gx >= w:
+						continue
+					cells[gb + gx] = 1 if ((row2 >> x) & 1) != 0 else 0
+		shape._rect_grid_rev = shape.revision
+		g.cells = cells
+		return g
+	# ---- 全量路径 ----
 	var grid := PackedByteArray()
 	grid.resize(w * h)
 	grid.fill(0)
@@ -155,6 +185,8 @@ static func _build_grid(shape: PixelShape) -> Grid:
 				if gx >= 0 and gx < w:
 					grid[gy * w + gx] = 1
 	g.cells = grid
+	shape._rect_grid = g
+	shape._rect_grid_rev = shape.revision
 	return g
 
 
