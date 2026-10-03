@@ -43,6 +43,13 @@ var _bounds := {}         # body.id -> Rect2i
 ## 位置/旋转变化不在此列 —— 那些只改 node.transform，不需要重做贴图。
 var _rev := {}           # body.id -> 上次建贴图时的内容版本
 var _warned_material := false
+## 上一次 sync 重建了几块贴图（诊断用）。
+##
+## ⚠️ 加它是因为：分块贴图写完**看起来**对了，但完全可能每笔都走
+##    rebuild_all（那就等于没分块，白做）。这个计数器让"有没有真的分块"
+##    变成一个可断言的事实，而不是靠读代码推断。
+var last_tiles_rebuilt := 0
+var last_tiles_total := 0
 ## body.id -> Image（**持久**，供分块增量重绘）。
 ## 以前每次重建都是新建一张 Image，所以"只重画脏块"无处落脚。
 var _images := {}
@@ -211,6 +218,8 @@ func sync(body) -> void:
 	# 没有块级脏信息（touch() 路径）、尺寸变了、或还没建过 -> 全部块重建
 	var rebuild_all: bool = size_changed or tiles.is_empty() 			or (content_changed and dirty.size.x <= 0)
 	if content_changed or size_changed:
+		last_tiles_rebuilt = 0
+		last_tiles_total = 0
 		var live := {}
 		var x0 := aabb.position.x >> 6
 		var y0 := aabb.position.y >> 6
@@ -222,6 +231,7 @@ func sync(body) -> void:
 				#    实测那个表达式把 ty 那一半吃成了 0（键变成 0, 1<<32, 2<<32...），
 				#    于是查表永远不命中、贴图全查不到，而画面"看起来"是对的。
 				var key := Vector2i(tx, ty)
+				last_tiles_total += 1
 				live[key] = true
 				var rx := maxi(tx << 6, aabb.position.x)
 				var ry := maxi(ty << 6, aabb.position.y)
@@ -234,6 +244,7 @@ func sync(body) -> void:
 				#    传两个会编译失败，而且报错指向"依赖它的脚本"，不指向这里。
 				if not rebuild_all and not dirty.intersects(tr):
 					continue
+				last_tiles_rebuilt += 1
 				var img := _build_region_image(body.shapes, aabb, tr)
 				tis[key] = img
 				var tex: ImageTexture = tts.get(key)
@@ -354,31 +365,47 @@ func _build_region_image(shapes: Array, aabb: Rect2i, region: Rect2i) -> Image:
 	var oy: int = aabb.position.y
 	var rx: int = region.position.x
 	var ry: int = region.position.y
+	# ⚠️⚠️ **只遍历本块覆盖到的 chunk**，不要遍历整个形状。
+	#
+	#    第一版写的是 for k in s.chunks（全部 1248 个），在循环里判断像素
+	#    在不在区域内 —— 于是每块都要扫 1248 个 chunk，
+	#    24 块 = **29952 次访问**。实测每笔 sync 821 ms，
+	#    折合 8.3 us/像素，比整张重建（0.57 us/像素）还慢 14 倍。
+	#
+	#    "分块"如果实现成"每块都扫全局"，比不分块还慢 —— 这是分块算法
+	#    最容易犯的错，而且画面上完全看不出来。
+	var kx0 := (rx + ox) >> 3
+	var ky0 := (ry + oy) >> 3
+	var kx1 := (rx + ox + w - 1) >> 3
+	var ky1 := (ry + oy + h - 1) >> 3
 	for s: PixelShape in shapes:
-		for k: int in s.chunks:
-			var c: PixelChunk = s.chunks[k]
-			var bx := (PixelShape.key_x(k) << 3) - ox
-			var by := (PixelShape.key_y(k) << 3) - oy
-			var bits := c.occ
-			while bits != 0:
-				var i := Bits.first_bit_index(bits)
-				bits &= bits - 1
-				var gx := bx + (i & 7)
-				var gy := by + (i >> 3)
-				var lx := gx - rx
-				var ly := gy - ry
-				if lx < 0 or lx >= w or ly < 0 or ly >= h:
+		for cy in range(ky0, ky1 + 1):
+			for cx in range(kx0, kx1 + 1):
+				var c: PixelChunk = s.chunks.get(PixelShape.make_key(cx, cy))
+				if c == null:
 					continue
-				var mi: int = c.mat[i]
-				if mi >= palette.size():
-					mi = palette.size() - 1
-				var col: Color = palette[mi]
-				if shading:
-					col = PixelShading.shade(s, gx + ox, gy + oy, col)
-				var o := (ly * w + lx) << 2
-				data.encode_u32(o,
-					(int(col.r * 255.0)) | (int(col.g * 255.0) << 8)
-					| (int(col.b * 255.0) << 16) | (255 << 24))
+				var bx := (cx << 3) - ox
+				var by := (cy << 3) - oy
+				var bits := c.occ
+				while bits != 0:
+					var i := Bits.first_bit_index(bits)
+					bits &= bits - 1
+					var gx := bx + (i & 7)
+					var gy := by + (i >> 3)
+					var lx := gx - rx
+					var ly := gy - ry
+					if lx < 0 or lx >= w or ly < 0 or ly >= h:
+						continue
+					var mi: int = c.mat[i]
+					if mi >= palette.size():
+						mi = palette.size() - 1
+					var col: Color = palette[mi]
+					if shading:
+						col = PixelShading.shade(s, gx + ox, gy + oy, col)
+					var o := (ly * w + lx) << 2
+					data.encode_u32(o,
+						(int(col.r * 255.0)) | (int(col.g * 255.0) << 8)
+						| (int(col.b * 255.0) << 16) | (255 << 24))
 	return Image.create_from_data(w, h, false, Image.FORMAT_RGBA8, data)
 
 
