@@ -83,7 +83,11 @@ func _initialize() -> void:
 	_c("形状被识别为不连通", ShapeOps.is_disconnected(s))
 	var holder := PBody.new()
 	holder.position = Vector2(500.0, 0.0)
-	w.add_body(holder, [s])
+	# ⚠️ 这里**故意**造一个多岛屿 body 来测 ShapeOps 的分裂/合并 —— 而 add_body
+	#    默认会在入口处就把它拆成独立刚体（"每个实体内部连通"这条不变量）。
+	#    connected_known = true 是调用方在说"我知道我在干什么，别替我拆"，
+	#    正是为这种场合留的口子。断言本身测的是 ShapeOps，不是入口策略。
+	w.add_body(holder, [s], Callable(), true)
 	var rest := ShapeOps.split(s)
 	_c("切分产生新形状", rest.size() == 1, "切出 %d 块" % rest.size())
 	_c("原形状保留最大块", s.pixel_count() == 80, "%d 像素" % s.pixel_count())

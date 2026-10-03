@@ -322,13 +322,72 @@ func refresh_mass(body: PBody, density_of: Callable = Callable()) -> void:
 		max_rects_per_shape)
 
 
+## 保证 body 的每个 shape 都是**单连通**的：多岛屿就地拆成独立刚体。
+##
+## ⚠️⚠️ 为什么要有它：引擎的破坏路径一直维持着"body 的 shape 单连通"这条不变量
+##    （fracture 要么**证明**破坏后仍连通，要么把分量拆成独立刚体），
+##    但**游戏层直接造出来的** shape 不受约束 —— 一张有两团不相连像素的贴图
+##    就是一个多岛屿 body。
+##    以前它只会在"贴着边界擦一下"时被 split 顺手拆开 —— 那是**副作用**：
+##    既不是契约，也不可预期（内部擦除永远不会拆它，边缘擦除会）。
+##    现在把它变成**建造时的一次性保证**：body 进世界时就拆干净，
+##    于是"破坏前连通"这个前提对**所有** body 都成立。
+##
+## ⚠️ min_pixels 必须用 1：建造时丢像素是**删内容**，不是清理碎片。
+##    （破坏路径用 min_fragment_pixels，是因为那些碎片确实是渣。）
+##
+## ⚠️ 拆出来的岛**继承 is_static**（地形拆出来还是地形），
+##    而 fracture 的碎片刻意是动态的（崩下来的料要会掉）—— 两者语义不同，别合并。
+func ensure_connected(body: PBody, min_pixels: int = 1) -> Array:
+	var spawned: Array = []
+	var kept: Array = []
+	var changed := false
+	for s in body.shapes:
+		var parts: Array = Destruction.split(s, min_pixels)
+		if parts.size() <= 1:
+			kept.append(s)
+			continue
+		changed = true
+		# 最大的那块留在原 body（与 fracture 的选择一致）
+		var best := 0
+		var best_n := -1
+		for i in parts.size():
+			var cnt: int = parts[i].pixel_count()
+			if cnt > best_n:
+				best_n = cnt
+				best = i
+		kept.append(parts[best])
+		for i2 in parts.size():
+			if i2 == best:
+				continue
+			var frag := PBody.new()
+			frag.position = body.position
+			frag.rotation = body.rotation
+			frag.linear_velocity = body.linear_velocity
+			frag.angular_velocity = body.angular_velocity
+			frag.is_static = body.is_static
+			frag.awake = body.awake
+			spawned.append(add_body(frag, [parts[i2]], Callable(), true))
+	if changed:
+		body.rebuild(kept, density_callable(), max_rects_per_shape)
+	return spawned
+
+
 ## 方便的"按当前密度建一个动态体"。
-func add_body(body: PBody, shape_list: Array, density_of: Callable = Callable()) -> PBody:
+##
+## ⚠️ connected_known：调用方**已经知道**这些 shape 是单连通的（例如 fracture 的碎片
+##    来自 split 的分组，天然单连通）。默认 false = 不确定 -> 走一次连通性标注
+##    （768x100 实测 ~14 ms，只在**建造**时付一次，不是每帧）。
+##    破坏路径必须传 true，否则每生成一个碎片都要白跑一次标注。
+func add_body(body: PBody, shape_list: Array, density_of: Callable = Callable(),
+		connected_known: bool = false) -> PBody:
 	body.id = _next_id
 	_next_id += 1
 	body.rebuild(shape_list, density_of if density_of.is_valid() else density_callable(),
 		max_rects_per_shape)
 	bodies.append(body)
+	if not connected_known:
+		ensure_connected(body)
 	return body
 
 
@@ -1518,7 +1577,9 @@ func fracture(body: PBody, damage, burst_speed: float = 40.0) -> Array:
 		frag.linear_velocity = parent_vel + dir.normalized() * burst_speed
 		frag.angular_velocity = parent_ang
 		frag.awake = true
-		add_body(frag, [parts[i]])
+		# connected_known = true：parts 来自 split 的分组，天然单连通 ——
+		# 传 false 会让每个碎片白跑一次全量连通性标注（~14 ms/个）。
+		add_body(frag, [parts[i]], Callable(), true)
 		spawned.append(frag)
 	if not spawned.is_empty():
 		solver.clear_warm()
