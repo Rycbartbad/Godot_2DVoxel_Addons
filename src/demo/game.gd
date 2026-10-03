@@ -20,7 +20,6 @@ const PBody := preload("res://src/physics/pbody.gd")
 const PWorld := preload("res://src/physics/pworld.gd")
 const PixelShape := preload("res://src/core/pixel_shape.gd")
 const Destruction := preload("res://src/core/destruction.gd")
-const Brush := preload("res://src/core/brush.gd")
 const Editor := preload("res://src/core/pixel_editor.gd")
 const PixelRenderer := preload("res://src/render/pixel_renderer.gd")
 const PixelScale := preload("res://src/core/pixel_scale.gd")
@@ -28,19 +27,15 @@ const PixelScale := preload("res://src/core/pixel_scale.gd")
 const WORLD_W := 768          ## 关卡尺寸（世界单位 = 体素）
 const WORLD_H := 320
 const GROUND_Y := 220         ## 地面顶面高度
-const WALL_X := 300
-const WALL_W := 120
-const WALL_H := 90
-const LEVEL_TILE := 64        ## 关卡地形瓦片（很少被擦，尺寸大一点省 Body）
 const CANVAS_TILE := 64      ## 自由绘制瓦片（太小的话一笔会横跨 4 块，无谓地多出 Body）
 const MIN_BRUSH := 1.0
 const MAX_BRUSH := 40.0
 const ERASE_BURST := 25.0
 
+# world / renderer 由 PixelWorld 节点在 _ready 里建好，这里只取引用。
+# camera / hud 直接是场景节点，见下面的 @onready。
 var world: PWorld
 var renderer: PixelRenderer
-var camera: Camera2D
-var hud: Label
 
 var paused := false
 var brush_radius := 6.0
@@ -60,13 +55,26 @@ var _budget_tick := 0
 var _shot_at := -1
 
 
+@onready var _world_node: Node2D = $PixelWorld
+@onready var camera: Camera2D = $Camera2D
+@onready var hud: Label = $UI/Hint
+
+
 func _ready() -> void:
+	# ---- 世界 / 渲染器 / 相机 / UI / 关卡**全部来自场景节点** ----
+	#
+	# ⚠️ 这里以前是 45 行 new 代码：PWorld.new() / PixelRenderer.new() /
+	#    Camera2D.new() / Label.new() / _build_level() —— 编辑器里看不到、调不了，
+	#    而且完全没用上 src/nodes/ 那套节点层。
+	#
+	#    现在场景文件（scenes/demo.tscn）里把地形、相机、UI 都摆好了，这里只取引用。
+	#    能这么做的前提是 PixelShape2D 的 source=RECT：地面就是"一个 768x100 的
+	#    矩形"，不需要在 .tscn 里手写几十万个像素。
+	#
+	#    分工：场景节点 = 结构（可见、可调）；本脚本 = 行为（笔刷 / 擦除 / 拖动 / 回收）。
 	var editing := Engine.is_editor_hint()
-	world = PWorld.new()
-	world.gravity = Vector2(0.0, 600.0)
-	renderer = PixelRenderer.new()
-	renderer.name = "PixelRenderer"
-	add_child(renderer)
+	world = _world_node.world
+	renderer = _world_node.renderer
 
 	# 视野跟着体素尺寸走：体素越大，相机越"推近"，看到的体素数越少
 	# 屏幕上体素边长 = voxel_world_size * render_scale * camera.zoom
@@ -83,21 +91,8 @@ func _ready() -> void:
 	var s0 := PixelScale.get_scale() * PixelScale.render_scale()
 	if s0 <= 0.0 or not is_finite(s0):
 		s0 = 1.0
-	camera = Camera2D.new()
-	camera.position = Vector2(310, 175)
 	camera.zoom = Vector2(s0, s0)
-	camera.enabled = true
-	add_child(camera)
 	camera.make_current()
-
-	hud = Label.new()
-	hud.position = Vector2(12, 8)
-	hud.add_theme_color_override("font_color", Color(1, 1, 1))
-	hud.add_theme_color_override("font_outline_color", Color(0, 0, 0))
-	hud.add_theme_constant_override("outline_size", 4)
-	add_child(hud)
-
-	_build_level()
 	# ⚠️ 编辑器里到此为止：不跑输入、不截图、不推进物理。
 	#    关卡已经建好，渲染器和调试叠加层会把它们画出来。
 	if editing:
@@ -110,50 +105,13 @@ func _ready() -> void:
 
 # ---------------------------------------------------------------- 关卡
 
-func _build_level() -> void:
-	# 用**世界坐标**描述关卡，不要用"第几个瓦片"去推地面高度——
-	# 那样一改瓦片尺寸地面就会消失（这个坑我踩过一次）。
-	for ty in range(0, int(WORLD_H / LEVEL_TILE) + 1):
-		for tx in range(0, int(WORLD_W / LEVEL_TILE) + 1):
-			var s := PixelShape.new()
-			var bx := tx * LEVEL_TILE
-			var by := ty * LEVEL_TILE
-			for y in LEVEL_TILE:
-				var wy := by + y
-				if wy < GROUND_Y or wy >= WORLD_H:
-					continue
-				for x in LEVEL_TILE:
-					s.set_pixel(x, y, 1)
-			if s.is_empty():
-				continue
-			var b := PBody.new()
-			b.position = Vector2(bx, by)
-			b.make_static()
-			world.add_body(b, [s])
-			renderer.sync(b)
-
-	# 一堵待拆的砖墙
-	var wall := PixelShape.new()
-	for y in WALL_H:
-		for x in WALL_W:
-			wall.set_pixel(x, y, 4)
-	var wb := PBody.new()
-	wb.position = Vector2(WALL_X, GROUND_Y - WALL_H)
-	wb.make_static()
-	world.add_body(wb, [wall])
-	renderer.sync(wb)
-
-	# 几个会掉落 / 可拖动 / 可绘制的木箱
-	for i in 4:
-		var box := PixelShape.new()
-		for y in 16:
-			for x in 16:
-				box.set_pixel(x, y, 2)
-		var bb := PBody.new()
-		bb.position = Vector2(WALL_X - 150 + i * 34, 30 - i * 6)
-		bb.rotation = 0.1 * i
-		world.add_body(bb, [box])
-		renderer.sync(bb)
+# ⚠️ 这里以前是 _build_level()：用 PBody + PixelShape 把地面 / 砖墙 / 木箱
+#    全部**在代码里生成**（约 45 行）。现在它们是 scenes/demo.tscn 里的场景节点
+#    （PixelBody2D + PixelShape2D），编辑器里能选中、能拖、能改尺寸。
+#
+#    关卡几何之所以能节点化，是因为 PixelShape2D 支持 source=RECT ——
+#    地面就是"一个 768x100 的矩形"，不需要在 .tscn 里手写几十万个像素。
+#    （更复杂的关卡仍然可以在代码里生成后 add_body，两条路并存。）
 
 
 # ---------------------------------------------------------------- 主循环
