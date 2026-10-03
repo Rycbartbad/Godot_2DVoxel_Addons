@@ -108,32 +108,60 @@ static func decompose_proxy(shape: PixelShape, max_rects: int) -> Result:
 	return res
 
 
-## 把 Shape 铺成 w*h 的 0/1 网格。空形状返回 null。
+## 把 Shape 铺成 w*h 的 0/1 网格（**带缓存**）。空形状返回 null。
+##
+## ⚠️⚠️ 网格的代价随**物体尺寸**走，与"这一笔改了哪里"无关 ——
+##    2048x128 地面全量重建实测 **15.8 ms**，而一笔擦除只动 1~2 个 64x64 块。
+##    所以这里缓存网格，指纹没变的块**直接跳过**。
+##
+## ⚠️⚠️ 失效判据：**每次比对该块 64 个 chunk 的占用字**，不依赖任何
+##    "谁改了要通知我"的脏标记。
+##    · 脏标记那条路这个项目栽过多次 —— 原生破坏在 C++ 里直接改块位图，
+##      不经过 set_pixel（症状：擦掉了画面上还在）；而**缓存判错是不报错的**，
+##      只会让形状与碰撞箱静默错位（用户报过两次）。
+##    · 自校验的代价是每次扫一遍 chunks（2048x128 是 4096 次查表 + 64 个块的
+##      指纹），比全量重建（15.8 ms）便宜一个数量级，而且**不可能错**。
+##    · 占用位是网格的唯一输入（材质 id 不参与），所以指纹只需要 occ。
+##
+## ⚠️ 输出必须与全量重建**逐位相同** —— 这是硬判据：
+##    网格逐位相同 => 贪心结果相同 => 矩形集合相同 => 8 条基准必须逐位不变。
+##    见 tests/validation_grid_cache.gd。
 static func _build_grid(shape: PixelShape) -> Grid:
 	var aabb := shape.local_aabb()
 	if aabb.size.x <= 0 or aabb.size.y <= 0:
 		return null
-	var g := Grid.new()
-	g.w = aabb.size.x
-	g.h = aabb.size.y
-	g.origin = aabb.position
-	var w := g.w
-	var h := g.h
+	var w := aabb.size.x
+	var h := aabb.size.y
 	var wq := (w + 63) >> 6
+	if shape._grid_ready and shape._grid_w == w and shape._grid_h == h \
+			and shape._grid_origin == aabb.position:
+		_refresh_grid(shape, aabb, w, h, wq)
+	else:
+		_full_grid(shape, aabb, w, h, wq)
+	var g := Grid.new()
+	g.w = w
+	g.h = h
 	g.wq = wq
-	# ⚠️⚠️ 这里曾经有一条"增量路径"：把网格缓存到 PixelShape 上，
-	#    只重建**块级脏集合**覆盖的区域。**已删除 —— 实测无效。**
-	#
-	#    原因：脏集合**太大**。apply_damage 是逐像素调 mark_dirty 的，
-	#    一个半径 6 的圆就标了约 113 个 chunk。增量要跑 113 x 64 = 7232 次迭代，
-	#    而全量是 79872 次 —— 理论上差 11 倍，但两者实测几乎一样
-	#    （9.36 vs 9.13 ms），因为**每次迭代的固定开销约 1 us**，
-	#    7232 次本身就要 7 ms 上下。
-	#
-	#    它只增加了复杂度和一个"缓存可能过期"的风险面，没有收益，所以删掉。
-	#    （连同 PixelShape 上的 _rect_grid / _rect_grid_rev 一起删。）
+	g.origin = aabb.position
+	g.words = shape._grid_words
+	return g
+
+
+## 全量重建（冷启动 / AABB 动过）。顺便把所有块的指纹记下来。
+static func _full_grid(shape: PixelShape, aabb: Rect2i, w: int, h: int, wq: int) -> void:
 	var words := PackedInt64Array()
 	words.resize(wq * h)
+	var sigs := {}
+	var keys: Array = []
+	# ⚠️⚠️ 这里曾经有一条"增量路径"：缓存网格，只重建**块级脏集合**覆盖的区域。
+	#    **它失败了，但"增量没用"这个结论是过期的** —— 两个前提都变了：
+	#      · 当年脏集合是**逐像素**记的（一个半径 6 的圆标了约 113 个 chunk），
+	#        增量要跑 113 x 64 = 7232 次迭代，全量 79872 次 —— 理论上差 11 倍，
+	#        实测却几乎一样（9.36 vs 9.13 ms），因为每次迭代固定开销约 1 us。
+	#      · 现在的脏集合是**按 chunk** 记的（一笔 13x13 擦除只标 9 个 chunk），
+	#        位网格也是 8 行/块。
+	#    新版**不再依赖脏集合**，改用自校验指纹（见 _build_grid 的说明）：
+	#    2048x128 实测 15.8 -> 约 2 ms。
 	# ⚠️⚠️ 这里曾经有一个"实心快路径"：占满外接盒时直接 fill(1)（8.71 -> 0.52 ms）。
 	#    **已按用户要求移除。**
 	#
@@ -161,6 +189,10 @@ static func _build_grid(shape: PixelShape) -> Grid:
 	#    真正有效的是上面的**实心快路径**（fill(1)，8.71 -> 0.52 ms）。
 	for k: int in shape.chunks:
 		var c: PixelChunk = shape.chunks[k]
+		var bk := PixelShape.make_key(PixelShape.key_x(k) >> 3, PixelShape.key_y(k) >> 3)
+		if not sigs.has(bk):
+			sigs[bk] = PackedInt64Array()
+			_sorted_insert(keys, bk)
 		var bx := (PixelShape.key_x(k) << 3) - aabb.position.x
 		var by := (PixelShape.key_y(k) << 3) - aabb.position.y
 		for y in 8:
@@ -168,8 +200,95 @@ static func _build_grid(shape: PixelShape) -> Grid:
 			if gy < 0 or gy >= h:
 				continue
 			_write_row_bits(words, wq, w, bx, gy, Bits.row_bits(c.occ, y))
-	g.words = words
-	return g
+	for bk2: int in keys:
+		sigs[bk2] = _block_sig(shape, bk2)
+	shape._grid_words = words
+	shape._grid_wq = wq
+	shape._grid_w = w
+	shape._grid_h = h
+	shape._grid_origin = aabb.position
+	shape._grid_sigs = sigs
+	shape._grid_keys = keys
+	shape._grid_ready = true
+
+
+## 增量刷新：只重写指纹变了的块（外加发现新块）。
+static func _refresh_grid(shape: PixelShape, aabb: Rect2i, w: int, h: int, wq: int) -> void:
+	var sigs: Dictionary = shape._grid_sigs
+	var keys: Array = shape._grid_keys
+	# 1) 新块。chunk 属于哪个块是它的 key 的函数（8 整除 64，chunk 不会跨块），
+	#    所以"新块"一定伴随"新 chunk"。
+	#
+	# ⚠️ 这里内联了 key_x / key_y / make_key：这一段每次刷新要跑 chunk 数次
+	#    （2048x128 是 4096 次），三次静态函数调用就是 ~1.2 ms。
+	#    等价性由 validation_grid_cache.gd 逐位对拍（含负坐标）。
+	for k: int in shape.chunks:
+		var bk := ((k >> 35) << 32) | (((k << 32) >> 35) & 0xFFFFFFFF)
+		if not sigs.has(bk):
+			sigs[bk] = PackedInt64Array()
+			_sorted_insert(keys, bk)
+	# 2) 指纹变了才重写。
+	#    ⚠️ PackedInt64Array 是**值类型**（写时复制）：先取到局部、改完再写回。
+	#    直接写 shape._grid_words[i] 会在**每次**索引赋值时触发一次整体拷贝
+	#    （512 次写 x 4096 个 word = 灾难）。
+	var words := shape._grid_words
+	for bk2: int in keys:
+		var sig := _block_sig(shape, bk2)
+		if sig == sigs[bk2]:
+			continue
+		sigs[bk2] = sig
+		var bix := PixelShape.key_x(bk2)
+		var biy := PixelShape.key_y(bk2)
+		var cx0 := bix << 3
+		var cy0 := biy << 3
+		for oy in 8:
+			var by := (biy << 6) + (oy << 3) - aabb.position.y
+			for ox in 8:
+				var bx := (bix << 6) + (ox << 3) - aabb.position.x
+				var c: PixelChunk = shape.chunks.get(((cx0 + ox) << 32) | ((cy0 + oy) & 0xFFFFFFFF))
+				for y in 8:
+					var gy := by + y
+					if gy < 0 or gy >= h:
+						continue
+					var row := 0
+					if c != null:
+						row = Bits.row_bits(c.occ, y)
+					_write_row_bits(words, wq, w, bx, gy, row)
+	shape._grid_words = words
+
+
+## 一个块的指纹：64 个 chunk 的占用字（缺的 chunk 记 0）。
+## 分解只吃占用位，所以这足以判定"这个块变了没有"。
+static func _block_sig(shape: PixelShape, bk: int) -> PackedInt64Array:
+	var bix := PixelShape.key_x(bk)
+	var biy := PixelShape.key_y(bk)
+	var sig := PackedInt64Array()
+	sig.resize(64)
+	var cx0 := bix << 3
+	var cy0 := biy << 3
+	var i := 0
+	for oy in 8:
+		for ox in 8:
+			# 内联 make_key：这段每个块 64 次、每次刷新几十个块
+			# （不用"加法"写法：cy0 为负时 (cy0 & 0xFFFFFFFF) + oy 会进位到高 32 位）
+			var c: PixelChunk = shape.chunks.get(((cx0 + ox) << 32) | ((cy0 + oy) & 0xFFFFFFFF))
+			sig[i] = 0 if c == null else c.occ
+			i += 1
+	return sig
+
+
+## 有序插入。块 key 只在"新块第一次出现"时插入，所以 O(n) 的搬移无所谓；
+## 顺序必须稳定（指纹表按 key 有序遍历，输出才是内容的纯函数）。
+static func _sorted_insert(keys: Array, bk: int) -> void:
+	var lo := 0
+	var hi := keys.size()
+	while lo < hi:
+		var mid := (lo + hi) >> 1
+		if int(keys[mid]) < bk:
+			lo = mid + 1
+		else:
+			hi = mid
+	keys.insert(lo, bk)
 
 
 ## 贪心最大矩形。horizontal_first 决定先向右还是先向下扩，

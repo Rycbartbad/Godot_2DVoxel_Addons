@@ -60,6 +60,25 @@ var range_revision := 0
 
 var _dirty: Dictionary = {}
 
+## ---- 位网格缓存（GreedyRects._build_grid 用）----
+##
+## ⚠️ 为什么要有它：网格构建的代价随**物体尺寸**走，而一笔擦除只动一小块 ——
+##    2048x128 地面实测 **15.8 ms**，占整笔擦除（38.2 ms）的 41%，
+##    而它跟"这一笔改了哪里"完全无关。
+##
+## ⚠️ 失效判据**不依赖任何脏标记**（见 GreedyRects._build_grid 的说明）：
+##    按块比对该块 64 个 chunk 的占用字，指纹变了才重写那几行。
+##    网格布局跟着 AABB 走，所以 AABB 一变就整块重建 —— 那正是"擦到边界"
+##    那一笔，与优化前同价，不倒退。
+var _grid_words := PackedInt64Array()
+var _grid_wq := 0
+var _grid_w := 0
+var _grid_h := 0
+var _grid_origin := Vector2i.ZERO
+var _grid_sigs: Dictionary = {}
+var _grid_keys: Array = []
+var _grid_ready := false
+
 
 ## 标记一个 chunk 为脏（chunk 坐标）。已经脏了就早退，热路径上只有一次查表。
 func mark_dirty(cx: int, cy: int) -> void:
