@@ -41,6 +41,11 @@ func _enter_tree() -> void:
 	set_notify_transform(true)
 
 
+## 上一次看到的 scale。用来分辨"位形变了"和"形状变了"——
+## 只有 scale 变化才需要重烘焙（见 _notification 里的说明）。
+var _last_scale := Vector2.ONE
+
+
 func _notification(what: int) -> void:
 	# 编辑器里拖动/旋转本节点时，立刻让父世界重烘焙 ——
 	# 否则画面上的像素和碰撞形状停在旧位置，看起来像"拖不动"。
@@ -48,8 +53,25 @@ func _notification(what: int) -> void:
 	#   而且要 _enter_tree 里 set_notify_transform(true) 打开才会发。）
 	# ⚠️ 拖动**只要同步位形**，不要走重烘焙（那条路 50~70 ms/次，拖动会卡死）。
 	#    只有"形状内容变了"才需要重烘焙 —— 那由形状子节点的 setter 触发。
+	#
+	# ⚠️⚠️ 但**缩放和位置/旋转不是一回事**：
+	#     · 位置/旋转只是位形 —— 形状没变，同步一下就行（几微秒）
+	#     · **缩放会改变生成出来的像素**（get_shape 的缓存签名里就有 scale），
+	#       所以必须**完整重烘焙**，否则世界里的刚体还是旧尺寸。
+	#
+	#     之前这里一律走 on_child_transformed（只同步位形、且它根本不同步 scale），
+	#     于是**缩放完全不生效**：形状缓存清不掉，刚体尺寸停在旧值。
+	#     这个 bug 的根因是注释里写了"只有 scale 会"却从来没实现那一支。
 	if what == NOTIFICATION_TRANSFORM_CHANGED and Engine.is_editor_hint():
 		invalidate_gizmo()
+		var sc := scale
+		if not sc.is_equal_approx(_last_scale):
+			_last_scale = sc
+			_shape_valid = false
+			var pw := get_parent()
+			if pw != null and pw.has_method("on_child_moved"):
+				pw.on_child_moved()
+			return
 		var p := get_parent()
 		if p != null and p.has_method("on_child_transformed"):
 			p.on_child_transformed()
