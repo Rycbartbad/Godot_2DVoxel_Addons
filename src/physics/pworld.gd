@@ -1323,7 +1323,18 @@ func fracture(body: PBody, damage, burst_speed: float = 40.0) -> Array:
 		#    永远返回 true，跳过永远不生效（我第一版就是这么写的，
 		#    实测内部擦除仍是 107 ms，一点没省）。
 		#    要问的是：**破坏之前**，伤害覆盖的范围内有没有已经是边界的像素。
-		var was_boundary: bool = dmg_rect.size.x > 0 and Destruction.touches_boundary(s, dmg_rect)
+		# ⚠️⚠️ 判据的检查范围要**保守地扩大**，不能用 dmg_rect 本身。
+		#
+		#    dmg_rect 是伤害的**包围盒**，而实际被删掉的像素未必严格落在里面
+		#    （半径、材质、笔刷的边界处理都可能让它溢出一点）。
+		#    一旦判据因为"看漏了"而返回 false，就会**跳过本该做的 split** ——
+		#    形状数据断了，但 rects 没重算成两块，于是
+		#    **画出来的形状和碰撞体不一致**（用户报的就是这个）。
+		#
+		#    宁可多判一点：多查 8 像素的边，代价是极少数情况下多做一次
+		#    本来能省的 split，换来的是判据不会漏。
+		var probe := Rect2i(dmg_rect.position - Vector2i(8, 8), dmg_rect.size + Vector2i(16, 16))
+		var was_boundary: bool = probe.size.x > 0 and Destruction.touches_boundary(s, probe)
 		removed += Destruction.apply_damage(s, damage)
 		# ⚠️ 便宜的必要条件：凸的伤害集**严格在形状内部**时不可能断开形状，
 		#    而 split 要跑全量连通分量标记（1248 个 chunk，实测 **31 ms**）。
