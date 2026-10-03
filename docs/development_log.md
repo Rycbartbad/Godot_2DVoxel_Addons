@@ -66,6 +66,7 @@
 | 36 | 回退路径与原生路径**不等价** | 不装 dll 时物理完全不同（sleep_box 0/12 → 10/12 清醒） | ★★★★ |
 | 37 | 被休眠物体挡住就拖不动：自指死锁 | 拖不动；必须"整岛唤醒" | ★★★★ |
 | 38 | **合成推测接触点**：角接触力臂恒为 0 | 40° 的方块永远不倒，1.1 秒后睡着 | ★★★★★ |
+| 39 | **幽灵碰撞**：滑过拼接表面被"不是表面的面"绊住 | 接缝处冒出水平法向的接触 → 方块突然打转（ω 跳到 4.9） | ★★★★★ |
 
 ---
 
@@ -2887,6 +2888,60 @@ sleep_frag   -39.158215979656  (0/120)
 **代价**：8 条逐位基准里 6 条改变（@@stack:2:3@@ 逐位不变）；
 @@sleep_box@@ / @@sleep_frag@@ 仍然 0/12、0/120 全部入睡。
 双路径一致性由 @@tests/diag_collide_parity.gd@@ 确认：3609 个流形 0 差异。
+
+
+### 坑 39 · 幽灵碰撞：滑过拼接表面时被"不是表面的面"绊住 ★★★★★
+
+**状态**：**已量出，未修**。常驻诊断 `tests/diag_ghost_collision.gd`。
+
+**现象**：一个 16x16 的方块以 120 px/s 滑过 1200 px 长的地面，地面由 60 段
+20 px 宽的静态体拼成 —— 它会在**接缝处突然打转**（ω 从 ~0 跳到 **4.9 rad/s**），
+最大偏离静止高度 **14.9 px**（几乎是一个方块高）。同一块地面若是一整块，
+偏离 **0.0000 px**，完全干净。
+
+这是 box2d 的 **"ghost collisions"**，Rapier 有专门的回归测试
+（`crates/rapier2d/tests/issue_669_polyline_ghost_collisions.rs`）。
+
+**机制**（诊断脚本直接打印出来的）：
+
+```
+步 6 方块 x∈[23.34,39.34] rot=0.018° ω=0.0000   <-- **非竖直法向** (1.00,0.00) 点(21.43,0.16)
+步 7 方块 x∈[24.67,40.67] rot=4.709° ω=4.9121   <-- **非竖直法向** (-1.00,-0.00) 点(40.00,0.17)
+```
+
+方块底面陷进地面 @@penetration_slop@@ 之内的 **0.164 px**，于是它的**底边**落进了
+**下一段左端面**的竖直范围内。SAT 一算：水平间距 0.66 < 推测边际 1.5 →
+生成一个**水平法向的推测接触**。那个面**不是表面**（它被相邻的一段盖住了），
+但 SAT 看不见这件事。法向指向后方、作用点又在方块边缘 → 力臂大 → 瞬间打转。
+
+**Rapier 的修法是结构性的，不是调参。** parry 的
+`src/shape/compound_pseudo_normals.rs` 注释几乎就是在描述这个现象：
+
+> "Parts of a decomposed outline meet along cut edges that lie inside the union,
+> where nothing can reach them -- but each part is convex and reports contacts
+> against its own faces regardless, so **a body sliding across a join catches on
+> a face that is not a surface**. Dropping the edges a sibling part covers leaves
+> every part facing the way the union does."
+
+做法三步：
+
+1. 每个 part 求出哪些边界边是**切割边**（被兄弟 part 盖住）—— 从边界里**去掉**；
+2. 剩下的每条边界边带一个**法向锥**（`CompoundEdgeCone { face, clockwise_limit,
+   counter_clockwise_limit }`，两个 limit 各自伸到沿外轮廓的下一条边界边的一半处）；
+3. 接触法向**投影**进这些锥；投影不进去（说明这个接触是从并集**内部**够过来的）
+   → **直接丢弃**这个接触（`project_local_normal_mut` 返回 `false`）。
+
+**对本项目的含义**：本引擎的碰撞几何是**贪心矩形分解**，
+"一个 body 由多个相邻矩形拼成"是常态 —— 所以 (1)(2)(3) 都能做，
+而且是**每个 body 一次**的预处理，正好挂在 `PBody.rebuild()` 那条唯一收口上
+（破坏 / 擦除 / 绘制 / 分裂全走它）。
+
+⚠️ **但它只修得了"同一 body 内部的接缝"**（诊断里的 B）。
+60 个**独立**静态体拼成的地面（诊断里的 C）在 Rapier 里同样会被绊住 ——
+那是各自独立的 collider，它们的侧面是**真面**。要修 C，得让引擎知道
+"这些 body 在拓扑上连成一片"，那是另一个量级的事。
+
+⚠️ 会动基准：接触集变了，推测接触的行为随之改变。
 
 
 ## 4.4 修复后的诚实备注
