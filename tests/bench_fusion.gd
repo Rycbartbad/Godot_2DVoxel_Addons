@@ -49,7 +49,8 @@ func _bench(nbox: int) -> void:
 			if not b.is_static:          # 与节点 _physics_process 的新行为一致
 				pw.renderer.sync(b)
 	var rnd := (Time.get_ticks_usec() - t1b) / float(STEPS) + pr
-	# 对照：旧行为（静态体也每帧同步）
+	# 对照：**纯门面策略** —— PixelPhysics._sync_renderer() 逐字如此：
+	#   遍历所有刚体（含静态）做 sync，再 prune。
 	var t1c := Time.get_ticks_usec()
 	for i in STEPS:
 		for b in pw.world.bodies:
@@ -61,14 +62,16 @@ func _bench(nbox: int) -> void:
 		pw._live_ids()
 	var live := (Time.get_ticks_usec() - t2) / float(STEPS)
 
-	print("刚体 %4d | 物理 %7.3f | prune %6.3f | sync(新) %7.3f | sync(旧) %7.3f | 省 %5.1f%% | 新合计 %7.3f us" % [
-		n, phys, pr, rnd - pr, old - pr, (1.0 - rnd / maxf(old, 0.001)) * 100.0, phys + rnd])
+	print("刚体 %4d | 物理 %7.3f | 节点 %7.3f | 纯门面 %7.3f | 节点省 %5.1f%% | 帧合计 %7.3f us" % [
+		n, phys, rnd, old, (1.0 - rnd / maxf(old, 0.001)) * 100.0, phys + rnd])
 	pw.queue_free()
 	await process_frame
 
 func _initialize() -> void:
-	print("=== 融合后的每帧成本拆分 ===")
+	print("=== 融合后的节点 vs 纯门面：每帧渲染同步成本 ===")
 	print("（每项 = 300 次的平均，单位微秒）")
+	print("「纯门面」= PixelPhysics._sync_renderer() 的逐字策略（所有刚体都 sync）")
+	print("「节点」  = PixelWorld._physics_process 优化后（跳过静态体）")
 	for n in [4, 60, 240, 600]:
 		await _bench(n)
 	quit(0)
