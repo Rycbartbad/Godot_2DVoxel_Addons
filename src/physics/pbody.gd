@@ -243,6 +243,24 @@ func rebuild(shape_list: Array, density_of: Callable = Callable(), max_rects: in
 	for s0 in shape_list:
 		if s0 != null:
 			s0.owner_body = self     # Teardown 的 GetShapeBody 靠它
+	# ⚠️⚠️ **内容变了，必须让渲染器知道** —— 这里是最可靠的 choke point：
+	#     破坏 / 擦除 / 绘制 / 将来任何新路径，改完内容都会调 rebuild()。
+	#
+	#     为什么不能只靠 PixelShape.set_pixel 里那句 mark_dirty()：
+	#     原生破坏（C++ 直接改块位图）和 Brush 的批量写入都**不经过 set_pixel** ——
+	#     revision 不变，渲染器 sync() 看到 _rev 没变就跳过贴图重建。
+	#     表现是「右键擦掉了，画面上却还在，直到生成新碎片才刷新」
+	#     （新碎片是新 body id，_rev 里查不到，必然重建 —— 所以只有它们正常显示）。
+	#
+	#     我第一版是在调用方补（_damage_world），那是**在症状处打补丁**：
+	#     当场就漏掉了 PixelEditor 那条路，用户第二次报同一个 bug 才找到。
+	#     放在 rebuild() 里才是源头修 —— 调用方不可能再漏。
+	#
+	#     代价：擦地形时每帧都会 rebuild，于是每帧 touch 一次 —— 这是对的，
+	#     内容确实每帧都在变。不擦的时候不会调到这里。
+	for s1 in shape_list:
+		if s1 != null:
+			s1.touch()
 	rects.clear()
 	# 静态体不需要质量属性（逆质量恒为 0，质心也不参与求解）。
 	# 擦地形时每帧都会 rebuild，跳过逐像素扫描是实打实的收益。
