@@ -283,11 +283,14 @@ func _build_texture_impl(shapes: Array, aabb: Rect2i, cache_key: int):
 					#    查四邻域必须加上外接盒原点，否则边沿会沿着贴图边界算，
 					#    表现为形状内部凭空出现一条暗线。
 					col = PixelShading.shade(s, gx + ox, gy + oy, col)
-				var o := (gy * w + gx) * 4
-				data[o] = int(col.r * 255.0)
-				data[o + 1] = int(col.g * 255.0)
-				data[o + 2] = int(col.b * 255.0)
-				data[o + 3] = 255
+				# ⚠️ 一次 encode_u32，不是四次逐字节写。
+				#    768x100 的地面 = 76800 像素，逐字节写是 30.7 万次 GDScript
+				#    数组写入；encode_u32 把它压成 7.7 万次。这是擦除卡顿里
+				#    "重建贴图 ~46 ms" 的主要成分。
+				var o := (gy * w + gx) << 2
+				data.encode_u32(o,
+					(int(col.r * 255.0)) | (int(col.g * 255.0) << 8)
+					| (int(col.b * 255.0) << 16) | (255 << 24))
 	var img := Image.create_from_data(w, h, false, Image.FORMAT_RGBA8, data)
 	var tex: ImageTexture = _textures.get(cache_key)
 	if tex == null:
