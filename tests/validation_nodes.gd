@@ -6,6 +6,8 @@ extends SceneTree
 const PixelBody2D := preload("res://src/nodes/pixel_body_2d.gd")
 const PixelWorld := preload("res://src/nodes/pixel_world.gd")
 const PixelShape2D := preload("res://src/nodes/pixel_shape_2d.gd")
+const PixelJoint2D := preload("res://src/nodes/pixel_joint_2d.gd")
+const DebugOverlay := preload("res://src/render/debug_overlay.gd")
 
 var _pass := 0
 var _fail := 0
@@ -141,6 +143,31 @@ func _initialize() -> void:
 		f.close()
 	_c("demo.tscn 里没有 `= null`（编辑器重存的残留）", bad.is_empty(),
 		"%d 行: %s" % [bad.size(), ", ".join(bad).substr(0, 80)])
+
+	# ---- 约束的调试画法只在 DebugOverlay 里出现 ----
+	#
+	# ⚠️ 甲方要求："所有的约束只在 debugoverlay 中可见，游戏中不可见"。
+	#    关节节点自己画锚点连线（不画的话编辑器里"有约束/没约束"看起来一样），
+	#    所以必须在**运行时**按 DebugOverlay 的可见性把关，否则游戏画面里会挂着
+	#    一堆调试线。编辑器里则始终画（Engine.is_editor_hint()）。
+	print("=== 约束画法的可见性 ===")
+	var jw := PixelWorld.new()
+	root.add_child(jw)
+	var ov := DebugOverlay.new()
+	ov.name = "DebugOverlay"
+	ov.visible = false
+	var jn := PixelJoint2D.new()
+	jn.name = "J"
+	jn.body_b = NodePath("../A")
+	jw.add_child(ov)
+	jw.add_child(jn)
+	_c("DebugOverlay 关着 -> 约束不画", not jn.debug_visible_now())
+	ov.visible = true
+	_c("DebugOverlay 打开 -> 约束画", jn.debug_visible_now())
+	var lone := PixelJoint2D.new()
+	root.add_child(lone)
+	_c("没有 DebugOverlay（纯代码建）-> 不画", not lone.debug_visible_now())
+	lone.free()
 
 	print("=== %d passed, %d failed ===" % [_pass, _fail])
 	quit(0 if _fail == 0 else 1)

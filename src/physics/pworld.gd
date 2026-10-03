@@ -630,7 +630,7 @@ func _substep_rapier(dt: float) -> void:
 	for g in grabs:
 		# 每子步重取焊接组件：关节可能在上一子步断了（断裂阈值）或新建了。
 		g.bodies = weld_group(g.body) if not joints.is_empty() else [g.body]
-		g.apply(dt)
+		g.apply(dt, gravity)
 		# ⚠️ 记的是**整个组件**：组件里除被抓那个以外的刚体也在被驱动，
 		#    漏掉它们的话 enforce_body_budget 可能把正在拖的刚体当成"闲置碎块"淘汰掉。
 		for p in g.bodies:

@@ -75,6 +75,10 @@ enum Motor { OFF, VELOCITY, POSITION }
 @export var break_impulse := 0.0
 
 @export_group("调试")
+## 是否画锚点连线。
+##
+## ⚠️ **运行时只在 DebugOverlay 可见时才画**（甲方要求：约束的调试画法不能出现在
+##    游戏画面里）。编辑器里**始终**画 —— 不然摆关节时"有约束"和"没约束"一模一样。
 @export var debug_draw := true
 
 ## 烘焙出来的 PJoint（RefCounted）。编辑器里是 null，运行时才有值。
@@ -98,6 +102,22 @@ func _screen_unit() -> float:
 	return 1.0 / z.x
 
 
+## 现在该不该画：编辑器里始终画；运行时看 DebugOverlay 的可见性。
+func debug_visible_now() -> bool:
+	if Engine.is_editor_hint():
+		return true
+	if not debug_draw:
+		return false
+	var ov := _debug_overlay()
+	return ov != null and (ov as CanvasItem).visible
+
+
+## 同级（PixelWorld 下）的 DebugOverlay。没有就当作"调试视图没开"。
+func _debug_overlay() -> Node:
+	var p := get_parent()
+	return p.get_node_or_null("DebugOverlay") if p != null else null
+
+
 func _init() -> void:
 	set_notify_transform(true)
 
@@ -110,6 +130,13 @@ func _enter_tree() -> void:
 	#    （实测：滑轨的锚点在箱子内部，屏幕上**一个像素都看不到**）。
 	if z_index == 0:
 		z_index = 5
+	# ⚠️ DebugOverlay 的显示/隐藏要能立刻反映到约束画法上（甲方按 D 切视图）。
+	#    不连这个信号的话，切了视图关节还停在上一帧画出来的样子。
+	var ov := _debug_overlay()
+	if ov is CanvasItem:
+		var ci := ov as CanvasItem
+		if not ci.visibility_changed.is_connected(queue_redraw):
+			ci.visibility_changed.connect(queue_redraw)
 
 
 func _notification(what: int) -> void:
@@ -123,7 +150,7 @@ func _notification(what: int) -> void:
 func _process(_delta: float) -> void:
 	if Engine.is_editor_hint():
 		return
-	if debug_draw:
+	if debug_visible_now():
 		queue_redraw()
 
 
@@ -214,7 +241,7 @@ func _kind_color() -> Color:
 
 
 func _draw() -> void:
-	if not debug_draw:
+	if not debug_visible_now():
 		return
 	# 画的是**锚点**，不是形状：关节在物理里没有形状，只有约束。
 	# 线宽/点半径按相机 zoom 反算成"屏幕 1~2 像素"（见 _screen_unit）。
