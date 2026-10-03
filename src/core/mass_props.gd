@@ -15,6 +15,10 @@ class Props:
 	var com := Vector2.ZERO
 	var inertia := 0.0
 	var pixel_count := 0
+	## 摩擦/恢复系数的**逐像素累加**（除以 pixel_count 就是加权平均）。
+	## 和密度同一个口径：材质是逐像素存的，混合材质的刚体取加权平均。
+	var fric_sum := 0.0
+	var rest_sum := 0.0
 
 	func inv_mass() -> float:
 		return 0.0 if mass <= 0.0 else 1.0 / mass
@@ -24,7 +28,8 @@ class Props:
 
 
 ## density_of: Callable(material:int) -> float，默认全部为 1.0
-static func compute(shape: PixelShape, density_of: Callable = Callable()) -> Props:
+static func compute(shape: PixelShape, density_of: Callable = Callable(),
+		friction_of: Callable = Callable(), restitution_of: Callable = Callable()) -> Props:
 	## 单趟扫描：同时累加质量、一阶矩与"绕原点的极惯性矩"，
 	## 再用平行轴定理换算到质心：I_com = I_origin - m * |com|^2。
 	## （逐像素循环是 GDScript 里最贵的部分，能少扫一趟就少一趟。）
@@ -43,6 +48,14 @@ static func compute(shape: PixelShape, density_of: Callable = Callable()) -> Pro
 	#    （跨调用缓存密度才会引入"缓存判错不报错"的风险，这里刻意不做。）
 	var has_density := density_of.is_valid()
 	var dens := {}
+	# 摩擦/恢复系数：**和密度同一趟扫描**（逐像素再扫一遍是白烧；材质种类通常一两种，
+	# 同样按材质记忆化）。没给 Callable 就整趟不算，零开销。
+	var has_fric := friction_of.is_valid()
+	var has_rest := restitution_of.is_valid()
+	var fric := {}
+	var rest := {}
+	var f_sum := 0.0
+	var r_sum := 0.0
 	var dscale := shape.density_scale
 	for k: int in shape.chunks:
 		var c: PixelChunk = shape.chunks[k]
@@ -64,12 +77,28 @@ static func compute(shape: PixelShape, density_of: Callable = Callable()) -> Pro
 				d = cached
 			# 形状级的密度倍率（Teardown 的 SetShapeDensity）。默认 1.0，不影响既有行为。
 			d *= dscale
+			if has_fric or has_rest:
+				var mi2: int = c.mat[i]
+				if has_fric:
+					var fv = fric.get(mi2)
+					if fv == null:
+						fv = friction_of.call(mi2)
+						fric[mi2] = fv
+					f_sum += fv
+				if has_rest:
+					var rv = rest.get(mi2)
+					if rv == null:
+						rv = restitution_of.call(mi2)
+						rest[mi2] = rv
+					r_sum += rv
 			m += d
 			sx += d * px
 			sy += d * py
 			i_origin += d * (px * px + py * py + 1.0 / 6.0)
 			n += 1
 	p.pixel_count = n
+	p.fric_sum = f_sum
+	p.rest_sum = r_sum
 	if m <= 0.0 or n == 0:
 		return p
 	p.mass = m

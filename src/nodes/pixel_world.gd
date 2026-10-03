@@ -236,6 +236,8 @@ func rebuild() -> void:
 		while dens.size() <= mid:
 			dens.resize(mid + 1)
 		dens[mid] = m.density
+		world.set_material_friction(mid, m.friction)
+		world.set_material_restitution(mid, m.restitution)
 		if m.has_strength():
 			world.set_material_strength(mid, m.compress_strength, m.resolved_shear())
 	# 密度表直接写进 world（与 material_density 同构）

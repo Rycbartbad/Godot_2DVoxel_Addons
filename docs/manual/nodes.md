@@ -101,15 +101,27 @@ func build_shape() -> PixelShape:
 
 ## 材质是资源
 
-`PixelMaterial` 是一个 `Resource`：颜色 / 密度 / 抗压 / 抗剪在**同一个资源**里。
+`PixelMaterial` 是一个 `Resource`：颜色 / 密度 / 摩擦 / 恢复系数 / 抗压 / 抗剪在**同一个资源**里。
 
 ```
 materials/
-  stone.tres    石头  密度 2.5   抗压 40
-  wood.tres     木头  密度 0.6   抗压 14
-  metal.tres    铁    密度 7.8   抗压 120
-  brick.tres    砖    密度 2.0   抗压 20
+  stone.tres    石头  密度 2.5   摩擦 0.5   恢复 0.0   抗压 40
+  wood.tres     木头  密度 0.6   摩擦 0.5   恢复 0.0   抗压 14
+  metal.tres     铁   密度 7.8   摩擦 0.5   恢复 0.0   抗压 120
+  brick.tres     砖   密度 2.0   摩擦 0.5   恢复 0.0   抗压 20
 ```
+
+| 属性 | 语义 | 备注 |
+|---|---|---|
+| `density` | 质量 = Σ 密度 | 逐像素存，混合材质取加权平均 |
+| `friction` | 摩擦系数（0 = 冰面）| **两个碰撞体合成**（默认取平均）|
+| `restitution` | 恢复系数（0 = 不弹，1 = 完全弹性）| 合成规则同上 |
+
+> ⚠️ **合成规则**：Rapier 的接触系数是**两个碰撞体按 `CoefficientCombineRule` 合成**的
+> （默认 `Average`）。球 0.9 + 地面 0.0 → 接触处 0.45 → 回弹速度 45%、高度约 20%。
+> 想让球真的弹起来，**地面也要给恢复系数**；摩擦同理（想让某个材质说了算，两边设同值）。
+> 实测：`tests/validation_materials.gd`（摩擦 0 → 滑 213.7 px，摩擦 0.9 → 124.2 px；
+> 恢复 0 → 回弹 0.0 px，0.9 → 19.2 px）。
 
 在 `PixelWorld` 的 Inspector 里把这些资源填进 `materials` 数组即可。
 `rebuild()` 会把颜色播给渲染层、密度与强度播给物理层 —— **一份数据，三处同源**。

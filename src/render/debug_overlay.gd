@@ -124,14 +124,19 @@ func _resolve_world() -> void:
 ##    看起来比像素图大一圈。实测（demo_shot.png）：墙的像素在 x=948..1667，
 ##    叠加层外沿在 x=945..1670，正好各多 3 px = 半个线宽。
 ##    结论：不是坐标错了，是**线太粗**。所有线宽都乘这个系数。
+## 屏幕 1 像素 = 多少**世界单位**。
+##
+## ⚠️⚠️ 用**画布到视口的变换**（get_viewport_transform），**不要**用相机 zoom。
+##    相机 zoom 只描述"游戏里"的缩放：在编辑器里它可能是任意值 —— 我一度把
+##    render_scale 改成"取相机所在视口"，编辑器视口很小时 zoom 会掉到 0.5 左右，
+##    于是点按 2/zoom 算就变成十几个像素（甲方："joint的点变得巨大无比"）。
+##    get_viewport_transform() 在编辑器、游戏、SubViewport 里都是"世界 -> 屏幕"的
+##    真实变换，取它的 scale 永远是对的：编辑器里 = 2 个编辑器像素，游戏里 = 2 个屏幕像素。
 func _screen_unit() -> float:
-	var cam := get_viewport().get_camera_2d()
-	if cam == null:
-		return 1.0        # 编辑器里没有相机 -> 用画布单位（和 Godot 自带抓手一致）
-	var z := cam.zoom
-	if z.x <= 0.0 or z.y <= 0.0:
+	var sc := get_viewport_transform().get_scale()
+	if absf(sc.x) <= 0.0001:
 		return 1.0
-	return 1.0 / z.x
+	return 1.0 / sc.x
 
 
 ## 世界里的刚体（没有世界就返回空，编辑器里没摆 PixelPhysics 时不该报错）

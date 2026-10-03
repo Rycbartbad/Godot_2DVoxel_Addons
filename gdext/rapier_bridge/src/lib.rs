@@ -730,6 +730,37 @@ pub extern "C" fn rb_body_set_density(w: *mut World, id: u32, density: f64) {
     }
 }
 
+/// 摩擦系数（材质属性）-> 该刚体的**所有**碰撞体。
+///
+/// ⚠️ Rapier 的接触系数是**两个碰撞体按 CoefficientCombineRule 合成**的（默认 Average）：
+///    地面 0.8 + 箱子 0.2 -> 接触处 0.5。所以"想让某个材质说了算"就得两边设同一个值。
+///    以后要"取最大/取最小"，得再开一个 combine rule 的旋钮（Rapier 有，现在没接）。
+///
+/// ⚠️ 和密度不同：改摩擦/恢复系数**不需要** recompute_mass_properties ——
+///    它们不参与质量属性。别照着 rb_body_set_density 抄那两行。
+#[no_mangle]
+pub extern "C" fn rb_body_set_friction(w: *mut World, id: u32, friction: f64) {
+    let Some(w) = (unsafe { wref(w) }) else { return };
+    let Some(&h) = w.map.get(&id) else { return };
+    let cols: Vec<ColliderHandle> = w.bodies[h].colliders().iter().copied().collect();
+    for c in cols {
+        w.colliders[c].set_friction(friction as Real);
+    }
+}
+
+/// 碰撞恢复系数（0 = 完全不弹，1 = 完全弹性）-> 该刚体的所有碰撞体。
+/// 合成规则同 rb_body_set_friction（默认 Average）。
+#[no_mangle]
+pub extern "C" fn rb_body_set_restitution(w: *mut World, id: u32, restitution: f64) {
+    let Some(w) = (unsafe { wref(w) }) else { return };
+    let Some(&h) = w.map.get(&id) else { return };
+    let cols: Vec<ColliderHandle> = w.bodies[h].colliders().iter().copied().collect();
+    for c in cols {
+        w.colliders[c].set_restitution(restitution as Real);
+    }
+}
+
+
 // ---- 抓取：这里**故意没有**任何 FFI ----
 //
 // ⚠️ 试过"鼠标关节"（运动学锚点刚体 + 两轴位置马达），已删除。原因是 Rapier 的马达

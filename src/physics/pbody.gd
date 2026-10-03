@@ -6,6 +6,7 @@ extends RefCounted
 ##   角度积分退化为 theta += w * dt。
 
 const MassProps := preload("res://src/core/mass_props.gd")
+const Bits := preload("res://src/core/pixel_bits.gd")
 const GreedyRects := preload("res://src/core/greedy_rects.gd")
 
 var id := -1
@@ -23,6 +24,13 @@ var mass := 0.0
 var density := 1.0
 ## 推给 Rapier 的镜像（-1 = 未推送）
 var _rp_density := -1.0
+## 摩擦系数 / 碰撞恢复系数（由材质逐像素平均而来，见 rebuild()）。
+## ⚠️ Rapier 的接触系数是**两个碰撞体合成**的（默认 Average），所以这是"这个刚体
+##    对外表现出的系数"，不是"两个材质碰在一起会怎样"。
+var friction := 0.5
+var restitution := 0.0
+var _rp_friction := -1.0
+var _rp_restitution := -1.0
 var inertia := 0.0
 var inv_mass := 0.0
 var inv_inertia := 0.0
@@ -319,8 +327,23 @@ func make_static() -> void:
 ##    默认没给是**有意的保守**：绝大多数调用方确实不知道范围，
 ##    全量重建虽然慢但一定对。知道范围的（fracture）必须显式传进来，
 ##    否则 768x100 的地面每笔都要重建 24 块（~54 ms）而不是 1 块（~7 ms）。
+## 第一个非空像素的材质 id（没有像素返回 -1）。静态体取材质属性用它。
+static func _first_material(shape_list: Array) -> int:
+	for s in shape_list:
+		if s == null:
+			continue
+		for k: int in s.chunks:
+			var c = s.chunks[k]
+			if c.occ == 0:
+				continue
+			var i := Bits.first_bit_index(c.occ)
+			return c.mat[i]
+	return -1
+
+
 func rebuild(shape_list: Array, density_of: Callable = Callable(),
-		max_rects: int = 64, dirty_rect: Rect2i = Rect2i()) -> void:
+		max_rects: int = 64, dirty_rect: Rect2i = Rect2i(),
+		friction_of: Callable = Callable(), restitution_of: Callable = Callable()) -> void:
 	# 几何变了 —— Rapier 后端据此决定要不要重建碰撞体（见 _rp_rects_rev）。
 	# 放在 rebuild() 里是**源头修**：破坏 / 擦除 / 绘制 / 分裂全都走这里。
 	rects_rev += 1
@@ -366,6 +389,16 @@ func rebuild(shape_list: Array, density_of: Callable = Callable(),
 		# 静态体不算质量（跳过逐像素扫描是实打实的收益），密度给默认值：
 		# 万一之后被 rb_body_set_type 变成动态体，Rapier 会按 1.0 算质量，而不是 0。
 		density = 1.0
+		# ⚠️ 静态体跳过逐像素扫描（性能），但**材质属性仍然要有**：
+		#    否则地面永远用默认摩擦/恢复系数，材质里配的值完全不生效 ——
+		#    实测症状是"球 0.9 + 地面 0.0 取平均 = 0.45"，看起来像恢复系数没接上。
+		#    这里只取**第一个非空像素**的材质（静态地形通常整块同材质），代价 O(块数)。
+		var mat := _first_material(shape_list)
+		if mat >= 0:
+			if friction_of.is_valid():
+				friction = friction_of.call(mat)
+			if restitution_of.is_valid():
+				restitution = restitution_of.call(mat)
 		refresh_com()
 		update_aabb()
 		return
@@ -379,13 +412,17 @@ func rebuild(shape_list: Array, density_of: Callable = Callable(),
 	var com := Vector2.ZERO
 	var inertia_c := 0.0
 	var n_px := 0
+	var f_sum := 0.0
+	var r_sum := 0.0
 	var props: Array = []
 	for s in shape_list:
-		var p: MassProps.Props = MassProps.compute(s, density_of)
+		var p: MassProps.Props = MassProps.compute(s, density_of, friction_of, restitution_of)
 		props.append(p)
 		m_total += p.mass
 		com += p.com * p.mass
 		n_px += p.pixel_count
+		f_sum += p.fric_sum
+		r_sum += p.rest_sum
 	var had_mass := m_total > 0.0
 	if had_mass:
 		com /= m_total
@@ -401,6 +438,10 @@ func rebuild(shape_list: Array, density_of: Callable = Callable(),
 	# 平均密度 = 质量 / 像素数（材质逐像素不同时取平均值：Rapier 的碰撞体密度是
 	# 均匀的，用平均值能让**总质量**精确对上，惯量分布的差异可以忽略）。
 	density = m_total / float(n_px) if n_px > 0 else 1.0
+	# 摩擦/恢复系数：同样是**逐像素加权平均**（与密度一个口径）。
+	if n_px > 0:
+		friction = f_sum / float(n_px)
+		restitution = r_sum / float(n_px)
 	local_com = com if had_mass else Vector2.ZERO
 	if is_static:
 		inv_mass = 0.0

@@ -131,6 +131,8 @@ alignas(16) static unsigned char g_str_empty_hint[64];
 //  32  body_set_groups(u32 id, u32 layer, u32 mask)     （Rapier InteractionGroups）
 //  33  joint_set_contacts(u32 jid, i32 enabled)         0 = 两个被关节连着的刚体之间不生成接触
 //  34  body_set_density(u32 id, f64 density)             材质密度 -> Rapier 质量（不推就是两边质量分叉）
+//  38  body_set_friction(u32 id, f64 friction)           材质摩擦系数 -> Rapier 碰撞体
+//  39  body_set_restitution(u32 id, f64 restitution)     材质恢复系数 -> Rapier 碰撞体
 //  （35~37 曾用于"鼠标关节"抓取，已删除 —— 见 rapier_bridge/src/lib.rs 的墓碑注释）
 
 typedef void *RPWorld;
@@ -175,6 +177,8 @@ struct RapierApi {
 	void (*body_set_groups)(RPWorld, uint32_t, uint32_t, uint32_t) = nullptr;
 	void (*joint_set_contacts)(RPWorld, uint32_t, int32_t) = nullptr;
 	void (*body_set_density)(RPWorld, uint32_t, double) = nullptr;
+void (*body_set_friction)(RPWorld, uint32_t, double) = nullptr;
+void (*body_set_restitution)(RPWorld, uint32_t, double) = nullptr;
 
 	bool tried = false;
 	bool ok = false;
@@ -246,6 +250,8 @@ static bool load_rapier() {
 	RP_GET(body_set_groups, "rb_body_set_groups")
 	RP_GET(joint_set_contacts, "rb_joint_set_contacts")
 	RP_GET(body_set_density, "rb_body_set_density")
+RP_GET(body_set_friction, "rb_body_set_friction")
+RP_GET(body_set_restitution, "rb_body_set_restitution")
 
 #undef RP_GET
 	g_rap.ok = true;
@@ -403,6 +409,18 @@ static void run_rapier_cmd(RapierInstance *inst, const uint8_t *in, size_t in_n,
 				uint32_t id = r.u32();
 				double dens = r.f64();
 				g_rap.body_set_density(W, id, dens);
+				break;
+			}
+			case 38: {
+				uint32_t id = r.u32();
+				double fric = r.f64();
+				g_rap.body_set_friction(W, id, fric);
+				break;
+			}
+			case 39: {
+				uint32_t id = r.u32();
+				double rest = r.f64();
+				g_rap.body_set_restitution(W, id, rest);
 				break;
 			}
 			default:

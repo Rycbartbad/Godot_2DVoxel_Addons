@@ -229,6 +229,15 @@ var _next_id := 1
 var material_density := PackedFloat32Array()
 var _density_fn: Callable = Callable()
 
+## 材质 id -> 摩擦系数 / 碰撞恢复系数（与 material_density 同构）。
+##
+## ⚠️ Rapier 的接触系数由**两个碰撞体合成**（CoefficientCombineRule，默认 Average）：
+##    地面 0.8 + 箱子 0.2 -> 接触处 0.5。所以"让某个材质说了算"要两边设同一个值。
+var material_friction := PackedFloat32Array()
+var material_restitution := PackedFloat32Array()
+var _friction_fn: Callable = Callable()
+var _restitution_fn: Callable = Callable()
+
 
 ## 世界自己登记到查询模块，销毁时自己注销。
 ##
@@ -301,6 +310,49 @@ func set_material_density(material: int, density: float) -> void:
 	_density_fn = Callable()
 
 
+func set_material_friction(material: int, v: float) -> void:
+	if material < 0:
+		return
+	if material_friction.size() <= material:
+		material_friction.resize(material + 1)
+	material_friction[material] = v
+	_friction_fn = Callable()
+
+
+func set_material_restitution(material: int, v: float) -> void:
+	if material < 0:
+		return
+	if material_restitution.size() <= material:
+		material_restitution.resize(material + 1)
+	material_restitution[material] = v
+	_restitution_fn = Callable()
+
+
+func friction_of_material(material: int) -> float:
+	if material >= 0 and material < material_friction.size():
+		return material_friction[material]
+	return 0.5
+
+
+func restitution_of_material(material: int) -> float:
+	if material >= 0 and material < material_restitution.size():
+		return material_restitution[material]
+	return 0.0
+
+
+## 同 density_callable()：惰性构造一次并复用。
+func friction_callable() -> Callable:
+	if not _friction_fn.is_valid():
+		_friction_fn = func(m: int) -> float: return friction_of_material(m)
+	return _friction_fn
+
+
+func restitution_callable() -> Callable:
+	if not _restitution_fn.is_valid():
+		_restitution_fn = func(m: int) -> float: return restitution_of_material(m)
+	return _restitution_fn
+
+
 func density_of_material(material: int) -> float:
 	if material >= 0 and material < material_density.size():
 		var d := material_density[material]
@@ -319,7 +371,7 @@ func density_callable() -> Callable:
 ## 已建好的刚体在质量变了之后重算：改密度表、或者在形状上加了像素之后调用。
 func refresh_mass(body: PBody, density_of: Callable = Callable()) -> void:
 	body.rebuild(body.shapes, density_of if density_of.is_valid() else density_callable(),
-		max_rects_per_shape)
+		max_rects_per_shape, Rect2i(), friction_callable(), restitution_callable())
 
 
 ## 保证 body 的每个 shape 都是**单连通**的：多岛屿就地拆成独立刚体。
@@ -384,7 +436,7 @@ func add_body(body: PBody, shape_list: Array, density_of: Callable = Callable(),
 	body.id = _next_id
 	_next_id += 1
 	body.rebuild(shape_list, density_of if density_of.is_valid() else density_callable(),
-		max_rects_per_shape)
+		max_rects_per_shape, Rect2i(), friction_callable(), restitution_callable())
 	bodies.append(body)
 	if not connected_known:
 		ensure_connected(body)
@@ -778,6 +830,9 @@ func _substep_rapier(dt: float) -> void:
 			b._rp_mask = -1
 			# ⚠️ 同理：新碰撞体的密度也回到 Rapier 默认的 1.0，必须重推。
 			b._rp_density = -1.0
+			# ⚠️ 同理：新碰撞体的摩擦/恢复系数也回到 Rapier 默认（0.5 / 0.0），必须重推。
+			b._rp_friction = -1.0
+			b._rp_restitution = -1.0
 		if b._rp_layer != b.collision_layer or b._rp_mask != b.collision_mask:
 			_rp_u8(cmds, 32)
 			_rp_u32(cmds, b.rapier_id)
@@ -792,6 +847,18 @@ func _substep_rapier(dt: float) -> void:
 			_rp_u32(cmds, b.rapier_id)
 			_rp_f64(cmds, b.density)
 			b._rp_density = b.density
+		# 摩擦 / 恢复系数 -> Rapier 碰撞体。
+		# ⚠️ 和密度不同：它们**不参与质量属性**，所以不需要 recompute（别照抄上面那段）。
+		if b._rp_friction != b.friction:
+			_rp_u8(cmds, 38)
+			_rp_u32(cmds, b.rapier_id)
+			_rp_f64(cmds, b.friction)
+			b._rp_friction = b.friction
+		if b._rp_restitution != b.restitution:
+			_rp_u8(cmds, 39)
+			_rp_u32(cmds, b.rapier_id)
+			_rp_f64(cmds, b.restitution)
+			b._rp_restitution = b.restitution
 		if b.position.x != b._rp_x or b.position.y != b._rp_y or b.rotation != b._rp_rot:
 			_rp_u8(cmds, 6)
 			_rp_u32(cmds, b.rapier_id)

@@ -88,18 +88,19 @@ enum Motor { OFF, VELOCITY, POSITION }
 var joint = null
 
 
-## 屏幕 1 像素 = 多少**世界单位**（与 debug_overlay.gd 同一套算法）。
+## 屏幕 1 像素 = 多少**世界单位**。
 ##
-## ⚠️ 不反算的话线会随取景变粗：体素 3 px + 相机 zoom 6 时 1.0 世界单位 = 6 屏幕像素，
-##    而线是**以边界为中心**画的 —— 看起来就像"关节线没对准锚点"。
+## ⚠️⚠️ 用**画布到视口的变换**（get_viewport_transform），**不要**用相机 zoom。
+##    相机 zoom 只描述"游戏里"的缩放：在编辑器里它可能是任意值 —— 我一度把
+##    render_scale 改成"取相机所在视口"，编辑器视口很小时 zoom 会掉到 0.5 左右，
+##    于是点按 2/zoom 算就变成十几个像素（甲方："joint的点变得巨大无比"）。
+##    get_viewport_transform() 在编辑器、游戏、SubViewport 里都是"世界 -> 屏幕"的
+##    真实变换，取它的 scale 永远是对的：编辑器里 = 2 个编辑器像素，游戏里 = 2 个屏幕像素。
 func _screen_unit() -> float:
-	var cam := get_viewport().get_camera_2d()
-	if cam == null:
+	var sc := get_viewport_transform().get_scale()
+	if absf(sc.x) <= 0.0001:
 		return 1.0
-	var z := cam.zoom
-	if z.x <= 0.0 or z.y <= 0.0:
-		return 1.0
-	return 1.0 / z.x
+	return 1.0 / sc.x
 
 
 ## 现在该不该画：编辑器里始终画；运行时看 DebugOverlay 的可见性。
