@@ -246,8 +246,16 @@ func _physics_process(delta: float) -> void:
 		_accum = 0.0
 	if auto_render:
 		renderer.prune(_live_ids())
+		# ⚠️ 只同步**动态体**。静态体的像素内容永远不会变，而 sync 对每个刚体
+		#    都要算 AABB + 查 _rev（大形状如 768x100 的地面实测 ~840 us/次）。
+		#    静态体只在**几何真的变了**时才需要同步，那是破坏/擦除的调用方
+		#    显式 renderer.sync(body) 的事，不该每帧兜一遍。
+		#
+		#    实测（tests/bench_fusion.gd）：601 个刚体时 sync 占 17 ms/帧，
+		#    而其中一半是静态的地形。
 		for b in world.bodies:
-			renderer.sync(b)
+			if not b.is_static:
+				renderer.sync(b)
 
 
 func _live_ids() -> Dictionary:

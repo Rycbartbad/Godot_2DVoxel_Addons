@@ -20,10 +20,27 @@ extends SceneTree
 ##    这个测试要验证的是那个场景 —— 用 addon 的节点层才是对的。
 ##
 ## ⚠️ 先跑 python tools/build_addon.py（addon 平时不住在项目树里）。
-const AddonWorld := preload("res://addons/pixel_destruction/nodes/pixel_world.gd")
-const AddonBody := preload("res://addons/pixel_destruction/nodes/pixel_body_2d.gd")
-const AddonShape := preload("res://addons/pixel_destruction/nodes/pixel_shape_2d.gd")
+##
+## ⚠️⚠️ 这里**故意用 load() 而不是 preload()**，而且推迟到 _initialize 里才取。
+##
+##    preload 是**编译期**的：addon 不在树里（编辑器的正常状态 —— 它在树里会让
+##    class_name 重名、重复 UID）时，编辑器每次启动扫描到这个文件都报
+##        Parse Error: Preload file "res://addons/pixel_destruction/..." does not exist
+##    而且 const X := preload(...) 拿不到类型时会**级联**出一串
+##        Cannot infer the type of "AddonWorld" constant ...
+##    一个测试脚本把编辑器的错误面板刷满，真出问题时反而看不见。
+##
+##    load() 是**运行期**的：编辑器扫描时一声不响，只有真的跑这个测试才会发现
+##    addon 不在 —— 那时 _missing() 会打印一句能直接照做的提示。
+##    这也是 check_manual_api.gd 一直以来的做法（const ADDON := "res://..." + load）。
+const AddonWorldPath := "res://addons/pixel_destruction/nodes/pixel_world.gd"
+const AddonBodyPath := "res://addons/pixel_destruction/nodes/pixel_body_2d.gd"
+const AddonShapePath := "res://addons/pixel_destruction/nodes/pixel_shape_2d.gd"
 const FacadePath := "res://addons/pixel_destruction/pixel_physics.gd"
+
+var AddonWorld
+var AddonBody
+var AddonShape
 
 var _pass := 0
 var _fail := 0
@@ -64,8 +81,26 @@ func _make_node_world() -> Node2D:
 	get_root().add_child(pw)
 	return pw
 
+## addon 不在树里时，给一句能直接照做的提示，而不是一串类型推断错误。
+func _missing() -> bool:
+	for p in [AddonWorldPath, AddonBodyPath, AddonShapePath, FacadePath]:
+		if not ResourceLoader.exists(p):
+			print("  FAIL  找不到 ", p)
+			print("  -> 先跑：python tools/build_addon.py --verify")
+			print("     （--verify 会构建、自检，然后把 addon 移出项目树）")
+			print("=== 0 passed, 1 failed ===")
+			return true
+	return false
+
+
 func _initialize() -> void:
 	print("=== 节点 + 门面 融合验证 ===")
+	if _missing():
+		quit(1)
+		return
+	AddonWorld = load(AddonWorldPath)
+	AddonBody = load(AddonBodyPath)
+	AddonShape = load(AddonShapePath)
 	var Facade = load(FacadePath)
 	if Facade == null:
 		print("  FAIL  找不到 ", FacadePath, " —— 先跑 python tools/build_addon.py")

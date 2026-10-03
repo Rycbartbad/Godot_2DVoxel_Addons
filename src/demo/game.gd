@@ -158,11 +158,12 @@ func _process(delta: float) -> void:
 		if dropped > 0:
 			renderer.prune(_live_ids())
 
-	var live := _live_ids()
-	for b in world.bodies:
-		if not b.is_static:
-			renderer.sync(b)
-	renderer.prune(live)
+	# ⚠️ 这里以前每帧全量同步一遍渲染器 —— 但 PixelWorld 节点在
+	#    _physics_process 里已经在做同一件事了。两边都做 = 每个动态体每帧
+	#    被同步两次。渲染同步是**帧成本的大头**（实测占 85%~99%），
+	#    所以这一份重复必须去掉。
+	#
+	#    本脚本只在**内容变了**的时候显式 sync（绘制/擦除/分裂那几处）。
 
 	_update_hud()
 	_maybe_screenshot()
