@@ -369,23 +369,31 @@ func rebuild(shape_list: Array, density_of: Callable = Callable(),
 		refresh_com()
 		update_aabb()
 		return
+	# ⚠️⚠️ **质量属性只算一遍**。这里原来对同一个 shape 调了两次 MassProps.compute
+	#    （第一遍求总质量/总质心，第二遍求绕总质心的惯性）—— 而它是**逐像素**扫的。
+	#    静态体走上面的早返回，所以这个坑只在**动态体**上发作，而动态体恰恰是
+	#    fracture 生成的碎片：768x100 地面被一刀切开，碎片 ~3 万像素，
+	#    两遍就是 30~40 ms —— 用户报的"生成新实体那一下明显卡顿"就是这个。
+	#    两遍的输入完全相同，所以合并成一遍是**等价**的（不是近似）。
 	var m_total := 0.0
 	var com := Vector2.ZERO
 	var inertia_c := 0.0
 	var n_px := 0
+	var props: Array = []
 	for s in shape_list:
 		var p: MassProps.Props = MassProps.compute(s, density_of)
+		props.append(p)
 		m_total += p.mass
 		com += p.com * p.mass
 		n_px += p.pixel_count
 	var had_mass := m_total > 0.0
 	if had_mass:
 		com /= m_total
-	for s2 in shape_list:
-		var p2: MassProps.Props = MassProps.compute(s2, density_of)
+	for i in shape_list.size():
+		var p2: MassProps.Props = props[i]
 		# 平行轴定理：把每块的惯性搬到自己质心之外
 		inertia_c += p2.inertia + p2.mass * p2.com.distance_squared_to(com)
-		var r: GreedyRects.Result = GreedyRects.decompose(s2, max_rects)
+		var r: GreedyRects.Result = GreedyRects.decompose(shape_list[i], max_rects)
 		for rect: Rect2 in r.rects:
 			rects.append(rect)
 	mass = m_total
