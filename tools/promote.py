@@ -30,7 +30,7 @@ TESTS = [
     "validation_sweep", "validation_query", "validation_api", "validation_api2",
     "validation_voxel_layer", "validation_contacts", "validation_traversal",
     "validation_dynamics", "validation_nodes", "validation_alignment",
-    "validation_shape_plugin", "validation_stress",
+    "validation_shape_plugin", "validation_stress", "validation_facade_api",
 ]
 
 
@@ -88,6 +88,18 @@ def main() -> int:
             print("")
             print("文档未同步 —— **拒绝推进 stable**。先把上面列的补齐。")
             return 1
+
+    # 0.7) **在树内构建 addon** —— 有两个测试（check_manual_api、validation_facade_api）
+    #      必须对着构建产物跑：它们的 preload 路径 res://addons/pixel_destruction/...
+    #      只有在构建时才存在。跑完由 --verify 移出项目树。
+    #
+    #      不这么做的话那两个测试会「缺席即跳过」—— 看起来是绿的，实际空转。
+    if not args.force:
+        r = run([sys.executable, os.path.join(ROOT, "tools", "build_addon.py")])
+        if r.returncode != 0:
+            print("构建 addon 失败 —— 拒绝推进。")
+            return 1
+        print("  addon 已在树内构建（供依赖它的测试用）")
 
     if not args.force:
         godot = find_godot()

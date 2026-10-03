@@ -1,0 +1,174 @@
+extends SceneTree
+## 把开发者手册决策表里点名的**每个** px.* 接口真的调一遍。
+##
+## 为什么需要：check_manual_api.gd 只确认「方法存在」，不确认「调了有用」。
+## 一个方法存在但行为不对（比如 spin 没累加、split_shape 返回空），
+## 手册就成了一张空头支票 —— 而且不会有任何报错。
+##
+## 覆盖两张表：
+##   力矩与动力学量：spin / torque_impulse / angular_velocity_of / momentum /
+##                   angular_momentum / angular_momentum_about / kinetic_energy /
+##                   mass_of / inertia_of / total_momentum / total_angular_momentum
+##   破坏：carve_circle / carve_rect / cut / explode / split_shape / merge_shape / is_broken
+
+## ⚠️ 必须对着**构建产物**跑，不能用 addon_src 里的模板 ——
+##    模板里的 preload 路径是 res://addons/pixel_destruction/...，
+##    那些路径要在 build_addon.py 里才被改写出来，直接 load 模板会报
+##    「Preload file ... does not exist」。
+##
+##    所以 promote.py 会在跑测试前先在树内构建 addon，跑完再移出
+##    （和 check_manual_api.gd 同一个约束）。
+const Facade := preload("res://addons/pixel_destruction/pixel_physics.gd")
+
+var _pass := 0
+var _fail := 0
+func _c(n: String, ok: bool, d: String = "") -> void:
+	if ok:
+		_pass += 1
+		print("  PASS  ", n, "  ", d)
+	else:
+		_fail += 1
+		print("  FAIL  ", n, "  ", d)
+
+func _mk() -> Node:
+	var px = Facade.new()
+	root.add_child(px)
+	px.configure({"gravity": Vector2.ZERO})
+	return px
+
+func _initialize() -> void:
+	await process_frame
+	print("=== 力矩与动力学量 ===")
+	var px = _mk()
+	var b = px.spawn_rect(Vector2(0, 0), Vector2(32, 32), 1)
+	await process_frame
+
+	_c("mass_of", px.mass_of(b) > 0.0, "%.1f" % px.mass_of(b))
+	_c("inertia_of", px.inertia_of(b) > 0.0, "%.1f" % px.inertia_of(b))
+
+	# torque_impulse 是一次性的：立刻改变角速度
+	var w0: float = px.angular_velocity_of(b)
+	px.torque_impulse(b, 5000.0)
+	var w1: float = px.angular_velocity_of(b)
+	_c("torque_impulse 一次生效", absf(w1 - w0) > 1e-6, "%.4f -> %.4f" % [w0, w1])
+
+	# spin 是持续力矩：每帧调，多帧后角速度持续增长
+	# ⚠️ 别拿"10 帧持续力矩"和"一次性冲量"比大小 —— 一个是力矩、一个是角冲量，
+	#    量纲都不同。第一版就是这么写的，于是把一个正常工作的 spin 判成了失败。
+	#    正确的判据：从 0 起持续施加，角速度应当**单调增长**。
+	px.set_angular_velocity(b, 0.0)
+	px.spin(b, 2000.0)
+	px.step(1.0 / 60.0)
+	var w_1: float = px.angular_velocity_of(b)
+	for i in 9:
+		px.spin(b, 2000.0)
+		px.step(1.0 / 60.0)
+	var w_10: float = px.angular_velocity_of(b)
+	_c("spin 持续施加（角速度单调增长）", w_1 > 1e-9 and w_10 > w_1,
+		"1 帧 %.5f -> 10 帧 %.5f" % [w_1, w_10])
+	px.clear_forces(b)
+
+	# 动力学量：给一个已知的平动+转动
+	px.set_velocity(b, Vector2(100, 0))
+	px.set_angular_velocity(b, 2.0)
+	var m: float = px.mass_of(b)
+	var mo: Vector2 = px.momentum(b)
+	_c("momentum = m*v", mo.is_equal_approx(Vector2(100.0 * m, 0.0)), str(mo))
+	var I: float = px.inertia_of(b)
+	var am: float = px.angular_momentum(b)
+	_c("angular_momentum = I*w", absf(am - I * 2.0) < 1e-3, "%.3f vs %.3f" % [am, I * 2.0])
+	_c("kinetic_energy > 0", px.kinetic_energy(b) > 0.0, "%.1f" % px.kinetic_energy(b))
+
+	# 关于任意点的角动量：平动的物体关于远处一点应当有角动量
+	var am_far: float = px.angular_momentum_about(b, Vector2(0, 1000))
+	_c("angular_momentum_about 含 r×p 项", absf(am_far - am) > 0.1, "%.1f vs %.1f" % [am_far, am])
+
+	# 守恒检查
+	var tm: Vector2 = px.total_momentum()
+	_c("total_momentum 与单体重心一致", tm.is_equal_approx(mo), str(tm))
+	_c("total_angular_momentum 是数", px.total_angular_momentum() is float, "%.2f" % px.total_angular_momentum())
+
+	print("=== 破坏 ===")
+	# 挖圆洞
+	var before: int = px.shape_voxels(b.shapes[0])
+	# ⚠️ carve_* 返回的是**碎片数组**，不是挖掉的体素数（第一版赋给 int，运行时直接报错）
+	var made: Array = px.carve_circle(Vector2(0, 0), 6.0)
+	var after: int = px.shape_voxels(b.shapes[0])
+	_c("carve_circle 真的挖掉了体素", after < before,
+		"%d -> %d（返回 %d 个碎片）" % [before, after, made.size()])
+
+	# 挖方洞
+	var b2 = px.spawn_rect(Vector2(200, 0), Vector2(32, 32), 1)
+	var n2: int = px.shape_voxels(b2.shapes[0])
+	px.carve_rect(Vector2(200, 0), Vector2(8, 8))
+	_c("carve_rect 真的挖掉了体素", px.shape_voxels(b2.shapes[0]) < n2,
+		"%d -> %d" % [n2, px.shape_voxels(b2.shapes[0])])
+
+	# 激光切割（把一块切成两半）
+	var b3 = px.spawn_rect(Vector2(400, 0), Vector2(40, 40), 1)
+	px.cut(Vector2(400, -60), Vector2(400, 60), 1.0)
+	_c("cut 把方块切开了", px.shape_voxels(b3.shapes[0]) < 1600,
+		"剩 %d 体素" % px.shape_voxels(b3.shapes[0]))
+
+	# 爆炸（推开 + 破坏）
+	var b4 = px.spawn_rect(Vector2(600, 0), Vector2(40, 40), 1)
+	var n4: int = px.shape_voxels(b4.shapes[0])
+	var frags: Array = px.explode(Vector2(600, 0), 80.0, 400.0)
+	_c("explode 破坏了体素或产生了碎片", px.shape_voxels(b4.shapes[0]) < n4 or frags.size() > 0,
+		"剩 %d 体素，%d 个碎片" % [px.shape_voxels(b4.shapes[0]), frags.size()])
+
+	# ---- split_shape：必须造出**真的断开**的形状 ----
+	#
+	# ⚠️ 第一版造的形状根本没断开（挖空中间之后仍连通），于是只切出 1 块，
+	#    而断言写的是 "parts is Array" —— **恒真**，等于没测。
+	#    这正是我这一路反复栽的「绿的空壳」。
+	#    现在：左右两个方块，中间 16 像素的空隙，必须切出 >= 2 块。
+	# ⚠️ 这里不能调 clear_all() —— PixelShape 没有这个方法（第一版是我编的）。
+	#    改成用一个**空形状**做底：create_shape(null) 就是空的。
+	var split_src = px.create_shape(null)
+	split_src.fill_rect(Rect2i(0, 0, 8, 8), 1)
+	split_src.fill_rect(Rect2i(24, 0, 8, 8), 1)          # 与左边隔了 16 像素
+	_c("（前置）形状确实不连通", px.is_shape_disconnected(split_src))
+	var total_before: int = px.shape_voxels(split_src)
+	var parts: Array = px.split_shape(split_src)
+	# ⚠️ 语义是「**最大的那块留在原形状**，其余返回」——
+	#    所以 parts 里**不包含**原形状留下的那块。
+	#    第一版只累加 parts 再和总数比，于是把一个正确的实现判成了"丢体素"。
+	#    真正的不变量：**原形状剩下的 + 返回的 = 原来的总数**。
+	_c("split_shape 切出了另外的块", parts.size() >= 1, "%d 块" % parts.size())
+	var total_after: int = px.shape_voxels(split_src)
+	for p in parts:
+		total_after += px.shape_voxels(p)
+	_c("切分不丢体素（原形状剩下的 + 返回的）", total_after == total_before,
+		"%d -> %d（原形状留 %d，返回 %d 块共 %d）"
+		% [total_before, total_after, px.shape_voxels(split_src), parts.size(),
+		   total_after - px.shape_voxels(split_src)])
+
+	# ---- merge_shape：同一个形状里被拆开的相邻分块要合并回来 ----
+	#
+	# ⚠️ 第一版只传了一个本来就完整的形状，等于 no-op。
+	#    这个接口的语义是「合并相邻形状（分块）」，所以先造碎块再合。
+	var merge_src = px.create_shape(null)
+	merge_src.fill_rect(Rect2i(0, 0, 4, 4), 1)
+	merge_src.fill_rect(Rect2i(4, 0, 4, 4), 1)           # 紧挨着，应当被合并
+	merge_src.fill_rect(Rect2i(0, 4, 8, 4), 1)
+	var n_before: int = px.shape_voxels(merge_src)
+	var merged = px.merge_shape(merge_src)
+	_c("merge_shape 体素数不变", merged != null and px.shape_voxels(merged) == n_before,
+		"%d -> %d" % [n_before, px.shape_voxels(merged) if merged != null else -1])
+	_c("merge_shape 后仍然连通", merged != null and not px.is_shape_disconnected(merged))
+
+	# ---- is_broken：必须**真的观察到 true** ----
+	#
+	# ⚠️ 第一版写的是 (not before) or after —— 恒真。挖了半天 broken_after 仍是 false，
+	#    断言照样通过。现在要求：完整时 false、**挖空后 true**。
+	var b5 = px.spawn_rect(Vector2(900, 0), Vector2(20, 20), 1)
+	var broken_before: bool = px.is_broken(b5)
+	px.carve_rect(Vector2(900, 0), Vector2(30, 30))      # 整块挖掉
+	var broken_after: bool = px.is_broken(b5)
+	_c("完整时 is_broken == false", not broken_before)
+	_c("挖空后 is_broken == true", broken_after,
+		"剩 %d 体素" % px.shape_voxels(b5.shapes[0]))
+
+	print("=== %d passed, %d failed ===" % [_pass, _fail])
+	quit(0 if _fail == 0 else 1)
