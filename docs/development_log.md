@@ -3776,3 +3776,38 @@ return _substeps_held
 `validation_nodes` 23 项（新增 5 条）：add_body_node 进世界、detach 摘掉、
 世界少一个刚体（4 -> 3）、`_body_nodes` 与 `bodies` 仍一一对应、
 运行时 `free()` 节点**不**隐式摘刚体（把"故意不做"也钉住）。
+
+---
+
+# 拖动关节节点：只重绘了自己，锚点没重烘焙
+
+## 甲方问的
+
+> "拖动关节节点重绘了吗"
+
+## 查下来的结果：**半条**
+
+- `PixelJoint2D._notification(TRANSFORM_CHANGED)` 只调了 `queue_redraw()` —— 看起来"重绘了"；
+- 但**烘焙过之后画的是物理锚点**：`anchor_a_world()` 优先返回 `joint.anchor_a_world()`，
+  那是上次 `bake()` 时的位置。于是编辑器里拖关节：
+  - 线**不跟手**（画的是旧锚点）；
+  - 物理锚点也停在原地（没人重烘焙）；
+  - 直到下一次 `rebuild()` —— 而 rebuild 会丢掉所有破坏状态，不能拿它兜底。
+
+（拖动**刚体**节点有 `on_child_transformed()` 做增量同步，关节这边一直缺对应的一条。）
+
+## 修法：增量重烘焙**这一个**关节
+
+```text
+PixelJoint2D._notification(TRANSFORM_CHANGED)
+  -> PixelWorld.on_joint_transformed(node)   # 编辑器守卫 + 防抖（call_deferred）
+  -> PixelWorld.rebake_joint(node)           # 摘掉旧 PJoint、按节点当前位姿 bake 一次
+```
+
+⚠️ 不走 `rebuild()`：那条路会把所有刚体重建一遍（地面一次 50~70 ms）还会丢运行时状态；
+   关节只改了自己的锚点，摘掉旧的、重建一个就够（实测关节数不变：1 -> 1）。
+
+## 测试
+
+`validation_nodes` 28 项（新增 5 条）：关节烘焙出来了、烘焙后锚点 = 节点位置、
+`rebake_joint` 成功、**锚点跟到新位置**（310,60 -> 350,80）、关节数不变。

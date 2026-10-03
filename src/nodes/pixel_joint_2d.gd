@@ -142,6 +142,15 @@ func _enter_tree() -> void:
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_TRANSFORM_CHANGED:
 		queue_redraw()
+		# ⚠️ 只 queue_redraw 是不够的：**烘焙过之后画的是物理锚点**（anchor_a_world()
+		#    优先返回 joint.anchor_a_world()），而那个锚点是上次 bake() 时的位置 ——
+		#    于是编辑器里拖关节节点，线不跟手、物理锚点也停在原地，
+		#    直到下一次 rebuild()（而 rebuild 会丢掉所有破坏状态，不能拿它兜底）。
+		#    所以拖动必须请求**重烘焙这一个关节**。
+		if Engine.is_editor_hint():
+			var p := get_parent()
+			if p != null and p.has_method("on_joint_transformed"):
+				p.on_joint_transformed(self)
 
 
 ## 运行时锚点会跟着刚体跑 —— 每帧重画一次连线。

@@ -71,6 +71,8 @@ var world = null
 var renderer: PixelRenderer = null
 var _accum := 0.0
 var _rebuild_queued := false
+## 编辑器拖动关节节点时，积压的"要重烘焙的关节"（防抖：本帧内多次只做一次）。
+var _joint_rebake_queued := {}
 var _transform_queued := false
 ## 与 world.bodies 一一对应的节点（用来判断谁自带精灵）
 var _body_nodes: Array = []
@@ -377,6 +379,43 @@ func _sync_transforms_deferred() -> void:
 		b.compute_swept_aabb(0.0)
 		if renderer != null:
 			renderer.sync(b)
+
+
+## 编辑器里拖动一个关节节点 -> 重烘焙**这一个**关节（增量，不动刚体）。
+##
+## ⚠️ 为什么不能走 rebuild()：那条路会把所有刚体重建一遍（地面一次 50~70 ms），
+##    而且会丢掉运行时状态。关节只改了自己的锚点，摘掉旧的、按节点当前位置重建即可。
+## 防抖同 on_child_transformed：拖动一次会连发很多 TRANSFORM_CHANGED。
+func on_joint_transformed(node) -> void:
+	if not Engine.is_editor_hint() or _joint_rebake_queued.has(node):
+		return
+	_joint_rebake_queued[node] = true
+	_joint_rebake_deferred.call_deferred()
+
+
+func _joint_rebake_deferred() -> void:
+	var nodes: Array = _joint_rebake_queued.keys()
+	_joint_rebake_queued.clear()
+	for n in nodes:
+		rebake_joint(n)
+
+
+## 重烘焙一个关节节点：摘掉旧的 PJoint，再按节点当前位姿 bake 一次。
+## 返回是否成功（节点没形状 / 两端都空时返回 false，与 bake 一致）。
+func rebake_joint(node) -> bool:
+	if node == null or world == null:
+		return false
+	var old = node.joint
+	if old != null:
+		world.remove_joint(old)
+		node.joint = null
+	var j = node.bake(world)
+	if j == null:
+		return false
+	if not _joint_nodes.has(node):
+		_joint_nodes.append(node)
+	node.queue_redraw()
+	return true
 
 
 func on_child_moved() -> void:

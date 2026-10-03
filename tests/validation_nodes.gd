@@ -199,5 +199,33 @@ func _initialize() -> void:
 	_c("运行时 free 节点不隐式摘刚体", pw.world.bodies.size() == cnt2,
 		"bodies=%d（应当仍是 %d）" % [pw.world.bodies.size(), cnt2])
 
+	# ---- 拖动关节节点：锚点跟着走（增量重烘焙）----
+	#
+	# ⚠️ 关节节点原来只 queue_redraw()，但**烘焙过之后画的是物理锚点**
+	#    （anchor_a_world() 优先返回 joint.anchor_a_world()）—— 那个锚点是上次 bake() 的
+	#    位置，于是编辑器里拖关节线不跟手、物理锚点也停在原地，直到下一次 rebuild()。
+	print("=== 拖动关节节点 ===")
+	var jdb := PixelBody2D.new()
+	jdb.name = "JBN"
+	jdb.position = Vector2(300, 50)
+	jdb.rect_size = Vector2i(8, 8)
+	pw.add_child(jdb)
+	var jdrag := PixelJoint2D.new()
+	jdrag.name = "JN"
+	jdrag.position = Vector2(310, 60)
+	jdrag.body_b = NodePath("../JBN")
+	pw.add_child(jdrag)
+	pw.rebuild()
+	_c("关节烘焙出来了", jdrag.joint != null)
+	_c("烘焙后锚点 = 节点位置", jdrag.anchor_a_world().is_equal_approx(Vector2(310, 60)),
+		str(jdrag.anchor_a_world()))
+	var n_joints: int = pw.world.joints.size()
+	jdrag.position = Vector2(350, 80)                 # 编辑器里拖动
+	_c("rebake_joint 成功", pw.rebake_joint(jdrag))
+	_c("锚点跟到新位置", jdrag.anchor_a_world().is_equal_approx(Vector2(350, 80)),
+		str(jdrag.anchor_a_world()))
+	_c("关节数不变（旧的摘掉、新的建上）", pw.world.joints.size() == n_joints,
+		"%d vs %d" % [pw.world.joints.size(), n_joints])
+
 	print("=== %d passed, %d failed ===" % [_pass, _fail])
 	quit(0 if _fail == 0 else 1)
