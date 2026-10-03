@@ -210,6 +210,58 @@ func spawn_from_grid(pos: Vector2, w: int, h: int, solid: Callable, material: in
 	return spawn_shape(pos, s)
 
 
+## 从一张图片烘焙出实体（**每个像素可以有不同的材质**）。
+##
+## material_of(x, y, color) -> int：返回 **0 表示这个像素是空的**。
+##
+## ⚠️ 关键设计：**规则由游戏层给**。引擎只负责「按你返回的材质把像素铺进形状」这一件事，
+##    至于什么颜色算什么材质、透明算不算空、笔刷边缘怎么处理 —— 全是游戏层的事。
+##    这就是「引擎提供机制、规则在游戏层」那一刀。
+##
+## 和 spawn_from_grid 的区别：那个只有**一个**材质、只有实心/空两种结果；
+## 这个能逐像素决定材质。于是「游戏层画好一张画布 -> 引擎变成实体」这条路才成立：
+##
+##     # 游戏层随便怎么画（TileMap、SubViewport、手搓 Image……），只要最后是一张 Image
+##     var body := px.bake_image(canvas, Vector2(0, 0), func(x, y, c):
+##         if c.a < 0.5:
+##             return 0                                  # 透明 = 空
+##         return MAT_OF_COLOR[c.to_rgba32()]            # 颜色 -> 材质
+##     )
+##
+## 图片的尺寸就是形状的尺寸；像素 (0,0) 落在形状局部的 (0,0)（左上角），
+## 和刚体 position 的约定一致（见 PixelShape 的原点约定）。
+func bake_image(image: Image, pos: Vector2, material_of: Callable) -> PBody:
+	var s := PixelShape.new()
+	var w := image.get_width()
+	var h := image.get_height()
+	for y in h:
+		for x in w:
+			var m: int = material_of.call(x, y, image.get_pixel(x, y))
+			if m != 0:
+				s.set_pixel(x, y, m)
+	return spawn_shape(pos, s)
+
+
+## 把蓝图**固化**成实体。
+##
+## 蓝图（renderer.sync_blueprint）**只是画面**：不在 world.bodies 里，
+## 宽相扫不到、不受重力、不被破坏。这一步才让它变成真的刚体。
+##
+## 「画完一笔先不固化」的循环：
+##
+##     var r := px.renderer()
+##     r.sync_blueprint(uid, shape, xform)      # 画的时候：看得见，但没物理
+##     ...                                      # （可以反复改 shape 再 sync）
+##     var body := px.solidify(uid, shape, pos) # 画完了：进物理，蓝图消失
+##
+## 固化之后的形状和 spawn_shape 出来的完全一样 —— 同样的物理、同样的破坏、同样的渲染。
+func solidify(id: int, shape: PixelShape, pos: Vector2) -> PBody:
+	var r := renderer()
+	if r != null and r.has_method("forget_blueprint"):
+		r.forget_blueprint(id)
+	return spawn_shape(pos, shape)
+
+
 ## 造一个圆盘形状（不建刚体）。spawn_circle 和自定义组合都用它。
 func make_circle(radius: float, material: int = 1) -> PixelShape:
 	var s := PixelShape.new()

@@ -25,7 +25,7 @@ extends Node2D
 
 const PixelShape := preload("res://src/core/pixel_shape.gd")
 
-enum Source { RECT, CIRCLE, TEXTURE }
+enum Source { RECT, CIRCLE, TEXTURE, PAINT }
 
 @export var source: Source = Source.RECT:
 	set(v):
@@ -48,6 +48,22 @@ enum Source { RECT, CIRCLE, TEXTURE }
 @export_range(1, 254) var alpha_threshold := 128:
 	set(v):
 		alpha_threshold = v
+		invalidate_shape()
+
+## 画笔图层（source=PAINT）。**R 通道 = 材质 id**，0 表示空。
+##
+## ⚠️ 为什么用 Image 的 R 通道存**材质 id**，而不是直接画颜色：
+##
+##   · 画笔要的是材质，不是颜色 —— 颜色由 PixelWorld.materials 决定。
+##     存颜色的话，换一次材质表，之前画的全失效。
+##   · FORMAT_R8 是单通道，Inspector 里的预览读起来正好是一张「材质分布图」，
+##     比 PackedByteArray（Inspector 里根本看不见）好得多。
+##   · Image 是 Resource，能直接存进 .tscn。
+##
+## 落笔请用 paint_brush()，别自己 set_pixel —— 它会处理按需新建图层。
+@export var paint: Image:                      ## source=PAINT
+	set(v):
+		paint = v
 		invalidate_shape()
 
 @export_group("材质")
@@ -174,4 +190,50 @@ func build_shape() -> PixelShape:
 								s.set_pixel(ox + x2, oy + y2, material_id)
 			else:
 				push_warning("PixelShape2D: source=TEXTURE 但没设 texture")
+		Source.PAINT:
+			if paint != null:
+				var pw := maxi(1, roundi(float(paint.get_width()) * sc.x))
+				var ph := maxi(1, roundi(float(paint.get_height()) * sc.y))
+				var psx := float(paint.get_width()) / float(pw)
+				var psy := float(paint.get_height()) / float(ph)
+				for py in ph:
+					var sy2 := clampi(int(float(py) * psy), 0, paint.get_height() - 1)
+					for px2 in pw:
+						var sx2 := clampi(int(float(px2) * psx), 0, paint.get_width() - 1)
+						var pm := int(round(paint.get_pixel(sx2, sy2).r * 255.0))
+						if pm != 0:
+							s.set_pixel(ox + px2, oy + py2, pm)
+			else:
+				push_warning("PixelShape2D: source=PAINT 但没设 paint（画笔还没落过笔）")
 	return s
+
+
+## 在画笔图层上落一笔。material = 0 表示**擦除**。
+##
+## radius = 0 画单像素；>0 画圆盘（画笔大小 2*radius+1）。
+## 图层按需新建 —— 第一次落笔时自动开一张足够大的 FORMAT_R8。
+##
+## 想更大范围地画，重复调它即可；不要直接动 paint，免得图层没建好。
+func paint_brush(cx: int, cy: int, material: int, radius: int = 0) -> void:
+	var r := maxi(0, radius)
+	# 图层尺寸：至少包住这一笔，并留出右边/下边的余量（画笔往边缘画也不丢）
+	var need := maxi(cx + r + 1, cy + r + 1)
+	if paint == null:
+		var s0 := maxi(16, need)
+		paint = Image.create(s0, s0, false, Image.FORMAT_R8)
+	elif need > paint.get_width() or need > paint.get_height():
+		var s1 := maxi(need, maxi(paint.get_width(), paint.get_height()) * 2)
+		var grown := Image.create(s1, s1, false, Image.FORMAT_R8)
+		grown.blit_rect(paint, Rect2i(0, 0, paint.get_width(), paint.get_height()), Vector2i.ZERO)
+		paint = grown
+	var v := float(clampi(material, 0, 255)) / 255.0
+	for dy in range(-r, r + 1):
+		for dx in range(-r, r + 1):
+			if r > 0 and dx * dx + dy * dy > r * r:
+				continue
+			var px := cx + dx
+			var py := cy + dy
+			if px < 0 or py < 0 or px >= paint.get_width() or py >= paint.get_height():
+				continue
+			paint.set_pixel(px, py, Color(v, 0, 0, 1))
+	invalidate_shape()

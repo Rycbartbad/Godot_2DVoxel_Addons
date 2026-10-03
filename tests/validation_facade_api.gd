@@ -170,5 +170,43 @@ func _initialize() -> void:
 	_c("挖空后 is_broken == true", broken_after,
 		"剩 %d 体素" % px.shape_voxels(b5.shapes[0]))
 
+	print("=== 图片烘焙与固化 ===")
+	# bake_image：8x8，左半红右半蓝 —— 关键主张是**逐像素材质**，必须真的验到两种
+	var img := Image.create(8, 8, false, Image.FORMAT_RGBA8)
+	img.fill(Color.SKY_BLUE)
+	for y in 8:
+		for x in 4:
+			img.set_pixel(x, y, Color.CRIMSON)
+	var body_img = px.bake_image(img, Vector2(1200, 0), func(_x, _y, c) -> int:
+		if c.a < 0.5:
+			return 0
+		return 1 if c.r > c.b else 2
+	)
+	_c("bake_image 造出刚体", body_img != null and px.shape_voxels(body_img.shapes[0]) == 64,
+		"%d 体素" % px.shape_voxels(body_img.shapes[0]))
+	var m_left: int = px.shape_material_at_index(body_img.shapes[0], 1, 1)
+	var m_right: int = px.shape_material_at_index(body_img.shapes[0], 6, 1)
+	_c("bake_image 是**逐像素**材质（不是整块一个）", m_left == 1 and m_right == 2,
+		"左 %d 右 %d" % [m_left, m_right])
+
+	# 透明像素必须不入形状
+	var img_t := Image.create(4, 4, false, Image.FORMAT_RGBA8)
+	img_t.fill(Color(1, 1, 1, 0))
+	var body_t = px.bake_image(img_t, Vector2(1400, 0), func(_x, _y, c) -> int:
+		return 0 if c.a < 0.5 else 1
+	)
+	_c("bake_image 透明像素不入形状",
+		body_t == null or px.shape_voxels(body_t.shapes[0]) == 0,
+		"%d 体素" % (px.shape_voxels(body_t.shapes[0]) if body_t != null else -1))
+
+	# solidify：蓝图 -> 实体
+	var r = px.renderer()
+	var bp = px.make_circle(6.0, 1)
+	var n_bp: int = px.shape_voxels(bp)
+	r.sync_blueprint(9999, bp, Transform2D.IDENTITY)
+	var body_s = px.solidify(9999, bp, Vector2(1600, 0))
+	_c("solidify 造出实体", body_s != null and px.shape_voxels(body_s.shapes[0]) == n_bp,
+		"蓝图 %d 体素 -> 实体 %d 体素" % [n_bp, px.shape_voxels(body_s.shapes[0])])
+
 	print("=== %d passed, %d failed ===" % [_pass, _fail])
 	quit(0 if _fail == 0 else 1)
