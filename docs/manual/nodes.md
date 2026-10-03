@@ -186,6 +186,22 @@ camera.zoom = Vector2.ONE * PixelScale.get_scale() * PixelScale.render_scale(cam
 > 像素风常见做法是"小视口渲染 -> 放大贴屏"（相机挂在 SubViewport 里）——
 > 那时窗口 1080p、相机视口 540p，拿窗口算会让取景差一倍。
 
+### 游戏取景范围（和分辨率无关）
+
+```text
+zoom     = voxel_size * render_scale = voxel_size * (视口高 / 540)
+可见高度 = 视口高 / zoom = 540 / voxel_size
+可见宽度 = 可见高度 x 项目宽高比
+```
+
+所以 **1080p 和 720p 看到的范围完全一样**（只是每体素占的屏幕像素不同）。
+体素 3、项目 1920x1080 时：**320 x 180 世界单位**。
+
+> ⚠️ Godot 编辑器自带的相机框按**编辑器面板**的大小画：面板一拉，框的世界范围就变，
+> 面板不是 16:9 时形状也不对 —— 所以别拿它当"游戏里能看到多少"的依据。
+> `PixelWorld` 在**编辑器里**会画一个青色"游戏取景框"（按项目分辨率算，和实际游戏一致；
+> 游戏里不画）。
+
 UI 用原生 `Control` + `Theme`。引擎只暴露**数据**
 （`px.momentum(body)`、`px.total_kinetic_energy()` 等），UI 去读。
 

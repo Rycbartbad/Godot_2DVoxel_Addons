@@ -74,6 +74,34 @@ const PixelScale := preload("res://src/core/pixel_scale.gd")
 		voxel_size = nv
 		PixelScale.set_scale(nv)
 		_apply_voxel_size()
+		queue_redraw()
+
+
+## 游戏里**实际可见的世界范围**（世界单位）。
+##
+## ⚠️ 这个值与分辨率**无关**，推导：
+##      zoom      = voxel * render_scale = voxel * (视口高 / 540)
+##      可见高度  = 视口高 / zoom = **540 / voxel**
+##      可见宽度  = 可见高度 x 项目宽高比
+##    所以 1080p 和 720p 看到的**世界范围完全一样**（只是每体素占的屏幕像素不同）。
+##    这也解释了为什么不能拿编辑器面板的高度去算：面板一拉，范围就变了。
+func game_view_size() -> Vector2:
+	var h := 540.0 / maxf(PixelScale.get_scale(), 0.001)
+	var pw := float(ProjectSettings.get_setting("display/window/size/viewport_width", 1920))
+	var ph := float(ProjectSettings.get_setting("display/window/size/viewport_height", 1080))
+	var aspect := pw / ph if ph > 0.0 else 16.0 / 9.0
+	return Vector2(h * aspect, h)
+
+
+## 场景里（或往上）第一个 Camera2D。编辑器里 get_viewport().get_camera_2d() 会拿到
+## **编辑器自己的**视图相机，不是场景里的那台，所以必须这样找。
+func _preview_camera() -> Camera2D:
+	var base: Node = owner if owner != null else get_parent()
+	if base == null:
+		return null
+	for c in base.find_children("*", "Camera2D", true, false):
+		return c as Camera2D
+	return null
 
 
 ## 把体素尺寸播到"相机取景 + 渲染贴图"。
@@ -86,7 +114,10 @@ func _apply_voxel_size() -> void:
 	if not is_inside_tree():
 		return                                  # 场景加载时 setter 先于入树，交给 _ready
 	var cam := get_viewport().get_camera_2d()
-	if cam != null:
+	# ⚠️ 编辑器里**不写**相机 zoom：那是往场景里写"运行时值"（它还乘了 render_scale，
+	#    而 render_scale 取决于编辑器面板高度）—— 会把场景标脏，还会把面板尺寸固化进场景。
+	#    编辑器里要看取景，看 _draw() 画的那个"游戏取景框"（按项目分辨率算，和游戏一致）。
+	if cam != null and not Engine.is_editor_hint():
 		cam.zoom = Vector2.ONE * PixelScale.get_scale() * PixelScale.render_scale(cam)
 	if renderer != null and world != null:
 		for b in world.bodies:
@@ -113,6 +144,42 @@ var _transform_queued := false
 var _body_nodes: Array = []
 ## 烘焙过的关节节点（与 world.joints 不是一一对应：烘焙失败的不进来）
 var _joint_nodes: Array = []
+
+
+## 编辑器里画一个**游戏实际取景框**。
+##
+## ⚠️ 为什么不靠 Godot 自带的相机框：它按**编辑器面板**的大小画 —— 面板不是 16:9 时
+##    形状就不对，而且面板一拉，框的世界范围就跟着变。游戏里的可见范围是固定的
+##    （见 game_view_size() 的推导），所以这里按项目分辨率算，和实际游戏一模一样。
+##    游戏里**不画**（调试信息不该出现在画面里，甲方定的）。
+func _draw() -> void:
+	if not Engine.is_editor_hint():
+		return
+	var cam := _preview_camera()
+	if cam == null:
+		return
+	var sz := game_view_size()
+	var c := to_local(cam.global_position)
+	var rect := Rect2(c - sz * 0.5, sz)
+	var col := Color(0.35, 0.9, 1.0, 0.9)
+	draw_rect(rect, col, false, 1.0)
+	draw_string(ThemeDB.fallback_font, rect.position + Vector2(2.0, -4.0),
+		"游戏取景 %.0f x %.0f" % [sz.x, sz.y], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, col)
+
+
+var _preview_cache := Vector3.ZERO
+
+
+func _process(_dt: float) -> void:
+	# ⚠️ 这个 _process 只在**编辑器**里干活（游戏里第一句就返回，不碰热循环）。
+	#    相机被拖动 / 体素尺寸被改时要重画取景框，否则框会停在旧位置。
+	if not Engine.is_editor_hint():
+		return
+	var cam := _preview_camera()
+	var key := Vector3(cam.global_position.x, cam.global_position.y, PixelScale.get_scale()) if cam != null else Vector3.ZERO
+	if key != _preview_cache:
+		_preview_cache = key
+		queue_redraw()
 
 
 func _ready() -> void:

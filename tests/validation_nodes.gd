@@ -248,5 +248,24 @@ func _initialize() -> void:
 	vw.voxel_size = 3.0                       # 还原全局静态值，别影响后面的用例
 	_c("还原成 3.0", is_equal_approx(PixelScale.get_scale(), 3.0), str(PixelScale.get_scale()))
 
+	# ---- 游戏取景框：可见世界范围与分辨率无关 ----
+	#
+	# ⚠️ 甲方反馈"摄像机框选的范围和实际游戏的范围还是不一致"：Godot 自带的相机框
+	#    按**编辑器面板**的大小画（面板一拉范围就变，面板不是 16:9 时形状也不对）。
+	#    实际游戏里的可见范围是固定的：zoom = voxel*(视口高/540) -> 可见高度 = 540/voxel。
+	print("=== 游戏取景框 ===")
+	var gw := PixelWorld.new()
+	root.add_child(gw)
+	gw.voxel_size = 3.0
+	var gv := gw.game_view_size()
+	_c("体素 3 时可见高度 = 540/3 = 180", is_equal_approx(gv.y, 180.0), "%.1f" % gv.y)
+	var aspect := 1920.0 / 1080.0
+	_c("宽度 = 高度 x 项目宽高比", absf(gv.x - 180.0 * aspect) < 0.01,
+		"%.1f（16:9 时应为 %.1f）" % [gv.x, 180.0 * aspect])
+	gw.voxel_size = 6.0
+	_c("体素翻倍 -> 可见范围减半", is_equal_approx(gw.game_view_size().y, 90.0),
+		"%.1f" % gw.game_view_size().y)
+	gw.voxel_size = 3.0
+
 	print("=== %d passed, %d failed ===" % [_pass, _fail])
 	quit(0 if _fail == 0 else 1)
