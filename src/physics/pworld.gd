@@ -1457,8 +1457,18 @@ func fracture(body: PBody, damage, burst_speed: float = 40.0) -> Array:
 		#    是"**碰到边界**"，不是"包围盒离边界有余量"—— 后者不成立
 		#    （细杆在中间被擦断时包围盒离外边界很远，但确实断了）。
 		if was_boundary:
-			for p in Destruction.split(s, min_fragment_pixels):
-				parts.append(p)
+			# ⚠️ 先试**便宜且可证明**的局部判据（见 Destruction.local_connectivity）：
+			#    代价随伤害大小走，而不是随物体尺寸走。
+			#    贴着大物体边界挖个小洞以前要跑全量连通分量标注（768x100 实测 7.8 ms），
+			#    而那一笔本身只要 ~2.8 ms —— 用户报的"边界挖小洞也卡"就是这个。
+			var lc := Destruction.local_connectivity(s, dmg_rect, min_fragment_pixels)
+			if lc == Destruction.LOCAL_CONNECTED:
+				parts.append(s)
+			elif lc == Destruction.LOCAL_DROPPED:
+				pass
+			else:
+				for p in Destruction.split(s, min_fragment_pixels):
+					parts.append(p)
 		else:
 			parts.append(s)   # 内部挖洞 -> 必然仍连通，原样留下
 	if removed == 0:

@@ -204,6 +204,101 @@ static func split(shape: PixelShape, min_pixels: int = 1) -> Array:
 	return _assemble(shape, keys, parts, min_pixels)
 
 
+
+## 便宜的"破坏后仍然连通"判据 —— **可证明**，不是启发式。三态返回。
+##
+## 记号：R = 这一笔**被删掉**的像素；N = 破坏**之后**仍占用、且与 R 四邻接的像素；
+##      N' = 破坏之后仍占用、且落在"伤害包围盒外扩 1"里的像素。
+##      **N ⊆ N'**，所以用 N' 判是保守的（判据更强 -> 更不容易误判连通）。
+##
+## ⚠️⚠️ 定理：若 S 在破坏前连通，且 N' 全部落在 S\R 的**同一个连通分量**里，
+##    则 S\R 必然只有一个连通分量。
+##    证明：反设 S\R = C ⊔ D 两个分量。S 连通 => 存在从 C 到 D 的路径，
+##    该路径必须离开 C、进入 R、再离开 R 进入 D。离开 C 前最后一个像素属于 C
+##    且与 R 四邻接 => 它属于 N ⊆ N'。同理 D 也含 N' 的像素。
+##    于是 N' 不可能全在同一个分量里，矛盾。∎
+##
+## 所以只要在**探测框内**验证"N' 彼此连通"（框内连通 => 在 S\R 里连通，
+## 因为框内没有别的障碍），就能免掉一次全量连通分量标注
+## （768x100 实测 7.8 ms，而一笔内部擦除本身才 ~2.8 ms）。
+## 代价随**伤害大小**走，不再随物体尺寸走 —— 这正是"贴着边界挖小洞"卡的原因。
+##
+## ⚠️ 判不出来就返回 LOCAL_UNKNOWN 走全量 —— 宁可慢，不能错。
+##    细杆被切断正是这种情况：R 横跨杆宽，N' 被 R 分成左右两截，局部连不上。
+##
+## ⚠️⚠️ 依赖一条引擎不变量：**body 的 shape 在破坏前一定连通**。
+##    它由"每一笔破坏要么保连通、要么做分裂"维持 —— 本函数就是前者的判据。
+##    如果游戏层**手工**造了一个多岛屿的 shape，这条不变量不成立，
+##    此时可能给出"连通"而跳过分裂；那是"今天会被顺手修好"的行为差异，
+##    不是正确性契约（多岛屿刚体本身是合法的，只是不会被这一笔拆开）。
+const LOCAL_UNKNOWN := -1
+const LOCAL_DROPPED := 0
+const LOCAL_CONNECTED := 1
+const LOCAL_MAX_PROBE := 1024      # 探测框像素上限；再大就退回全量（全量 7.8 ms 更快）
+
+static func local_connectivity(shape: PixelShape, box: Rect2i, min_pixels: int) -> int:
+	var grow := Rect2i(box.position - Vector2i(1, 1), box.size + Vector2i(2, 2))
+	var probe := Rect2i(box.position - Vector2i(3, 3), box.size + Vector2i(6, 6))
+	var w: int = probe.size.x
+	var h: int = probe.size.y
+	if w <= 0 or h <= 0 or w * h > LOCAL_MAX_PROBE:
+		return LOCAL_UNKNOWN
+	var occ := PackedByteArray()
+	occ.resize(w * h)
+	var n_idx := PackedInt32Array()
+	var gx0: int = grow.position.x - probe.position.x
+	var gy0: int = grow.position.y - probe.position.y
+	for yy in h:
+		var wy: int = probe.position.y + yy
+		var row := yy * w
+		for xx in w:
+			if not shape.get_pixel(probe.position.x + xx, wy):
+				continue
+			occ[row + xx] = 1
+			if xx >= gx0 and xx < gx0 + grow.size.x and yy >= gy0 and yy < gy0 + grow.size.y:
+				n_idx.append(row + xx)
+	if n_idx.is_empty():
+		return LOCAL_UNKNOWN       # 没有 N'（整块被删光？）—— 不猜
+	# 探测框内泛洪（四邻域，只走占用像素）
+	var seen := PackedByteArray()
+	seen.resize(w * h)
+	var stack := PackedInt32Array()
+	stack.append(n_idx[0])
+	seen[n_idx[0]] = 1
+	while stack.size() > 0:
+		var i: int = stack[stack.size() - 1]
+		stack.resize(stack.size() - 1)
+		var x := i % w
+		var y := i / w
+		if x > 0:
+			var j1 := i - 1
+			if seen[j1] == 0 and occ[j1] == 1:
+				seen[j1] = 1
+				stack.append(j1)
+		if x < w - 1:
+			var j2 := i + 1
+			if seen[j2] == 0 and occ[j2] == 1:
+				seen[j2] = 1
+				stack.append(j2)
+		if y > 0:
+			var j3 := i - w
+			if seen[j3] == 0 and occ[j3] == 1:
+				seen[j3] = 1
+				stack.append(j3)
+		if y < h - 1:
+			var j4 := i + w
+			if seen[j4] == 0 and occ[j4] == 1:
+				seen[j4] = 1
+				stack.append(j4)
+	for j in n_idx:
+		if seen[j] == 0:
+			return LOCAL_UNKNOWN    # N' 没全连通 -> 判不出来，走全量
+	# 定理成立 => 破坏后仍然连通。剩下只是 min_pixels 的语义，与 _assemble 的单分量路径一致。
+	if shape.pixel_count() >= min_pixels:
+		return LOCAL_CONNECTED
+	return LOCAL_DROPPED
+
+
 ## ---------- GPU 加速路径 ----------
 ## 一次 dispatch 同时算出"破坏后的占用"和"每个 chunk 的分量掩码"，
 ## 回读后复用与 CPU 完全相同的接缝归并 / 组装代码。
