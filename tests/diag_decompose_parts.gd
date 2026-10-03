@@ -34,11 +34,11 @@ func _initialize() -> void:
 	var grid = GreedyRects._build_grid(s)
 	t = Time.get_ticks_usec()
 	for i in N:
-		GreedyRects._greedy(grid.cells.duplicate(), grid.w, grid.h, true)
+		GreedyRects._greedy(grid.words.duplicate(), grid.wq, grid.w, grid.h, true)
 	var t_g1 := (Time.get_ticks_usec() - t) / float(N) / 1000.0
 	print("  _greedy 横优先       %7.2f" % t_g1)
 
-	var rects = GreedyRects._greedy(grid.cells.duplicate(), grid.w, grid.h, true)
+	var rects = GreedyRects._greedy(grid.words.duplicate(), grid.wq, grid.w, grid.h, true)
 	t = Time.get_ticks_usec()
 	for i in N:
 		GreedyRects._merge_pass(rects.duplicate())

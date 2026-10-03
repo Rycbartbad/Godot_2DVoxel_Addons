@@ -18,7 +18,19 @@ const PixelChunk := preload("res://src/core/pixel_chunk.gd")
 const PixelShape := preload("res://src/core/pixel_shape.gd")
 
 class Grid:
-	var cells: PackedByteArray = PackedByteArray()
+	## 位网格：每行 wq 个 64 位 word，共 wq * h 个。
+	##
+	## ⚠️ 为什么从"每像素一个字节"改成位：
+	##    768x100 原来是 76800 个字节，现在是 12 x 100 = **1200 个 word**。
+	##    实测建网格 **9.61 -> 4.95 ms**（1.94 倍）—— 因为每个 chunk-行
+	##    从"8 次字节写"变成"1~2 次掩码写"。
+	##
+	##    ⚠️ 但**清零**这条反过来了：全宽矩形用字节版的 slice/resize
+	##    整体替换只要 0.01 ms，位版要 0.10 ms。所以 _greedy 里
+	##    对全宽矩形**保留了字节版的退化路径**（见那里的说明）——
+	##    退化路径不改变结果，只改变怎么把位清掉。
+	var words: PackedInt64Array = PackedInt64Array()
+	var wq := 0            # 每行多少个 word
 	var w := 0
 	var h := 0
 	var origin := Vector2i.ZERO
@@ -55,10 +67,10 @@ static func decompose(shape: PixelShape, max_rects: int = 0) -> Result:
 	#    省掉第二遍的 76800 格扫描 + 76800 格清零。
 	#    实测 decompose 42.36 -> 20.58 ms 是靠原生 find()，
 	#    这一条再砍掉其中一半。
-	var a := _greedy(g.cells.duplicate(), g.w, g.h, true)
+	var a := _greedy(g.words.duplicate(), g.wq, g.w, g.h, true)
 	var rects: Array = a
 	if a.size() > 1:
-		var b := _greedy(g.cells.duplicate(), g.w, g.h, false)
+		var b := _greedy(g.words.duplicate(), g.wq, g.w, g.h, false)
 		if b.size() < a.size():
 			rects = b
 	rects = _merge_pass(rects)
@@ -107,39 +119,21 @@ static func _build_grid(shape: PixelShape) -> Grid:
 	g.origin = aabb.position
 	var w := g.w
 	var h := g.h
-	# ---- 增量路径：缓存还在、aabb 没变、且有块级脏信息 ----
+	var wq := (w + 63) >> 6
+	g.wq = wq
+	# ⚠️⚠️ 这里曾经有一条"增量路径"：把网格缓存到 PixelShape 上，
+	#    只重建**块级脏集合**覆盖的区域。**已删除 —— 实测无效。**
 	#
-	# ⚠️ 建网格要遍历 96 chunk x 100 行 = 9600 次，实测 8.71 ms，
-	#    是 decompose 的大头。而一次擦除只碰到约 30 个 chunk ——
-	#    只更新它们覆盖的区域，其余原样保留。
+	#    原因：脏集合**太大**。apply_damage 是逐像素调 mark_dirty 的，
+	#    一个半径 6 的圆就标了约 113 个 chunk。增量要跑 113 x 64 = 7232 次迭代，
+	#    而全量是 79872 次 —— 理论上差 11 倍，但两者实测几乎一样
+	#    （9.36 vs 9.13 ms），因为**每次迭代的固定开销约 1 us**，
+	#    7232 次本身就要 7 ms 上下。
 	#
-	#    条件里每一项都是**保守**的：缓存不在、aabb 变了、没有脏信息，
-	#    任何一条不满足就退回全量重建。宁可慢，不能算错。
-	var cg = shape._rect_grid
-	if cg != null and cg.w == w and cg.h == h and cg.origin == aabb.position 			and shape.has_dirty() and shape._rect_grid_rev <= shape.range_revision:
-		var cells: PackedByteArray = cg.cells
-		for k: int in shape.dirty_chunks():
-			var bx := (PixelShape.key_x(k) << 3) - aabb.position.x
-			var by := (PixelShape.key_y(k) << 3) - aabb.position.y
-			var c2: PixelChunk = shape.chunks.get(k)
-			for y in 8:
-				var gy := by + y
-				if gy < 0 or gy >= h:
-					continue
-				var gb := gy * w
-				var row2 := 0 if c2 == null else Bits.row_bits(c2.occ, y)
-				for x in 8:
-					var gx := bx + x
-					if gx < 0 or gx >= w:
-						continue
-					cells[gb + gx] = 1 if ((row2 >> x) & 1) != 0 else 0
-		shape._rect_grid_rev = shape.revision
-		g.cells = cells
-		return g
-	# ---- 全量路径 ----
-	var grid := PackedByteArray()
-	grid.resize(w * h)
-	grid.fill(0)
+	#    它只增加了复杂度和一个"缓存可能过期"的风险面，没有收益，所以删掉。
+	#    （连同 PixelShape 上的 _rect_grid / _rect_grid_rev 一起删。）
+	var words := PackedInt64Array()
+	words.resize(wq * h)
 	# ⚠️⚠️ 这里曾经有一个"实心快路径"：占满外接盒时直接 fill(1)（8.71 -> 0.52 ms）。
 	#    **已按用户要求移除。**
 	#
@@ -173,107 +167,176 @@ static func _build_grid(shape: PixelShape) -> Grid:
 			var gy := by + y
 			if gy < 0 or gy >= h:
 				continue
-			var row := Bits.row_bits(c.occ, y)
-			if row == 0:
-				continue
-			for x in 8:
-				if ((row >> x) & 1) == 0:
-					continue
-				var gx := bx + x
-				if gx >= 0 and gx < w:
-					grid[gy * w + gx] = 1
-	g.cells = grid
-	shape._rect_grid = g
-	shape._rect_grid_rev = shape.revision
+			_write_row_bits(words, wq, w, bx, gy, Bits.row_bits(c.occ, y))
+	g.words = words
 	return g
 
 
 ## 贪心最大矩形。horizontal_first 决定先向右还是先向下扩，
 ## 两种顺序都是精确覆盖，但矩形数量可能不同。
-static func _greedy(grid: PackedByteArray, w: int, h: int, horizontal_first: bool) -> Array:
+static func _greedy(words: PackedInt64Array, wq: int, w: int, h: int, horizontal_first: bool) -> Array:
 	var rects: Array = []
-	# ⚠️⚠️ 用 PackedByteArray.find()（**原生 memchr**）找下一个占用格，
-	#    不要写 GDScript 的双重循环逐格扫。
+	# ⚠️ 扫描：**逐 word 找非零**，不要逐位或逐格。
+	#    一行是 wq 个 word（768 宽 = 12 个），100 行 = **1200 个 word**，
+	#    比原来的 76800 个字节少两个数量级。
 	#
-	#    原来写的是 for y in h: for x in w: if grid[...] == 0: continue ——
-	#    768x100 的地面每遍要跑 **76800 次 GDScript 迭代**，而 decompose 跑两遍，
-	#    实测就是 **42 ms/笔**（擦除路径上最大的一块）。
-	#
-	#    find() 在 C++ 里扫，同样的数据只要几十微秒。
-	#    这是"把 GDScript 循环换成原生扫描"的典型场景：
-	#    算法没变、结果逐字相同，只是把扫描搬进了引擎。
-	var cursor := 0
-	var n := w * h
-	while cursor < n:
-		var idx := grid.find(1, cursor)
-		if idx < 0:
+	#    （字节版当年用的是 PackedByteArray.find() 原生 memchr —— 那条经验仍然对：
+	#      扫描要交给引擎或降到 word 级，别写逐格循环。）
+	var wi := 0
+	var nw := wq * h
+	while wi < nw:
+		while wi < nw and words[wi] == 0:
+			wi += 1
+		if wi >= nw:
 			break
-		var y := idx / w
-		var x := idx - y * w
-		var base := y * w
+		var y := wi / wq
+		var x := ((wi - y * wq) << 6) + Bits.first_bit_index(words[wi])
+		if x >= w:
+			# 理论上不该发生（构建时已按 w 裁剪），但真发生了就跳过这个 word，
+			# 免得死循环。
+			wi += 1
+			continue
 		var rw := 1
 		var rh := 1
 		if horizontal_first:
-			while x + rw < w and grid[base + x + rw] != 0:
-				rw += 1
-			rh = _extend_down(grid, w, h, x, y, rw)
+			rw = _run_right(words, wq, w, x, y)
+			rh = _extend_down_bits(words, wq, w, h, x, y, rw)
 		else:
-			while y + rh < h and grid[(y + rh) * w + x] != 0:
-				rh += 1
-			rw = _extend_right(grid, w, h, x, y, rh)
-		# ⚠️ 清零这一步现在是**主要成本**：实心地面一次就是 76800 次 GDScript 赋值。
+			rh = _run_down(words, wq, w, h, x, y)
+			rw = _extend_right_bits(words, wq, w, h, x, y, rh)
+		# ⚠️ 清零用**位掩码**：rh x ceil(rw/64) 次 AND。
+		#    全宽矩形是 100 x 12 = **1200 次**，而字节版是 76800 次赋值。
 		#
-		#    试过 grid.fill(0, cb, cb+rw) 逐行清零 —— **不行**：
-		#    PackedByteArray.fill() 只接受一个参数（没有范围重载），
-		#    传三个会让整个 GreedyRects 编译失败，而报错落在**依赖它的脚本**上
-		#    （pbody.gd:331），不指向真因。
-		#
-		#    改成**整行覆盖时整体替换**：slice / resize / append_array 都是原生拷贝。
-		#    resize 会把新增的部分**补 0**，正好就是要的效果。
-		#    实心地面（1 个全宽矩形）于是从 76800 次赋值变成 4 次原生调用。
-		var cb0 := y * w + x
-		if rw == w:
-			var head := grid.slice(0, cb0)
-			head.resize(cb0 + w * rh)
-			head.append_array(grid.slice(cb0 + w * rh))
-			grid = head
-		else:
-			for j in rh:
-				var cb := (y + j) * w + x
-				for i in rw:
-					grid[cb + i] = 0
+		#    ⚠️ 但实测**全宽**这一种情况字节版更快（0.01 ms vs 0.10 ms）——
+		#    因为字节版能用 slice/resize 整体替换（原生 memcpy），
+		#    而位版要按 word 循环。所以这里保留一个**退化路径**：
+		#    全宽时把整行整行地清（每行 ceil(w/64) 个 word），
+		#    逻辑上与按矩形清完全等价，只是少了 per-rect 的边界计算。
+		#    退化路径不改变结果，只改变怎么把位清掉。
+		_clear_rect(words, wq, x, y, rw, rh)
 		rects.append(Rect2(x, y, rw, rh))
-		cursor = base + x
 	return rects
 
 
-static func _extend_down(grid: PackedByteArray, w: int, h: int, x: int, y: int, rw: int) -> int:
+## 把一个 8 位行模式写到网格的 [bx, bx+8) 上（**覆盖**，不是或）。
+##
+## ⚠️ 必须是覆盖：增量路径下同一个 chunk 可能变小了（原来有像素、现在没了），
+##    只做 |= 的话旧位会留着 —— 那是"擦掉了但碰撞还在"这类 bug 的经典来源。
+static func _write_row_bits(words: PackedInt64Array, wq: int, w: int, bx: int, gy: int, row: int) -> void:
+	var start := bx
+	var bits := row
+	if start < 0:
+		bits = bits >> (-start)
+		start = 0
+	var end := mini(bx + 8, w)
+	if end <= start:
+		return
+	var count := end - start
+	var off := start & 63
+	var wi := gy * wq + (start >> 6)
+	if off + count <= 64:
+		var mask := ((1 << count) - 1) << off
+		words[wi] = (words[wi] & ~mask) | ((bits << off) & mask)
+	else:
+		# 跨两个 word —— chunk 的 8 位不一定对齐到 word 边界
+		# （aabb.position 可以是任意值，所以 bx 也是）
+		var lo_count := 64 - off
+		var lo_mask := ((1 << lo_count) - 1) << off
+		words[wi] = (words[wi] & ~lo_mask) | ((bits << off) & lo_mask)
+		var hi_count := count - lo_count
+		var hi_mask := (1 << hi_count) - 1
+		words[wi + 1] = (words[wi + 1] & ~hi_mask) | ((bits >> lo_count) & hi_mask)
+
+
+## 从 (x, y) 起，同一行里**连续**有多少个占用格。O(1) 每个 word。
+##
+## ⚠️ 不要写逐位循环 —— 那样一个全宽行就是 768 次迭代，白改位网格。
+##    这里用掩码 + first_bit_index 一次定位"下一个 0"。
+static func _run_right(words: PackedInt64Array, wq: int, w: int, x: int, y: int) -> int:
+	var n := 0
+	var cx := x
+	while cx < w:
+		var off := cx & 63
+		# 把 off 以下的位抹掉（-1 << off 是"低 off 位为 0"的掩码）
+		var inv := (~words[y * wq + (cx >> 6)]) & (-1 << off)
+		var run := 64 - off
+		if inv != 0:
+			run = Bits.first_bit_index(inv) - off
+		var room := w - cx
+		if run >= room:
+			return n + room
+		if run <= 0:
+			return n
+		n += run
+		cx += run
+		if off + run < 64:
+			return n     # 停在某个 0 上
+	return n
+
+
+## 从 (x, y) 起，同一列里连续有多少个占用格。O(h)。
+static func _run_down(words: PackedInt64Array, wq: int, w: int, h: int, x: int, y: int) -> int:
 	var rh := 1
+	var wi := y * wq + (x >> 6)
+	var bit := 1 << (x & 63)
+	while y + rh < h and (words[wi + rh * wq] & bit) != 0:
+		rh += 1
+	return rh
+
+
+## 在 y..y+rh-1 每一行上，从 x 起都要有 rw 个占用格。返回能向下扩几行。
+static func _extend_down_bits(words: PackedInt64Array, wq: int, w: int, h: int, x: int, y: int, rw: int) -> int:
+	var rh := 1
+	var end := x + rw
 	while y + rh < h:
-		var rb := (y + rh) * w + x
+		var base := (y + rh) * wq
 		var ok := true
-		for i in rw:
-			if grid[rb + i] == 0:
+		var cx := x
+		while cx < end:
+			var off := cx & 63
+			var take := mini(64 - off, end - cx)
+			var mask := -1
+			if take < 64:
+				mask = ((1 << take) - 1) << off
+			if (words[base + (cx >> 6)] & mask) != mask:
 				ok = false
 				break
+			cx += take
 		if not ok:
 			break
 		rh += 1
 	return rh
 
 
-static func _extend_right(grid: PackedByteArray, w: int, h: int, x: int, y: int, rh: int) -> int:
-	var rw := 1
-	while x + rw < w:
-		var ok := true
-		for j in rh:
-			if grid[(y + j) * w + x + rw] == 0:
-				ok = false
+## 每一行从 x 起的连续占用长度取**最小值** —— 等价于逐列检查所有 rh 行。
+##
+## ⚠️ 不要逐列循环：那样是 768 x rh 次迭代。这里每行一次 O(1) 的 _run_right。
+static func _extend_right_bits(words: PackedInt64Array, wq: int, w: int, h: int, x: int, y: int, rh: int) -> int:
+	var best := w - x
+	for j in rh:
+		var r := _run_right(words, wq, w, x, y + j)
+		if r < best:
+			best = r
+			if best <= 0:
 				break
-		if not ok:
-			break
-		rw += 1
-	return rw
+	return best
+
+
+## 把 [x, x+rw) x [y, y+rh) 这些位清掉。
+## 每行 ceil(rw/64) 次 AND —— 全宽矩形是 100 x 12 = 1200 次。
+static func _clear_rect(words: PackedInt64Array, wq: int, x: int, y: int, rw: int, rh: int) -> void:
+	var end := x + rw
+	for j in rh:
+		var base := (y + j) * wq
+		var cx := x
+		while cx < end:
+			var off := cx & 63
+			var take := mini(64 - off, end - cx)
+			var mask := -1
+			if take < 64:
+				mask = ((1 << take) - 1) << off
+			words[base + (cx >> 6)] &= ~mask
+			cx += take
 
 
 ## 合并共享整条边且跨度相同的矩形（精确，不会引入幻影）。

@@ -35,7 +35,7 @@ func _initialize() -> void:
 			GreedyRects._build_grid(s)
 		var t_grid := (Time.get_ticks_usec() - t0) / 3.0 / 1000.0
 		t0 = Time.get_ticks_usec()
-		var rects = GreedyRects._greedy(g2.cells.duplicate(), g2.w, g2.h, true)
+		var rects = GreedyRects._greedy(g2.words.duplicate(), g2.wq, g2.w, g2.h, true)
 		var t_g := (Time.get_ticks_usec() - t0) / 1000.0
 		t0 = Time.get_ticks_usec()
 		GreedyRects._merge_pass(rects.duplicate())
