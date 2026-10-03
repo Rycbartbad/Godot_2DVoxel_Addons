@@ -1318,9 +1318,26 @@ func fracture(body: PBody, damage, burst_speed: float = 40.0) -> Array:
 				parts.append(p)
 			continue
 		# CPU 回退路径
+		# ⚠️⚠️ 判据必须在 apply_damage **之前**取！
+		#    挖完之后，洞的边缘像素天然邻接空像素 —— 那时再问"碰到边界了吗"
+		#    永远返回 true，跳过永远不生效（我第一版就是这么写的，
+		#    实测内部擦除仍是 107 ms，一点没省）。
+		#    要问的是：**破坏之前**，伤害覆盖的范围内有没有已经是边界的像素。
+		var was_boundary: bool = dmg_rect.size.x > 0 and Destruction.touches_boundary(s, dmg_rect)
 		removed += Destruction.apply_damage(s, damage)
-		for p in Destruction.split(s, min_fragment_pixels):
-			parts.append(p)
+		# ⚠️ 便宜的必要条件：凸的伤害集**严格在形状内部**时不可能断开形状，
+		#    而 split 要跑全量连通分量标记（1248 个 chunk，实测 **31 ms**）。
+		#    对照：apply_damage 只要 0.35 ms —— split 是它的 88 倍，
+		#    而绝大多数笔画都是内部挖洞，根本不需要查连通性。
+		#
+		#    判据见 Destruction.touches_boundary 的说明：
+		#    是"**碰到边界**"，不是"包围盒离边界有余量"—— 后者不成立
+		#    （细杆在中间被擦断时包围盒离外边界很远，但确实断了）。
+		if was_boundary:
+			for p in Destruction.split(s, min_fragment_pixels):
+				parts.append(p)
+		else:
+			parts.append(s)   # 内部挖洞 -> 必然仍连通，原样留下
 	if removed == 0:
 		return []
 	if parts.is_empty():
