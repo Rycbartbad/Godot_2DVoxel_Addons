@@ -36,6 +36,20 @@ var swept_aabb := Rect2()
 var ccd := false
 var tint := Color(1, 1, 1)
 
+## ---- 碰撞层与掩码（位掩码，bit0 = 第 1 层）----
+##
+## 语义与 Godot 的 collision_layer / collision_mask、Box2D 的 category/maskBits 一致：
+## 两个刚体要碰，必须**双方都同意** ——
+##     (A.layer & B.mask) != 0  且  (B.layer & A.mask) != 0
+## 推给 Rapier 的是 InteractionGroups，它判的就是这两条。
+##
+## ⚠️ layer = 0 表示"不在任何层"：碰不到任何东西，任何东西也碰不到它。
+##    这是"临时关掉一个刚体"的正当做法 —— 比把它移出世界便宜得多
+##    （不重建碰撞体、不丢状态）。
+var collision_layer := 1
+## 默认全 1：谁都碰。层只有在显式设置后才有意义。
+var collision_mask := 0xFFFFFFFF
+
 
 var _com_cache := Vector2.ZERO
 
@@ -54,6 +68,11 @@ var _rp_w := 0.0
 var _rp_static := false
 ## 上次推给 Rapier 的矩形版本号（-1 = 还没推过）
 var _rp_rects_rev := -1
+## 上次推给 Rapier 的碰撞层/掩码（-1 = 还没推过）。
+## ⚠️ 重建碰撞体（rects_rev 变化）会让 Rapier 侧的分组回到默认全 1 ——
+##    PWorld 在那处会把这两个镜像打回 -1，逼着重新推一次。
+var _rp_layer := -1
+var _rp_mask := -1
 ## 上次推给 Rapier 的重力缩放（运行时可以改，所以要镜像）
 var _rp_gravity_scale := 1.0
 ## 上次推给 Rapier 的外力/力矩。

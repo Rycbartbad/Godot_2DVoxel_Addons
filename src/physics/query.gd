@@ -9,6 +9,11 @@ extends RefCounted
 ##   · 坐标一律**世界空间**；
 ##   · 返回的 normal 由被击中的表面**指向射线来向**（即"表面外法线"）；
 ##   · 距离是沿射线方向的距离，不是射线长度。
+##
+## 过滤器（一直生效到 clear_filters）：
+##   · reject_body(b)  排除某些刚体
+##   · require(mask)   只查这些碰撞层（刚体 collision_layer 与它有交集才被看见）
+##   · include(mask)   在已有要求上追加层
 
 ## ⚠️ 这里必须用 src/ 路径：addon 里的同名脚本是**另一份资源**，
 ## 用 addon 路径做类型标注会让"类型 pbody.gd 赋值给类型 pbody.gd"直接报错
@@ -103,10 +108,21 @@ static func _candidates(bounds: Rect2, reject: Array) -> Array:
 			continue
 		if reject.has(b):
 			continue
+		if not _passes_layers(b):
+			continue
 		if not bounds.intersects(b.aabb):
 			continue
 		out.append(b)
 	return out
+
+
+## 层过滤：刚体的 collision_layer 与查询要求的层**有交集**才算候选。
+##
+## ⚠️ 这是**单向**判据（查询自己不在任何层上），和 Rapier 的 InteractionGroups
+##    （双方都要同意）不是一回事 —— 查询只是"在挑东西"，没有"自己被挑"的语义。
+##    所以这里不能复用刚体那套 layer/mask 双向判据。
+static func _passes_layers(b: PBody) -> bool:
+	return (b.collision_layer & _require_mask) != 0
 
 
 ## 当前世界（由 Query.attach 设置）。Teardown 的查询是全局的，
@@ -115,9 +131,14 @@ static var _bodies: Array = []
 
 static var _reject: Array = []
 
+## 查询要求命中的层（位掩码）。默认全 1 = 不限。
+## 见 require() / include()。
+static var _require_mask := 0xFFFFFFFF
+
 static func attach(world) -> void:
 	_bodies = world.bodies
 	_reject.clear()
+	_require_mask = 0xFFFFFFFF
 
 
 ## 注销。**必须在世界销毁时调用** —— 否则这个静态数组会一直持有刚体引用，
@@ -134,8 +155,27 @@ static func reject_body(b) -> void:
 		_reject.append(b)
 
 
+## 只查询这些层（位掩码）。默认全 1 = 不限。
+##
+## 典型用法：
+##     Query.require(LAYER_TERRAIN)          # 这一枪只打地形
+##     Query.require(LAYER_ENEMY | LAYER_WALL)
+##
+## ⚠️ 掩码是"要求命中的层"，不是"排除的层"：刚体的 collision_layer 与它有交集才被看见。
+##    collision_layer = 0 的刚体永远查不到（它不在任何层上）。
+static func require(mask: int) -> void:
+	_require_mask = mask
+
+
+## 追加可命中的层（并集）。用于"在已有要求上再加一类"。
+static func include(mask: int) -> void:
+	_require_mask |= mask
+
+
+## 清掉查询过滤器（reject + 层要求）。
 static func clear_filters() -> void:
 	_reject.clear()
+	_require_mask = 0xFFFFFFFF
 
 
 ## ---------------- 单刚体：细射线（体素 DDA） ----------------

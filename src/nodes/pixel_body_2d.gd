@@ -268,6 +268,16 @@ func invalidate_gizmo() -> void:
 ## 是否参与休眠。静态体无所谓；动态体一般保持 true。
 @export var can_sleep := true
 
+## 碰撞层 / 掩码（位掩码，与 Godot 内置 CollisionObject2D 同名同义）。
+## 位 1 = 第 1 层 …… 位 32 = 第 32 层。
+##
+## ⚠️ 掩码默认是**全 1**（谁都碰），而 Godot 内置的 CollisionObject2D 默认是 1。
+##    这里跟随引擎侧（PBody.collision_mask）的默认值：既有场景里所有刚体都在
+##    第 1 层，所以两种默认在行为上等价 —— 但"新加的节点"不会因为掩码只写了 1
+##    而突然和别的层互不碰撞。
+@export_flags_2d_physics var collision_layer := 1
+@export_flags_2d_physics var collision_mask := 0xFFFFFFFF
+
 ## 拖动时是否把位置吸附到整数像素。
 ##
 ## ⚠️ 强烈建议开着：物理世界以**体素**为单位，位置带小数会让像素渲染和碰撞
@@ -395,6 +405,8 @@ func bake() -> PBody:
 	b.position = position
 	b.rotation = rotation
 	b.gravity_scale = gravity_scale
+	b.collision_layer = collision_layer
+	b.collision_mask = collision_mask
 	b.linear_velocity = initial_velocity
 	b.angular_velocity = initial_angular_velocity
 	if is_static:

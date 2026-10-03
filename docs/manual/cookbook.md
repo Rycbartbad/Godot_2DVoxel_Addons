@@ -282,21 +282,74 @@ for key in shape.dirty_chunks():
 
 ---
 
-## 12. 手动做一个「铰接」（约束系统还没做时的临时办法）
+## 12. 关节（铰链 / 滑轨 / 焊接 / 绳 / 弹簧）
 
-引擎目前只有 `grab` 一种约束。要做机械结构，可以先用每帧施力近似：
+五种关节，求解在 Rapier 里。**`b` 传 `null` 就是接静态世界**（吊桥挂在墙上）。
 
 ```gdscript
-## 每帧把 B 上的锚点拉向 A 上的锚点（软约束）
-func hinge_step(a, b, local_anchor_a: Vector2, local_anchor_b: Vector2, k: float) -> void:
-    var pa := a.to_world(local_anchor_a)
-    var pb := b.to_world(local_anchor_b)
-    var err := pa - pb
-    var rel := b.velocity_at(pb) - a.velocity_at(pa)
-    var f := err * k - rel * (k * 0.1)      # 弹簧 + 阻尼
-    px.push_at(b, f, pb)
-    px.push_at(a, -f, pa)
+# 铰链：门 / 轮子 / 摆。锚点省略时取两端质心的中点
+var j = px.add_hinge(plank, null, Vector2(100, 100))
+
+# 滑轨：活塞 / 抽屉（axis 是**世界方向**）
+var s = px.add_slider(piston, cylinder, Vector2(0, 0), Vector2.RIGHT)
+
+# 焊接：把两块拼成一块（创建时的相对位姿就是"零位"，不会被拧正）
+px.add_weld(armor, hull, Vector2(0, 0))
+
+# 绳：两点距离不超过 max_length（不可伸长，但可以松）
+px.add_rope(bridge_a, bridge_b, anchor_a, anchor_b, 60.0)
+
+# 弹簧：拉向 rest_length（力 = 刚度 × 误差 + 阻尼 × 速度误差，**绝对力**语义）
+px.add_spring(hook, cargo, hook_anchor, cargo_anchor, 30.0, 200.0, 20.0)
 ```
 
-> 这是权宜之计。真正的通用约束（铰接/栓接/连杆/马达）还在计划里，
-> 见 `docs/api_alignment.md` 的缺口清单。
+限位与马达（**只有铰链 / 滑轨有** —— 绳和弹簧的"长度"是构造参数）：
+
+```gdscript
+j.set_limits(-PI / 2, PI / 2)       # 铰链是角度，滑轨是距离
+j.set_motor_velocity(3.0, 1.0e7)    # 以 3 rad/s 转，最多出 1e7 的力矩（0 = 关掉）
+j.set_motor_target(0.0, 1.0e7)      # 角度伺服
+j.motor_off()
+j.clear_limits()
+```
+
+读取与断裂：
+
+```gdscript
+j.movement()          # 当前角度 / 距离
+j.speed()             # 当前角速度 / 沿轴速度
+j.break_impulse = 5000.0    # 约束冲量（力 × dt）超过它就断；默认 INF = 不断
+if j.is_broken(): ...
+px.remove_joint(j)
+px.is_jointed_to_static(debris)     # 这一堆碎块是否还（间接）挂在静态世界上
+```
+
+> ⚠️ **`movement()` 的符号**：一端是静态世界时读数是"刚体相对世界"（往正方向动 = 正数）；
+> 两个真刚体之间是 **B 相对 A**，谁当参考系由参数顺序决定。
+>
+> ⚠️ **断裂阈值是冲量**（力 × 时间步），子步越小同样载荷的冲量越小 ——
+> 要跨帧率稳定就用 `目标力 × 你的固定 dt`。
+
+---
+
+## 13. 碰撞层与掩码
+
+语义与 Godot 的 `collision_layer` / `collision_mask` 一致：两个刚体要碰，
+**双方都得同意**（`(A.layer & B.mask) != 0` 且 `(B.layer & A.mask) != 0`）。
+
+```gdscript
+# 碎块之间不互撞，但仍然撞地形（地形在第 1 层）
+for frag in fragments:
+    px.set_collision_filter(frag, 2, 1)
+
+px.set_collision_filter(bullet, 4, 1 | 2)      # 子弹只打地形和碎块
+
+# 查询侧：只打地形 / 追加一类 / 清掉过滤器
+px.query_require(1)
+px.query_include(2)
+px.query_clear_filters()
+```
+
+> ⚠️ 默认掩码是**全 1（谁都碰）**，所以"层不同"本身**不排斥** ——
+> 要"只碰某几层"必须显式写掩码。`layer = 0` 表示不在任何层：它碰不到任何东西，
+> 任何东西也碰不到它（这是"临时关掉一个刚体"的正当做法）。

@@ -546,8 +546,28 @@ func query_reject_body(body: PBody) -> void:
 	Query.reject_body(body)
 
 
+## 只查询这些碰撞层（位掩码，一直生效到 query_clear_filters）。
+## 判据是单向的：刚体的 collision_layer 与它有交集才被看见。
+func query_require(mask: int) -> void:
+	Query.require(mask)
+
+
+## 在已有要求上追加可命中的层。
+func query_include(mask: int) -> void:
+	Query.include(mask)
+
+
 func query_clear_filters() -> void:
 	Query.clear_filters()
+
+
+## 设置刚体的碰撞层与掩码（位掩码，语义同 Godot 的 collision_layer / collision_mask）。
+##
+## layer = 0 表示"不在任何层"：它碰不到任何东西，任何东西也碰不到它 ——
+## 这是"临时关掉一个刚体"的正当做法（不重建碰撞体、不丢状态）。
+func set_collision_filter(body, layer: int, mask: int) -> void:
+	body.collision_layer = layer
+	body.collision_mask = mask
 
 
 # ============================================================ 标签

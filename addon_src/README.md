@@ -135,6 +135,34 @@ px.drag_to(mouse_world)            # 每帧拖
 px.release()
 ```
 
+### 关节
+
+```gdscript
+var j = px.add_hinge(plank, null, Vector2(100, 100))   # 铰链（b 传 null 即接静态世界）
+px.add_slider(piston, cylinder, Vector2(0, 0), Vector2.RIGHT)
+px.add_weld(armor, hull, anchor)
+px.add_rope(a, b, anchor_a, anchor_b, 60.0)            # 最大距离 60
+px.add_spring(a, b, anchor_a, anchor_b, 30.0, 200.0, 20.0)
+
+j.set_limits(-PI / 2, PI / 2)      # 限位（铰链是角度，滑轨是距离）
+j.set_motor_velocity(3.0, 1.0e7)   # 马达：目标速度 + 最大力（0 = 关掉）
+j.set_motor_target(0.0, 1.0e7)     # 角度/位置伺服
+j.movement()                       # 当前角度 / 距离
+j.break_impulse = 5000.0           # 约束冲量（力 × dt）超阈值就断
+px.is_jointed_to_static(debris)    # 这一堆碎块是否还（间接）挂在静态世界上
+```
+
+### 碰撞层与掩码
+
+```gdscript
+px.set_collision_filter(frag, 2, 1)   # 我在第 2 层，只碰第 1 层（碎块之间不互撞）
+px.query_require(1)                   # 查询只打第 1 层（地形）
+px.query_include(2)                   # 再追加一层
+```
+
+语义与 Godot 的 `collision_layer` / `collision_mask` 一致：两个刚体要碰，**双方都得同意**。
+默认掩码是全 1（谁都碰），所以要「只碰某几层」必须显式写掩码。
+
 ### 查询与生命周期
 
 ```gdscript
@@ -150,14 +178,14 @@ px.despawn(body)
 
 ```
 physics/            物理核心（与渲染/应用层完全解耦）
-  pworld.gd         ★ 世界：积分 -> 宽相 -> 窄相 -> 求解 -> 休眠，以及破坏/抓取入口
-  pbody.gd          刚体：位姿/速度/质量属性/像素形状/矩形分解结果
-  collide.gd        OBB-OBB 的 SAT + 参考面裁剪（最多 2 点流形）
-  solver.gd         顺序冲量求解器：warm start + 分块求解 + 分裂冲量
-  broadphase.gd     SAP 宽相（GDScript 参考实现）
-  sweep.gd          ★ 精确 OBB 扫掠（保守推进），连续碰撞
-  grab.gd           鼠标关节（速度层约束）
-  solve_batch.gd    SoA 批处理求解（实验性）
+  pworld.gd         ★ 世界：把刚体/关节同步给 Rapier，破坏/抓取/关节的入口
+  pbody.gd          刚体：位姿/速度/质量属性/像素形状/矩形分解结果/碰撞层掩码
+  joint.gd          ★ 关节：铰链/滑轨/焊接/绳/弹簧 + 限位 + 马达 + 断裂阈值
+  query.gd          ★ 像素级射线 / 最近点 / AABB 查询 + 过滤器（含碰撞层）
+  grab.gd           鼠标拖动（**策略层**：每子步算一个限力，不是求解器约束）
+  sweep.gd          精确 OBB 扫掠（保守推进），连续碰撞
+  collide.gd        OBB-OBB 的 SAT（几何工具，sweep 在用）
+  solver.gd         求解参数与流形结构（求解本身在 Rapier 里）
 
 core/               像素与破坏
   pixel_bits.gd     位运算工具
@@ -196,8 +224,10 @@ docs/               架构与精度纪律
 | 施力 | `push(body, f)` · `push_at(body, f, world_point)` · `spin(body, t)` · `impulse(body, j, at?)` · `clear_forces(body)` |
 | 破坏 | `carve_circle(c, r, mat_delta?, burst?)` · `carve_rect(c, half, ...)` · `cut(from, to, r, ...)` · `explode(c, r, power, ...)` · `paint_circle(c, r, mat)` |
 | 抓取 | `grab_at(world_point, accel?)` · `drag_to(world_point)` · `release()` · `has_grab()` |
+| **关节** | `add_hinge(a, b, anchor?)` · `add_slider(a, b, anchor?, axis?)` · `add_weld(a, b, anchor?)` · `add_rope(a, b, anchor_a, anchor_b, max_len)` · `add_spring(a, b, anchor_a, anchor_b, rest, k, c)` · `remove_joint(j)` · `joints_of(body)` · `is_jointed_to_static(body)` |
+| **碰撞过滤** | `set_collision_filter(body, layer, mask)` |
 | 运行 | `step(delta)`（固定步长累加器）· `step_once(dt)` · `renderer()` · `resync()` |
-| **查询** | `raycast(origin, dir, max_dist, radius?)` **像素级精确** · `closest_point(origin, max_dist)` · `query_reject_body(body)` · `query_clear_filters()` |
+| **查询** | `raycast(origin, dir, max_dist, radius?)` **像素级精确** · `closest_point(origin, max_dist)` · `query_reject_body(body)` · `query_require(mask)` · `query_include(mask)` · `query_clear_filters()` |
 | **标签** | `set_tag(body, tag, value?)` · `has_tag` · `tag_value` · `remove_tag` · `list_tags` · `find_body(tag)` · `find_bodies(tag)` · `find_shapes(tag)` |
 | **刚体辅助** | `set_gravity_scale` · `set_velocity` · `set_angular_velocity` · `set_active` · `is_active` · `velocity_at` · `center_of_mass` · `bounds` · `is_broken` |
 | **形状辅助** | `shape_body` · `shape_bounds/size/voxels` · `shape_material_at(shape, world_point)` · `shape_material_at_index` · `set_shape_density` · `split_shape` · `merge_shape` · `is_shape_touching` · `is_shape_disconnected` · `shape_closest_point` · `create_shape` · `clear_shape` · `copy_shape_content` · `draw_shape_box` |
@@ -240,15 +270,17 @@ docs/               架构与精度纪律
 | `step(dt)` | 推进一个时间步（内部按需切子步） |
 | `advance(delta) -> int` | 固定步长累加器版本，返回执行了几步 |
 | `fracture(body, damage, burst_speed?) -> Array` | **破坏**：返回新产生的碎片 Body |
-| `grab(body, world_point, accel?) -> Grab` | 建立鼠标关节 |
+| `grab(body, world_point, accel?) -> Grab` | 建立鼠标拖动（策略层，不是求解器约束） |
 | `set_grab_target(p)` / `release_grab()` / `is_grabbing()` | 拖动 |
+| `add_hinge / add_slider / add_weld / add_rope / add_spring(...) -> PJoint` | 建关节（`b` 传 `null` = 接静态世界） |
+| `remove_joint(j)` / `joints_of(body)` / `is_jointed_to_static(body)` | 关节的移除与查询 |
 | `cull_outside(bounds) -> int` | 清掉跑出边界的动态体 |
 | `enforce_body_budget() -> int` | 按预算淘汰（最远的先死） |
 
 关键字段：`gravity`、`terminal_speed`、`sleeping_enabled`、
 `sleep_linear`/`sleep_surface`/`sleep_delay`、`max_speculative_margin`、
 `ccd_enabled`/`ccd_auto`/`ccd_max_motion`/`ccd_max_substeps`、
-`use_native_solve`/`use_native_broadphase`/`use_native_collide`、`bodies`。
+`bodies`、`joints`（活动关节）、`broken_joints`（断掉/移除掉的，供游戏层轮询）。
 
 ### PBody —— 刚体
 
@@ -258,6 +290,9 @@ docs/               架构与精度纪律
 
 几何：`shapes`（PixelShape 数组）/ `rects`（贪心分解出的 Rect2 数组）/
 `aabb` / `swept_aabb` / `bounding_radius()`。
+
+碰撞过滤：`collision_layer`（默认 1）/ `collision_mask`（默认全 1）——
+语义同 Godot，**双方都得同意**才碰；`layer = 0` 表示不在任何层（幽灵）。
 
 操作：`make_static()` / `make_dynamic()` /
 `rebuild(shapes, density_of?, max_rects?)` / `update_aabb()` /

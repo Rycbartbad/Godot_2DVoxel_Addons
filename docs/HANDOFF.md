@@ -49,23 +49,26 @@ python tools/check_docs.py -v
 
 ## 当前状态（交接时）
 
-- `main = stable` 附近，最后一次提交是 `e463164` 之后。
-- **常规 16 个测试脚本 295 项** + `validation_facade_api` **25 项**，全绿。
+- `main` 上最近一次提交是 **`178cef9`（关节系统）**；本轮还加了碰撞层/掩码。
+- **常规测试脚本 296 项**（core 35 / physics 31 / interaction 38 / determinism 6 /
+  **joint 41** / **collision_filter 16** / validation_* 129）+ `validation_facade_api` **25 项**，全绿。
+- `test_parallel.gd` **不存在**（旧交接里写的那个已经随手写内核删掉了）。
 - **基准（不许动）** —— 8 条，`tests/dump_state.gd` 的输出：
 
   ```
-  stack:6:5    -8.229974685154
-  pile:8:6     -18.035456929289
-  frags:240    -214.289296929908
-  mixed         3.513143394944
-  stack:2:3    -2.583700827053
-  pile:4:4     -4.965469342498
-  sleep_box    -4.465181229425   (0/12)
-  sleep_frag   -39.158215979656  (0/120)
+  stack:6:5    -14.016073139122
+  pile:8:6     -30.229686689508
+  frags:240    -214.586038730939
+  mixed        -3.464347122832
+  stack:2:3    -2.694825580758
+  pile:4:4     -8.328776872784
+  sleep_box    -4.705517743051   (0/12)
+  sleep_frag   -35.696264844083  (0/120)
   ```
 
-  （角接触修复 + `sleep_surface` 12.0→6.0 之后重设。非休眠的 6 条不受
-  `sleep_surface` 影响 —— 那些场景 `sleeping_enabled = false`。）
+  > ⚠️ 上一份交接里的那组数值（stack:6:5 = -8.229…）**已经过期** —— 它是
+  > Rapier 迁移之前的。现在这一组是 2026-10 在 `178cef9` 上重测的，
+  > 关节与碰撞层两轮改动**逐位不变**（每次改动都拿它当等价性判据）。
 - Tag：`v0.1.0 v0.2.0 v0.2.1 v0.2.2`；发布说明在 `docs/release_notes/`。
 - **项目树里不能有 `addons/`** —— 住在树里会让编辑器报
   `Class X hides a global script class` 并**级联到编译失败**（`.gdignore` 挡不住，
@@ -167,7 +170,11 @@ var sleep_delay   := 0.4
   v0.2.1 声称改用"动量变化"算过 —— 但**没有当场验证**，请先量再信。
 - `frags:240` 回退路径在第 142 步起有 `1.92e-5` 偏差（疑似 warm-start 缓存键序）。
 - API 文档覆盖率约 159/442 公开成员。
-- 图层 ④（碰撞层/掩码）、通用约束/关节、通用 `GetProperty/SetProperty` 未实现。
+- **已实现**：关节（铰链/滑轨/焊接/绳/弹簧 + 限位 + 马达 + 断裂）、
+  碰撞层/掩码（刚体级 + 查询过滤）、`IsBodyJointedToStatic`。
+- **仍未实现**：通用约束（`ConstrainPosition/Velocity/Orientation/AngularVelocity`）、
+  **形状级**碰撞过滤（现在是刚体级）、多段绳索解算、通用 `GetProperty/SetProperty`、
+  停靠面板 ④。
 
 ---
 

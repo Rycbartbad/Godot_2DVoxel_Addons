@@ -568,6 +568,11 @@ func _rp_create_missing() -> void:
 		_rp_f64(props, rp_soft_ccd_prediction)
 		# 新刚体一律先推一次矩形与全部状态
 		b._rp_rects_rev = -1
+		# 层/掩码也先打回"未推送"：新刚体在 Rapier 侧拿的是默认分组（全 1），
+		# 而我们的默认是 layer=1 / mask=全 1 —— 两者对"谁能碰谁"等价，
+		# 但显式推一次才能保证用户设过的值真的过去了。
+		b._rp_layer = -1
+		b._rp_mask = -1
 		b._rp_x = b.position.x
 		b._rp_y = b.position.y
 		b._rp_rot = b.rotation
@@ -674,6 +679,18 @@ func _substep_rapier(dt: float) -> void:
 				_rp_f32(cmds, r.size.y)
 			_rp_f64(cmds, solver.global_friction)
 			b._rp_rects_rev = b.rects_rev
+			# ⚠️ 重建碰撞体 = Rapier 侧的分组回到**默认全 1**（新碰撞体不会继承旧分组）。
+			#    把镜像打回"未推送"，让下面那段重新推一次 —— 否则"擦掉一块地形"
+			#    就会让那个刚体的层/掩码静默失效（子弹又开始打中它）。
+			b._rp_layer = -1
+			b._rp_mask = -1
+		if b._rp_layer != b.collision_layer or b._rp_mask != b.collision_mask:
+			_rp_u8(cmds, 32)
+			_rp_u32(cmds, b.rapier_id)
+			_rp_u32(cmds, b.collision_layer)
+			_rp_u32(cmds, b.collision_mask)
+			b._rp_layer = b.collision_layer
+			b._rp_mask = b.collision_mask
 		if b.position.x != b._rp_x or b.position.y != b._rp_y or b.rotation != b._rp_rot:
 			_rp_u8(cmds, 6)
 			_rp_u32(cmds, b.rapier_id)

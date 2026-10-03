@@ -641,3 +641,35 @@ pub extern "C" fn rb_joint_count(w: *mut World) -> i32 {
     //    后者永远和我们自己一致，"泄漏"这类问题只有前者看得见。
     w.ij.len() as i32
 }
+
+// ================= 碰撞层 / 掩码 =================
+
+/// 碰撞层（layer，位 0..31）与掩码（mask，位 0..31）—— 映射到 Rapier 的 InteractionGroups。
+///
+/// 判据是**双向**的（Rapier 的 test_and）：
+///     (A.memberships & B.filter) != 0  且  (B.memberships & A.filter) != 0
+/// 也就是"我在你要的层里，你在我想要的层里"。这与 Godot 的 collision_layer /
+/// collision_mask、Box2D 的 category/maskBits 是同一套语义。
+///
+/// layer = 0 表示"不在任何层"（谁都碰不到它，它谁也碰不到）；mask = 0 同理。
+///
+/// ⚠️ 分组挂在 **Collider** 上，不是刚体上 —— 本项目一个刚体有 N 个矩形碰撞体，
+///    所以这里遍历它的全部碰撞体一起设。
+/// ⚠️ 也因此 rb_body_set_rects 重建碰撞体之后必须**再设一次**：新碰撞体拿到的是
+///    Rapier 默认分组（全 1），旧分组不会自动继承。实测症状：擦掉一块地形 ->
+///    重建碰撞体 -> 那个刚体静默变回"和所有层都碰"（子弹又开始打中它）。
+#[no_mangle]
+pub extern "C" fn rb_body_set_groups(w: *mut World, id: u32, layer: u32, mask: u32) {
+    let Some(w) = (unsafe { wref(w) }) else { return };
+    let Some(&h) = w.map.get(&id) else { return };
+    let groups = InteractionGroups::new(
+        Group::from_bits_truncate(layer),
+        Group::from_bits_truncate(mask),
+        InteractionTestMode::And,
+    );
+    // 先收集再改：colliders() 借着 bodies，直接在循环里改 colliders 过不了借用检查。
+    let cols: Vec<ColliderHandle> = w.bodies[h].colliders().iter().copied().collect();
+    for c in cols {
+        w.colliders[c].set_collision_groups(groups);
+    }
+}
