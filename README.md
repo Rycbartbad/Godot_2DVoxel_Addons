@@ -37,12 +37,18 @@ GDExtension 是靠**编辑器扫描** `.gdextension` 写进 `.godot/extension_li
 godot --headless --editor --quit --path .     # 扫描一次，注册扩展
 ```
 
-在此之前直接跑 `--headless --script`，扩展**不会**加载，会落到 GDScript 回退路径。
+在此之前直接跑 `--headless --script`，扩展**不会**加载。
 仓库里带了预编译的 `gdext/fastphys.dll`（Windows x86_64）。
 
-> **已知问题**：GDScript 回退路径目前与原生路径**不等价**
-> （实测 `sleep_box` 场景 0/12 → 10/12 清醒）。详见
-> [docs/development_log.md](docs/development_log.md) 坑 36。所以请确保 dll 可用。
+> ⚠️ **扩展是必需的**：GDScript 那一份实现（宽相 / 窄相 / 求解器）已经**全部删除** ——
+> 只有 native 一条路。缺扩展时引擎会**响亮地报错**，而不是静默换一个实现
+> （那正是坑 36 的根源）。
+>
+> 这也意味着"双路径逐位一致"那套验证手段不再存在。替代它的是
+> `tests/test_determinism.gd`（可复现 / 不发散 / 不漂移）。
+
+> **已知问题**：`frags:240` 在**回退路径**上曾有 `1.92e-5` 偏差（疑似 warm-start
+> 缓存键序）—— 回退路径已删除，这条随之作废。
 
 ## 构建原生加速
 

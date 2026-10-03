@@ -65,17 +65,6 @@ func _report(world: PWorld, label: String) -> void:
 	print("\n--- %s ---" % label)
 	print("  清醒 %d | 其中「慢」（低于阈值）%d | 最快的那个 %.1f px/s | 最大角速度 %.3f rad/s" % [
 		n_awake, slow, max_lin, max_ang])
-	# 岛结构
-	var islands := world._build_islands()
-	var sizes: Array = []
-	for isle: Dictionary in islands:
-		sizes.append((isle["manifolds"] as Array).size())
-	sizes.sort()
-	sizes.reverse()
-	var top := []
-	for i in mini(6, sizes.size()):
-		top.append(sizes[i])
-	print("  岛 %d 个 | 最大几个岛的流形数: %s" % [islands.size(), str(top)])
 	var parts: Array = []
 	for k2 in buckets:
 		parts.append("%s:%d" % [k2, buckets[k2]])

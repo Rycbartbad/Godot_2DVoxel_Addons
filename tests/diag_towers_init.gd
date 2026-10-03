@@ -14,7 +14,6 @@ func _run(name: String, start_y0: float, gap: float, steps: int = 400) -> void:
 	var world := PWorld.new()
 	world.sleeping_enabled = false
 	world.use_threads = false
-	world.use_native_solve = false
 	var g := PBody.new()
 	g.position = Vector2(-600.0, 0.0)
 	g.make_static()

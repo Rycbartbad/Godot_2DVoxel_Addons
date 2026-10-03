@@ -16,7 +16,6 @@ func _initialize() -> void:
 	world.gravity = Vector2.ZERO
 	world.ccd_auto = false
 	world.ccd_max_substeps = 4
-	world.use_native_broadphase = false      # 用 GDScript 宽相，这样 manifolds 里有 sep
 	var wall := PBody.new()
 	wall.position = Vector2(200, 0)
 	wall.make_static()

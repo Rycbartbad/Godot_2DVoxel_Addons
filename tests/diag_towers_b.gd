@@ -10,7 +10,6 @@ func _run(name: String, slop: float, maxdep: float, start_y0: float, steps: int 
 	var world := PWorld.new()
 	world.sleeping_enabled = false
 	world.use_threads = false
-	world.use_native_solve = false
 	world.solver.penetration_slop = slop
 	world.solver.max_depenetration_speed = maxdep
 	var g := PBody.new()

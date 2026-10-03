@@ -14,7 +14,6 @@ func _block(w: int, h: int) -> PixelShape:
 
 func _mk(native: bool, sleeping: bool) -> Dictionary:
 	var w := PWorld.new()
-	w.use_native_solve = native
 	w.sleeping_enabled = sleeping
 	var g := PBody.new()
 	g.position = Vector2(-200.0, 0.0)

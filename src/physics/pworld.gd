@@ -8,12 +8,12 @@ extends RefCounted
 const PBody := preload("res://src/physics/pbody.gd")
 const Collide := preload("res://src/physics/collide.gd")
 const Solver := preload("res://src/physics/solver.gd")
-const Broadphase := preload("res://src/physics/broadphase.gd")
+
 const Destruction := preload("res://src/core/destruction.gd")
 const PixelShape := preload("res://src/core/pixel_shape.gd")
 const Grab := preload("res://src/physics/grab.gd")
 const Sweep := preload("res://src/physics/sweep.gd")
-const SolveBatch := preload("res://src/physics/solve_batch.gd")
+
 const Query := preload("res://src/physics/query.gd")
 
 var bodies: Array = []
@@ -125,9 +125,7 @@ var last_substeps := 1
 var _obb_cache: Array = []
 var _aabb_cache: Array = []
 var _radius_cache: PackedFloat32Array = PackedFloat32Array()
-## 窄相的 SAT 暂存：**复用同一个对象**，避免每对矩形都分配/装箱一次
-## （见 collide.gd 里 Sat 的说明）。窄相是单线程的，所以复用它没有竞争问题。
-var _sat_scratch := Collide.Sat.new()
+
 ## 子步被顶满时才会启用位移硬钳；正常情况靠子步本身保证精度
 var _ccd_saturated := false
 
@@ -160,19 +158,12 @@ var parallel_tasks_needed := -1
 ##   而 1 个 float32 ULP 的差在这套接触求解器里会被混沌放大：
 ##   实测单箱落地 300 步后翻倒 90°、三层堆叠从精确的 100.000 漂到 102.7。
 ##
-## 打开它换来的是**实打实的性能**（tests/bench_batch.gd，同进程 A/B）：
-##   串行 1.25~1.81x；并行天花板从 1.29x 抬到 **1.97x**（对象属性的并发争用没了）。
-## 也就是说：这是一条"用数值等价性换性能"的路，要不要走是产品决定，不是技术决定。
-## 想走的话，还需要在 float64 这套新数值环境里重新标定参数、重写那批
-## "刀尖上的"断言（堆叠零漂移之类）。
-var use_solver_batch := false
-## 窄相走 GDExtension 的批量 collide。
-## 实测（tests/test_gdext_collide.gd，20000 对随机 OBB）：结果与 GDScript **逐位一致**，
-## 纯内核 52 ns/对 vs GDScript 4942 ns/对。端到端收益要看编码成本占多少（见坑 27）。
-var use_native_collide := true
-## 整个宽相走 GDExtension（含扫掠 AABB / OBB 表 / 矩形 AABB / SAP 配对 / collide）。
-## 实测比"只把 collide 搬过去"省掉了 _cache_shapes 里每个矩形的对象分配。
-var use_native_broadphase := true
+## ⚠️ 只有 **native 一条路**了。原来这里有三个开关（@@use_solver_batch@@ /
+## @@use_native_collide@@ / @@use_native_broadphase@@）和一条 GDScript 回退路径，
+## 全部已删除：宽相、窄相、求解都走 GDExtension。
+## 缺扩展时**响亮地失败**，不再静默换一个实现（那正是坑 36 的根源）。
+## 历史：双路径逐位一致曾经是最强的验证手段，但它也是最大的税 ——
+## 每次改动都要写两遍，而且反复分叉（坑 18/31/36）。
 const NATIVE_PAIR_STRIDE := 16
 const NATIVE_OUT_STRIDE := 104
 var _native_phys: Variant = null
@@ -191,16 +182,7 @@ const NATIVE_BP_HEADER := 32
 const NATIVE_BODY_STRIDE := 104
 const NATIVE_RECT_STRIDE := 32
 const NATIVE_MAN_STRIDE := 120
-## 求解器也走 GDExtension：直接吃宽相的打包流形，于是**连 Manifold/Point 对象都不用建**。
-## 实测那一步（把结果装成对象）占宽相+求解的大头，所以这一条是关键的。
-## **默认打开**：已做到与对象路径逐位一致（dump_state 八场景全匹配）。
-## 定位过程中查出两个根因（见坑 29）：
-##   1. @@Vector2 * real_t@@ 是**先把标量截成 float32 再相乘**，
-##      而 C++ 里写成 @@(float)((double)x * s)@@ 是"先 double 乘、最后才舍入" —— 差 1 个 ULP；
-##      在 det ~ 1e-7 的病态 2x2 LCP 里会被放大成可见偏差。
-##   2. @@_wake_pass@@ 也遍历 @@manifolds@@（第三个消费者）—— native 路径下它是空的，
-##      于是睡眠体不再被唤醒，sleep_box 到第 227 步就少醒一个。
-var use_native_solve := true
+## 求解器也走 GDExtension：直接吃宽相的打包流形，连 Manifold/Point 对象都不用建。
 const NATIVE_SV_GRAB := 48
 const NATIVE_SV_HEADER := 96
 const NATIVE_SV_BODY := 96
@@ -226,7 +208,7 @@ var bp_sweep_us := 0     ## 扫掠 AABB
 var bp_sort_us := 0      ## 排序
 var bp_prep_us := 0      ## 编码打包表
 var bp_resolve_us := 0
-var _batch := SolveBatch.new()
+
 var max_threads := 8
 var last_parallel_tasks := 0
 
@@ -582,113 +564,10 @@ func _cache_shapes() -> void:
 
 
 func _broadphase(dt: float) -> void:
-	# ★ 唯一判断点：抓取时求解必须走对象路径（grab.solve 直接写 PBody 速度），
-	#   所以那时**不能**跳过流形对象装配。
-	# 扩展已原生支持抓取约束，所以这里**不再**因为 grabs 退回对象路径（那会慢 8 倍）。
-	_packed_manifolds = use_native_solve and use_native_broadphase
-	if use_native_broadphase:
-		_broadphase_native(dt)
-		return
-	# 先按本步位移把 AABB 撑开，高速物体才会在移动前被配对。
-	# 睡着的物体速度为 0，撑开的结果恒等于 aabb 本身，所以直接跳过
-	# （_update_sleep 入睡时已经把 swept_aabb 归位到 aabb，见那里的说明）。
-	for b0: PBody in bodies:
-		if not b0.awake and not b0.is_static:
-			continue
-		b0.compute_swept_aabb(dt)
-	_cache_shapes()
-	var idx: Array = []
-	for i in bodies.size():
-		var b: PBody = bodies[i]
-		if b.rects.is_empty():
-			continue
-		if b.is_static and not b.awake:
-			continue
-		idx.append(i)
-	last_pairs = 0
-	var pairs := Broadphase.compute_pairs(bodies, idx)
-	if profile_enabled:
-		profile_counts["bodies"] = profile_counts.get("bodies", 0) + bodies.size()
-		profile_counts["sap_pairs"] = profile_counts.get("sap_pairs", 0) + pairs.size()
-	var rect_pairs := 0
-	var sat_calls := 0
-	var _t_c0 := Time.get_ticks_usec()
-	# ---- 阶段 1：收集候选对 ----
-	# 枚举逻辑只留这一份，两条求解路径共用（否则就是坑 18 的"两份实现会分叉"）。
-	var c_ia := PackedInt32Array()
-	var c_ra := PackedInt32Array()
-	var c_ib := PackedInt32Array()
-	var c_rb := PackedInt32Array()
-	var c_margin := PackedFloat64Array()
-	var c_oa: Array = []
-	var c_ob: Array = []
-	for pr: Array in pairs:
-		# 关键：把配对规范化成 id 升序。
-		# 否则 SAP 的排序在前一帧与后一帧可能给出不同的 A/B 顺序，
-		# 法向翻转会让 warm start 的键失配、累积冲量丢失，堆叠就会缓慢漂移。
-		var ia: int = pr[0]
-		var ib: int = pr[1]
-		if bodies[ia].id > bodies[ib].id:
-			var tmp := ia
-			ia = ib
-			ib = tmp
-		var a: PBody = bodies[ia]
-		var b: PBody = bodies[ib]
-		if a.rects.is_empty() or b.rects.is_empty():
-			continue
-		var ra_count: int = a.rects.size()
-		var rb_count: int = b.rects.size()
-		# 推测接触的边际 = 这一步内两个物体可能互相接近的最大距离 + 皮肤。
-		# 必须在**移动之前**就拦下来，所以边际要覆盖整个步长的相对位移。
-		var rel := (b.linear_velocity - a.linear_velocity).length()
-		var spin := absf(a.angular_velocity) * _radius_cache[ia] \
-			+ absf(b.angular_velocity) * _radius_cache[ib]
-		# 边际上限的理由见 max_speculative_margin 的声明处（与子步位移的关系）。
-		var margin := minf((rel + spin) * dt + 0.5, max_speculative_margin)
-		# 先用 body 级 AABB 粗筛，再逐矩形 SAT
-		var obbs_a: Array = _obb_cache[ia]
-		var boxes_a: Array = _aabb_cache[ia]
-		var obbs_b: Array = _obb_cache[ib]
-		var boxes_b: Array = _aabb_cache[ib]
-		# 矩形对测试次数可以直接由矩形数相乘得到（内层循环正好遍历 ra_count x rb_count 次），
-		# 这样热路径上只需要为"真正进了 SAT 的那些"各记一次，少一条内层语句。
-		rect_pairs += ra_count * rb_count
-		for ra in ra_count:
-			var oa: Collide.OBB = obbs_a[ra]
-			var box_a: Rect2 = (boxes_a[ra] as Rect2).grow(margin)
-			for rb in rb_count:
-				var ob: Collide.OBB = obbs_b[rb]
-				var box_b: Rect2 = (boxes_b[rb] as Rect2).grow(margin)
-				if not box_a.intersects(box_b, true):
-					continue
-				c_ia.append(ia)
-				c_ra.append(ra)
-				c_ib.append(ib)
-				c_rb.append(rb)
-				c_margin.append(margin)
-				c_oa.append(oa)
-				c_ob.append(ob)
-	sat_calls = c_ia.size()
-	var _t_c1 := Time.get_ticks_usec()
-	bp_collect_us = _t_c1 - _t_c0
-	# ---- 阶段 2：求解（GDScript 逐个 / 扩展批量）----
-	var out: Array = []
-	if use_native_collide and sat_calls > 0:
-		_native_resolve(c_ia, c_ra, c_ib, c_rb, c_margin, c_oa, c_ob, out)
-	else:
-		for k in sat_calls:
-			var res := Collide.collide(c_oa[k], c_ob[k], c_margin[k], _sat_scratch)
-			_append_manifold(out, c_ia[k], c_ra[k], c_ib[k], c_rb[k], res)
-	bp_resolve_us = Time.get_ticks_usec() - _t_c1
-	manifolds = out
-	last_contacts = 0
-	for m: Solver.Manifold in manifolds:
-		last_contacts += m.points.size()
-	if profile_enabled:
-		profile_counts["rect_pairs"] = profile_counts.get("rect_pairs", 0) + rect_pairs
-		profile_counts["sat_calls"] = profile_counts.get("sat_calls", 0) + sat_calls
-		profile_counts["manifolds"] = profile_counts.get("manifolds", 0) + manifolds.size()
-		profile_counts["points"] = profile_counts.get("points", 0) + last_contacts
+	# 只有 native 一条路。GDScript 宽相（SAP 配对 + 逐对 collide + 对象装配）已删除。
+	# 这个字段仍然存在，是因为唤醒/休眠/接触采集三处还按它分支 —— 下一轮清掉。
+	_packed_manifolds = true
+	_broadphase_native(dt)
 
 
 ## 整个宽相走 GDExtension：扫掠 AABB -> OBB 表 -> 矩形 AABB -> SAP 配对 -> collide。
@@ -778,14 +657,14 @@ func _broadphase_native(dt: float) -> void:
 		roff += cnt
 	for k in order_count:
 		_bp_order.encode_s32(k * 4, order_arr[k])
-	if _bp_phys == null:
-		if not ClassDB.class_exists("FastPhys"):
-			push_warning("FastPhys 扩展不可用，宽相退回 GDScript")
-			use_native_broadphase = false
-			_packed_manifolds = false     # 同一子步内必须与 _solve/_wake_pass 保持一致
-			_broadphase_gs_fallback(dt)
-			return
-		_bp_phys = ClassDB.instantiate("FastPhys")
+		if _bp_phys == null:
+			if not ClassDB.class_exists("FastPhys"):
+				# ⚠️ 不再静默回退 GDScript（回退路径已删除）。缺扩展是**配置错误**，
+				#    必须响亮地失败，而不是让物理悄悄换一个实现。
+				push_error("FastPhys 扩展不可用：宽相只有 native 一条路。请先构建 gdext/fastphys.dll（见 README）。")
+				assert(false, "FastPhys 扩展不可用")
+				return
+			_bp_phys = ClassDB.instantiate("FastPhys")
 	bp_prep_us = Time.get_ticks_usec() - _t_enc        # 编码阶段
 	bp_encode_us = Time.get_ticks_usec() - t_full      # 到这里为止全是 GDScript 侧的准备
 	var _t_native := Time.get_ticks_usec()
@@ -845,33 +724,6 @@ func _broadphase_native(dt: float) -> void:
 	bp_collect_us = Time.get_ticks_usec() - t_full
 	bp_resolve_us = 0
 
-
-## 扩展不可用时的退回（把扫掠 AABB 之后的标准流程走一遍）
-func _broadphase_gs_fallback(dt: float) -> void:
-	_cache_shapes()
-	_broadphase(dt)
-
-
-## 把一次 collide 的结果装成流形。两条路径共用，保证装配逻辑一致。
-func _append_manifold(out: Array, ia: int, ra: int, ib: int, rb: int, res: Dictionary) -> void:
-	var pts: Array = res["points"]
-	if pts.is_empty():
-		return
-	var a: PBody = bodies[ia]
-	var b: PBody = bodies[ib]
-	var m := Solver.Manifold.new()
-	m.a = a
-	m.b = b
-	m.normal = res["normal"]
-	m.key = Solver.make_key(a.id, ra, b.id, rb)
-	for pd: Dictionary in pts:
-		var p := Solver.Point.new()
-		p.position = pd["position"]
-		p.depth = pd["depth"]
-		p.separation = pd.get("sep", -float(pd["depth"]))
-		p.feature_id = pd["feature"]
-		m.points.append(p)
-	out.append(m)
 
 
 ## 走 GDExtension 的求解器。
@@ -972,10 +824,11 @@ func _solve_native(dt: float) -> void:
 		_sv_out.resize(need_out)
 	if _sv_phys == null:
 		if not ClassDB.class_exists("FastPhys"):
-			push_warning("FastPhys 扩展不可用，求解退回 GDScript")
-			use_native_solve = false
+			push_error("FastPhys 扩展不可用：求解器只有 native 一条路。请先构建 gdext/fastphys.dll（见 README）。")
+			assert(false, "FastPhys 扩展不可用")
 			_bp_res = PackedByteArray()
 			return
+		_sv_phys = ClassDB.instantiate("FastPhys")
 		_sv_phys = ClassDB.instantiate("FastPhys")
 	var res: PackedByteArray = _sv_phys.solve(_sv_bod, _bp_res, _sv_out)
 	if res.size() < need_out:
@@ -990,57 +843,6 @@ func _solve_native(dt: float) -> void:
 		b.pseudo_linear_velocity = Vector2(res.decode_double(o + 24), res.decode_double(o + 32))
 		b.pseudo_angular_velocity = res.decode_double(o + 40)
 
-
-## 走 GDExtension 的批量窄相。
-##
-## ⚠️ 这里有个必须正视的成本：**把 OBB 编码进输入缓冲**要逐值读属性、逐值写字节，
-## 候选对一多，这部分可能吃掉相当一部分收益（实测见 docs/development_log.md 坑 27）。
-## 根治办法是把 OBB 缓存本身换成 packed 数组（那样连拷贝都省了），
-## 但那要动 _cache_shapes，先按现状接上、用数据说话。
-func _native_resolve(c_ia: PackedInt32Array, c_ra: PackedInt32Array,
-		c_ib: PackedInt32Array, c_rb: PackedInt32Array, c_margin: PackedFloat64Array,
-		c_oa: Array, c_ob: Array, out: Array) -> void:
-	var n := c_ia.size()
-	if _native_phys == null:
-		# 扩展缺失时**必须优雅退回**，否则一份没编 DLL 的检出直接跑不起来。
-		if not ClassDB.class_exists("FastPhys"):
-			push_warning("FastPhys 扩展不可用，退回 GDScript 窄相")
-			use_native_collide = false
-			for k in n:
-				_append_manifold(out, c_ia[k], c_ra[k], c_ib[k], c_rb[k],
-					Collide.collide(c_oa[k], c_ob[k], c_margin[k], _sat_scratch))
-			return
-		_native_phys = ClassDB.instantiate("FastPhys")
-	var need := n * NATIVE_PAIR_STRIDE
-	if _pair_bytes.size() != need:
-		_pair_bytes.resize(need)
-		_native_out.resize(n * NATIVE_OUT_STRIDE)
-	for k in n:
-		var bo := k * NATIVE_PAIR_STRIDE
-		_pair_bytes.encode_s32(bo, _obb_boff[c_ia[k]] + c_ra[k] * 64)
-		_pair_bytes.encode_s32(bo + 4, _obb_boff[c_ib[k]] + c_rb[k] * 64)
-		_pair_bytes.encode_double(bo + 8, c_margin[k])
-	var res_bytes: PackedByteArray = _native_phys.collide_batch(_obb_bytes, _pair_bytes, _native_out, n)
-	for k2 in n:
-		var base: int = k2 * NATIVE_OUT_STRIDE
-		var cnt := res_bytes.decode_s32(base + 16)
-		if cnt <= 0:
-			continue
-		var m := Solver.Manifold.new()
-		var a2: PBody = bodies[c_ia[k2]]
-		m.a = a2
-		m.b = bodies[c_ib[k2]]
-		m.normal = Vector2(res_bytes.decode_double(base), res_bytes.decode_double(base + 8))
-		m.key = Solver.make_key(a2.id, c_ra[k2], bodies[c_ib[k2]].id, c_rb[k2])
-		for j in cnt:
-			var po: int = base + 24 + j * 40
-			var p := Solver.Point.new()
-			p.position = Vector2(res_bytes.decode_double(po), res_bytes.decode_double(po + 8))
-			p.depth = res_bytes.decode_double(po + 16)
-			p.separation = res_bytes.decode_double(po + 24)
-			p.feature_id = int(res_bytes.decode_double(po + 32))
-			m.points.append(p)
-		out.append(m)
 
 
 func _obb_aabb(o: Collide.OBB) -> Rect2:
@@ -1443,197 +1245,12 @@ func _collect_contacts() -> void:
 ## 各自跑完整套迭代拿到的结果与串行完全一致（不是近似，是可复现的相同结果）。
 ## 所以这是"既安全又确定"的并行方式，不需要锁、也不需要归约。
 func _solve(dt: float) -> void:
-	# 整条求解链走 GDExtension（宽相输出 -> 求解器）。抓取约束仍然走对象路径。
-	if _packed_manifolds:
-		_solve_native(dt)
-		return
-	solver.prepare(manifolds, dt)
-	for g in grabs:
-		g.reset_accumulator()
-	# 实测结论（tests/bench_parallel.gd，交叉重复取最小值）：
-	#   **岛并行稳定优于着色并行**：岛并行 1.20~1.39x，全局着色只有 0.37~0.99x。
-	# 原因有两层：
-	#   1. 岛并行里每个岛自己跑完整个迭代循环，**岛之间零同步**；
-	#      着色每种颜色都要一次 barrier，一次迭代就是"色数"次同步。
-	#   2. 更根本的是 GDScript 的对象属性读写在多线程下会剧烈膨胀
-	#      （16 线程时单元耗时涨 93 倍，见 tests/bench_isolation.gd），
-	#      而着色把并发任务数推得更高，正好踩在这个坑上。
-	# 所以着色默认关闭；只有在"单个岛吃掉几乎全部工作量"时才值得一试。
-	#
-	# ⚠️ 两层混合并行（只在最重的岛内部着色 + 其余岛走岛并行）**已经评估过，不要做**：
-	#   · 嵌套 group task 会死锁（外层任务数 >= 池线程数时，子任务永远排不上，
-	#     见 tests/probe_nested_tasks.gd，实测挂死）；
-	#   · 退而求其次的"分波"写法也救不回来：在 pile:8:6 这个"最大岛占 92%"的
-	#     最有利场景里，给这个大岛着色仍然是 0.95x（比串行还慢）。
-	#   结论：瓶颈不是"岛并行拿不到并行度"，而是"并发本身在这个 VM 上不划算"。
-	# ---- SoA 路径（默认）----
-	# 抓取约束仍然走对象路径：grab.solve() 直接写 PBody 的速度，
-	# 而 SoA 求解器是在 packed 数组上算完再 scatter 回去的 —— 两者会互相覆盖。
-	# 抓取时物体通常很少，走对象路径本来就够快。
-	if use_solver_batch and grabs.is_empty():
-		_solve_batched(dt)
-		return
-	var islands := _build_islands()
-	if profile_enabled:
-		profile_counts["islands"] = profile_counts.get("islands", 0) + islands.size()
-	if use_coloring and manifolds.size() >= PARALLEL_MIN_PAIRS:
-		var groups := Solver.color_manifolds(manifolds)
-		solver.solve_colored(groups, dt, grabs)
-		last_parallel_tasks = groups.size()
-	elif use_threads and islands.size() >= 2 and manifolds.size() >= PARALLEL_MIN_PAIRS:
-		_parallel_solve(islands, dt)
-		last_parallel_tasks = islands.size()
-	else:
-		solver.solve(manifolds, dt, grabs)
-		last_parallel_tasks = 1
-	solver.store_warm(manifolds)
+	# 整条求解链走 GDExtension（宽相输出 -> 求解器）。
+	# GDScript 求解器（对象路径 / SoA 批量 / 岛并行 / 着色）已全部删除。
+	# 岛并行与着色当年是 GDScript 侧的优化（实测 1.37~1.64x）；native 内部自己
+	# 做同样的顺序迭代，所以这里不再需要它们。
+	_solve_native(dt)
 
-
-## SoA 求解：gather -> 迭代 -> scatter。
-##
-## 岛的划分仍然是并查集，但输出改成"流形下标的排列 + 每岛一段区间"，
-## 于是并行任务只需要两个整数（lo, hi），内层循环完全不碰对象。
-## 岛内**保持原数组顺序**，所以与对象路径逐位一致（tests/dump_state.gd 卡住）。
-func _solve_batched(dt: float) -> void:
-	_batch.sync_params(solver)
-	var islands := _build_islands()
-	if profile_enabled:
-		profile_counts["islands"] = profile_counts.get("islands", 0) + islands.size()
-	var perm := PackedInt32Array()
-	var ranges: Array = []
-	for isle: Dictionary in islands:
-		var idx: Array = isle["idx"]
-		if idx.is_empty():
-			continue
-		ranges.append([perm.size(), perm.size() + idx.size()])
-		for k: int in idx:
-			perm.append(k)
-	# 理论上流形都会被某个岛收走；万一有遗漏就追加到末尾（顺序仍然保持一致）
-	if perm.size() < manifolds.size():
-		var covered := {}
-		for k2: int in perm:
-			covered[k2] = true
-		var tail_lo := perm.size()
-		for i in manifolds.size():
-			if not covered.has(i):
-				perm.append(i)
-		if perm.size() > tail_lo:
-			ranges.append([tail_lo, perm.size()])
-	_batch.gather_bodies(bodies)
-	_batch.build(manifolds, perm, dt, solver._warm, bodies)
-	if use_threads and ranges.size() >= 2 and manifolds.size() >= PARALLEL_MIN_PAIRS:
-		var worker := func(t: int) -> void:
-			var rg: Array = ranges[t]
-			_batch.solve_range(rg[0], rg[1], dt)
-		var gid := WorkerThreadPool.add_group_task(worker, ranges.size(), parallel_tasks_needed,
-			parallel_high_priority, "solve_batch")
-		WorkerThreadPool.wait_for_group_task_completion(gid)
-		last_parallel_tasks = ranges.size()
-	else:
-		_batch.solve_all(dt)
-		last_parallel_tasks = 1
-	_batch.scatter_bodies(bodies)
-	_batch.store_warm(solver._warm, manifolds, perm)
-
-
-## 按接触关系把流形和抓取约束分到互不相连的岛里
-func _build_islands() -> Array:
-	var n := bodies.size()
-	if n == 0:
-		return []
-	var index_of := {}
-	for i in n:
-		index_of[bodies[i].id] = i
-	var parent: Array = []
-	parent.resize(n)
-	for i in n:
-		parent[i] = i
-	for m: Solver.Manifold in manifolds:
-		# 静态体**不连接岛**：它永远不会被求解器写入（_apply 里 is_static 直接跳过），
-		# 所以"两个动态体都压在同一个地面上"根本不构成耦合，可以分到两个岛里并行解。
-		# 旧代码在这里无条件 union，于是**任何带一整块地面的场景都被并成一个岛** ——
-		# 岛并行退化成"1 个岛"，实测比串行还慢（0.90x）：这是岛并行上限的真正来源。
-		# （_update_sleep 早就用同样的规则跳过静态体，两边现在一致了。）
-		if m.a.is_static or m.b.is_static:
-			continue
-		var ia: int = index_of.get(m.a.id, -1)
-		var ib: int = index_of.get(m.b.id, -1)
-		if ia >= 0 and ib >= 0:
-			_union(parent, ia, ib)
-	for g in grabs:
-		if g.body != null and index_of.has(g.body.id):
-			pass   # 抓取约束不连接两个物体，跟着它自己的岛走即可
-	var groups := {}
-	var groups_idx := {}
-	for i2 in n:
-		var root0 := _find(parent, i2)
-		groups[root0] = []
-		groups_idx[root0] = []
-	for mi in manifolds.size():
-		var m2: Solver.Manifold = manifolds[mi]
-		# 流形归到**动态体**所在的那个岛。
-		# 旧代码固定用 m.a：而静态地面通常 id 最小（最先 add_body），
-		# 于是"所有物体与地面的接触"全部落进地面那一个岛 —— 地面岛变成
-		# 串行瓶颈，其余岛再并行也白搭（这正是"一屏碎块压在一块地板上"的常见形状）。
-		# 静态体不会被写入，所以它的接触跟着动态体走完全安全。
-		var ia2: int = index_of.get(m2.a.id, -1)
-		var ib2: int = index_of.get(m2.b.id, -1)
-		var root := -1
-		if not m2.a.is_static and ia2 >= 0:
-			root = _find(parent, ia2)
-		elif not m2.b.is_static and ib2 >= 0:
-			root = _find(parent, ib2)
-		elif ia2 >= 0:
-			root = _find(parent, ia2)
-		else:
-			continue
-		groups[root].append(m2)
-		# 同时记下**流形在原数组里的下标**：SoA 求解器要按岛拿到连续区间
-		(groups_idx[root] as Array).append(mi)
-	var out: Array = []
-	for root2: int in groups:
-		var ms: Array = groups[root2]
-		var gs: Array = []
-		for g2 in grabs:
-			if g2.body != null and index_of.has(g2.body.id) and _find(parent, index_of[g2.body.id]) == root2:
-				gs.append(g2)
-		if ms.is_empty() and gs.is_empty():
-			continue
-		out.append({"manifolds": ms, "grabs": gs, "idx": groups_idx[root2]})
-	return out
-
-
-## 诊断用：记录每个岛任务跑在哪个线程、时间区间、以及解了多少条流形。
-## 打开后会写一个小数组（Mutex 保护），只在基准里用。
-var trace_enabled := false
-var parallel_trace: Array = []
-
-func _parallel_solve(islands: Array, dt: float) -> void:
-	if trace_enabled:
-		parallel_trace = []
-		parallel_trace.resize(islands.size())
-	var trace_mtx := Mutex.new()
-	# 每个岛只碰自己的流形和自己的物体，天然无竞争；也不需要回写结果。
-	var worker := func(t: int) -> void:
-		var isle: Dictionary = islands[t]
-		if trace_enabled:
-			var s0 := Time.get_ticks_usec()
-			solver.solve(isle["manifolds"], dt, isle["grabs"])
-			var e0 := Time.get_ticks_usec()
-			trace_mtx.lock()
-			parallel_trace[t] = [OS.get_thread_caller_id(), s0, e0,
-				(isle["manifolds"] as Array).size()]
-			trace_mtx.unlock()
-			return
-		solver.solve(isle["manifolds"], dt, isle["grabs"])
-	# high_priority = true 是**必须**的，不是调优：
-	# WorkerThreadPool 把线程分成高/低优先级两组，低优先级那组只占
-	# threading/worker_pool/low_priority_thread_ratio（默认 0.3）。
-	# 传 false 时实测只有 **4 个线程**在跑，传 true 是 **16 个**（并行度 3.9x -> 15.0x）。
-	# 物理求解在帧的关键路径上，本来就该走高优先级。
-	var gid := WorkerThreadPool.add_group_task(worker, islands.size(), parallel_tasks_needed,
-		parallel_high_priority, "solve_islands")
-	WorkerThreadPool.wait_for_group_task_completion(gid)
 
 
 func _integrate_transforms(dt: float) -> void:

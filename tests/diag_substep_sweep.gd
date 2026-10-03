@@ -12,7 +12,6 @@ func _run(motion: float, steps: int = 400) -> void:
 	var world := PWorld.new()
 	world.sleeping_enabled = false
 	world.use_threads = false
-	world.use_native_solve = false
 	world.ccd_max_motion = motion
 	var g := PBody.new()
 	g.position = Vector2(-600.0, 0.0)

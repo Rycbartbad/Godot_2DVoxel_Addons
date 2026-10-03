@@ -13,7 +13,6 @@ func _initialize() -> void:
 	world.sleeping_enabled = false
 	world.use_threads = true
 	world.use_coloring = false
-	world.use_native_solve = false          # 失败的那条路径
 	var g := PBody.new()
 	g.position = Vector2(-600.0, 0.0)
 	g.make_static()

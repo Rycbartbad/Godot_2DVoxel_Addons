@@ -46,11 +46,11 @@ _Packed 路径（默认，需要 FastPhys 扩展）
   宽相在 C++ 里直接产出打包流形 → 求解器直接吃它
   **连 Manifold/Point 对象都不建** —— 那一步在 GDScript 里是主要开销
 
-对象路径（回退，或使用抓取以外的高级特性时）
+对象路径（**已删除** —— 现在只有 native 一条路）
   宽相产出 Manifold / Point 对象 → solver.prepare() → 迭代 → store_warm()
 ```
 
-两条路径**逐位一致**（由状态摘要测试钉住）。这不是巧合，是移植时逐条对齐
+⚠️ **这一段已作废**：对象路径（以及它的 GDScript 宽相/求解器）已经**全部删除**，
 float32/float64 边界换来的，见 [PRECISION.md](PRECISION.md)。
 
 ## 休眠

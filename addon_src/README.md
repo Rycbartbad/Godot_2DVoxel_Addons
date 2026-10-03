@@ -7,7 +7,7 @@ Teardown 风格的 **2D 像素破坏 + 刚体物理**，纯 GDScript 实现，�
 
 - **任意像素团就是碰撞体** —— 不要求凸形或矩形。像素数据会被贪心分解成 OBB，物理层只看见 OBB。
 - **破坏即物理** —— 挖掉像素后按连通性分裂，切下来的部分自动变成新的刚体。
-- **确定性 + 逐位可复现** —— 同输入必然同输出；GDScript 路径与 C++ 路径**逐位一致**
+- **确定性 + 逐位可复现** —— 同输入必然同输出（`tests/test_determinism.gd`）
   （正是靠这一点，原生加速才敢默认打开）。
 - **精度纪律写在代码里** —— float32/float64 的每一条边界都有注释和测试钉住，
   见 [docs/PRECISION.md](docs/PRECISION.md)。**这是本项目最值钱的部分**：
@@ -293,8 +293,8 @@ Destruction.split(shape, min_pixels) -> Array        # 按连通性切块
 
 ## 原生加速（可选）
 
-`native/` 里是宽相 + 窄相 + 求解器的 C++ 移植。**不装也能跑**，
-`PWorld` 会自动回退到 GDScript 路径（靠 `ClassDB.class_exists("FastPhys")` 检测）。
+`native/` 里是宽相 + 窄相 + 求解器的 C++ 实现。**这是唯一实现** ——
+GDScript 那一份已经删除，缺扩展时引擎会响亮地报错（不再静默回退）。
 
 构建：
 

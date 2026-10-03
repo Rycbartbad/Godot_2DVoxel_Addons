@@ -12,7 +12,8 @@
 
 引擎是**可迁移的 addon**：真源在 `src/`，`tools/build_addon.py` 生成构建产物。
 **构建产物绝不进项目树**（见下）。`gdext/` 有一个 C++ 原生加速层，
-与 GDScript 路径**必须逐位一致**。
+⚠️ **这条已作废**：GDScript 那一份实现已全部删除，只有 native 一条路
+（见开发日志「删除 GDScript 端」一节）。
 
 **引擎只提供机制，规则在游戏层。** 节点层尽量像 Godot 内置（有 body / mesh / camera / UI 图层，
 可拖动、可继承、有子节点组合）。

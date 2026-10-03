@@ -36,7 +36,6 @@ const PixelSprite2D := preload("res://src/nodes/pixel_sprite_2d.gd")
 @export var max_substeps := 4
 @export var sleeping := true
 @export var terminal_speed := 650.0
-@export var use_native := true
 
 @export_group("材质")
 ## 全部材质。**在这里加一条就是加一种材质** —— 颜色、密度、强度一次设好。
@@ -94,9 +93,6 @@ func rebuild() -> void:
 	world.max_substeps = max_substeps
 	world.sleeping_enabled = sleeping
 	world.terminal_speed = terminal_speed
-	world.use_native_broadphase = use_native
-	world.use_native_collide = use_native
-	world.use_native_solve = use_native
 	# ---- 把材质播到物理层与渲染层 ----
 	# ⚠️ 这是本节点存在的核心理由之一：材质是**一份数据**，
 	#    颜色给渲染、密度给物理、强度给破坏判据 —— 三处必须同源。

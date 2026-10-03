@@ -26,7 +26,7 @@ STABLE = "stable"
 SOURCE = "main"
 
 TESTS = [
-    "test_core", "test_physics", "test_interaction", "test_parallel",
+    "test_core", "test_physics", "test_interaction", "test_determinism",
     "validation_sweep", "validation_query", "validation_api", "validation_api2",
     "validation_voxel_layer", "validation_contacts", "validation_traversal",
     "validation_dynamics", "validation_nodes", "validation_alignment",
