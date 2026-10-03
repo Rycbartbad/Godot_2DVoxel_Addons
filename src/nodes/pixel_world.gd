@@ -29,6 +29,7 @@ const PixelBody2D := preload("res://src/nodes/pixel_body_2d.gd")
 #    靠 class_name 解析在某些缓存状态下会失败，preload 是确定的。
 const PixelMaterial := preload("res://src/nodes/pixel_material.gd")
 const PixelSprite2D := preload("res://src/nodes/pixel_sprite_2d.gd")
+const PixelJoint2D := preload("res://src/nodes/pixel_joint_2d.gd")
 
 @export_group("物理")
 @export var gravity := Vector2(0, 600)
@@ -73,6 +74,8 @@ var _rebuild_queued := false
 var _transform_queued := false
 ## 与 world.bodies 一一对应的节点（用来判断谁自带精灵）
 var _body_nodes: Array = []
+## 烘焙过的关节节点（与 world.joints 不是一一对应：烘焙失败的不进来）
+var _joint_nodes: Array = []
 
 
 func _ready() -> void:
@@ -130,6 +133,8 @@ func rebuild() -> void:
 		# 造 body（配置位置/速度）与「加进世界」是两步，bake_node 一起做完
 		if bake_node(c as PixelBody2D) != null:
 			n += 1
+	# ---- 关节：必须在**所有刚体之后** ----
+	_bake_joints()
 	if auto_render:
 		# ⚠️ 必须先清空再重建：rebuild 会造出**新的 body.id**，
 		#    而渲染器按 id 索引贴图 —— 不清的话旧贴图会留在原地变成幽灵
@@ -208,6 +213,24 @@ func bake_node(node: PixelBody2D) -> PBody:
 		renderer.sync(b)
 	_sync_overlays()
 	return b
+
+
+## 烘焙所有 PixelJoint2D 子节点。
+##
+## ⚠️ 顺序：**必须在刚体之后**。关节两端要的是已经进世界的 PBody（见 PixelJoint2D.bake），
+##    先建关节的话两端都是 null，会被当成"接静态世界" —— 症状是关节静默挂到世界上，
+##    该被连住的地方完全不连（而且不报错）。
+func _bake_joints() -> void:
+	_joint_nodes.clear()
+	var n := 0
+	for c in get_children():
+		if not (c is PixelJoint2D):
+			continue
+		if (c as PixelJoint2D).bake(world) != null:
+			_joint_nodes.append(c)
+			n += 1
+	if log_bake and n > 0:
+		print("[PixelWorld] 烘焙 %d 个关节" % n)
 
 
 ## 运行时把一个 PixelBody2D 加进**活着的世界**：不重建、不丢破坏状态。

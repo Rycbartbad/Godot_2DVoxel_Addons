@@ -118,7 +118,8 @@ func _draw() -> void:
 	# 坐标系已在上面用 draw_set_transform 抵消了缩放 —— 所以这里**直接用形状坐标**，
 	# 不需要任何补偿系数。形状的外接是多少就画多大，经过节点变换后正好贴住形状。
 	var col := Color(0.4, 0.8, 1.0, 0.8) if is_static else Color(0.3, 1.0, 0.5, 0.7)
-	if source == Source.CIRCLE:
+	_gizmo_aabb()          # 先取一次缓存（里面算好了 _gizmo_is_circle）
+	if _gizmo_is_circle:
 		# ⚠️⚠️ 球形**不能**画外接矩形 —— 外接矩形是正方形，
 		#    看起来就像"球变成了四边形"，很容易让人以为形状生成错了。
 		#
@@ -200,12 +201,43 @@ var _aabb_cache := Rect2i()
 var _aabb_valid := false
 
 
+## 抓手是不是"单个圆盘"（只有这种情况才画圆，见 _draw）。
+var _gizmo_is_circle := false
+
+
+## 抓手的外接 = **所有形状子节点的并集**（一个子节点都没有时才是自身内置形状）。
+##
+## ⚠️⚠️ 这里以前用的是 get_shape()（刚体**自身**的内置形状）。而物理用的是
+##    collect_shapes()（**形状子节点优先**）—— 于是每一个挂了形状子节点的刚体，
+##    抓手都按内置 rect_size 的默认值 16x16 画：地面 768x100、墙 120x90、
+##    桥板 31x6 全都显示成一个小方块，和真实形状完全对不上。
+##    甲方看到的"蓝框/绿框没和形状对齐"就是它。
+##    现在与物理走**同一份形状列表**，并集就是形状真实覆盖的范围。
 func _gizmo_aabb() -> Rect2i:
 	if not _aabb_valid:
-		var shape := get_shape()          # ← 用缓存，不要直接 build_shape()
-		_aabb_cache = shape.local_aabb() if not shape.is_empty() else Rect2i()
+		var r := Rect2i()
+		var first := true
+		for s in collect_shapes():
+			var sh := s as PixelShape
+			if sh == null or sh.is_empty():
+				continue
+			var a := sh.local_aabb()
+			r = a if first else r.merge(a)
+			first = false
+		_aabb_cache = r
+		# 只有"刚体自身就是圆盘、且没挂形状子节点"才画圆：
+		# 挂了子节点时形状可能不止一个，画圆会骗人（见 _draw 里的墓碑注释）。
+		_gizmo_is_circle = source == Source.CIRCLE and not _has_shape_child()
 		_aabb_valid = true
 	return _aabb_cache
+
+
+## 有没有形状子节点（与 collect_shapes 的判据保持一致：鸭子类型，不认类型）。
+func _has_shape_child() -> bool:
+	for c in get_children():
+		if c.has_method("build_shape") or c.has_method("get_shape"):
+			return true
+	return false
 
 
 ## 形状属性变了就调它让缓存失效（导出属性的 setter 会自动调）
@@ -405,8 +437,12 @@ func bake() -> PBody:
 	b.position = position
 	b.rotation = rotation
 	b.gravity_scale = gravity_scale
-	b.collision_layer = collision_layer
-	b.collision_mask = collision_mask
+	# ⚠️ 层/掩码要显式兜 null：编辑器在"脚本新增导出属性"之后重存场景时会写成
+	#    `collision_layer = null`（见 pixel_joint_2d.gd 里的同一段墓碑注释）。
+	#    这里**不能**用 int(null)（= 0）—— 那会把刚体变成 layer 0 的"幽灵"，
+	#    穿墙而过还不报错；必须给回默认值本身。
+	b.collision_layer = int(collision_layer) if collision_layer != null else 1
+	b.collision_mask = int(collision_mask) if collision_mask != null else 0xFFFFFFFF
 	b.linear_velocity = initial_velocity
 	b.angular_velocity = initial_angular_velocity
 	if is_static:

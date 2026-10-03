@@ -10,12 +10,13 @@
 [ext_resource type="Resource" path="res://materials/wood.tres" id="8_wood"]
 [ext_resource type="Resource" path="res://materials/metal.tres" id="9_metal"]
 [ext_resource type="Resource" path="res://materials/brick.tres" id="10_brick"]
+[ext_resource type="Script" uid="uid://dy7lpmv503q6h" path="res://src/nodes/pixel_joint_2d.gd" id="11_nwon6"]
 
 [node name="Demo" type="Node2D" unique_id=204230944]
 script = ExtResource("1_game")
 
 [node name="Camera2D" type="Camera2D" parent="." unique_id=1548728324]
-position = Vector2(310, 175)
+position = Vector2(302, 163)
 
 [node name="PixelWorld" type="Node2D" parent="." unique_id=1043475145]
 script = ExtResource("2_world")
@@ -32,7 +33,7 @@ script = ExtResource("4_shape")
 rect_size = Vector2i(768, 100)
 
 [node name="Wall" type="Node2D" parent="PixelWorld" unique_id=103555653]
-position = Vector2(300, 130)
+position = Vector2(310, 130)
 script = ExtResource("3_body")
 is_static = true
 
@@ -83,7 +84,205 @@ material_id = 2
 
 [node name="DebugOverlay" type="Node2D" parent="PixelWorld" unique_id=1720671846]
 visible = false
+z_index = 10
 script = ExtResource("5_overlay")
+show_com = false
+
+[node name="BridgePlank0" type="Node2D" parent="PixelWorld" unique_id=357297265]
+position = Vector2(306, 98)
+script = ExtResource("3_body")
+
+[node name="Shape" type="Node2D" parent="PixelWorld/BridgePlank0" unique_id=1628395771]
+visible = false
+script = ExtResource("4_shape")
+rect_size = Vector2i(31, 6)
+material_id = 2
+
+[node name="BridgePlank1" type="Node2D" parent="PixelWorld" unique_id=1107786213]
+position = Vector2(337, 98)
+script = ExtResource("3_body")
+
+[node name="Shape" type="Node2D" parent="PixelWorld/BridgePlank1" unique_id=1532050955]
+visible = false
+script = ExtResource("4_shape")
+rect_size = Vector2i(31, 6)
+material_id = 2
+
+[node name="BridgePlank2" type="Node2D" parent="PixelWorld" unique_id=790296584]
+position = Vector2(368, 98)
+script = ExtResource("3_body")
+
+[node name="Shape" type="Node2D" parent="PixelWorld/BridgePlank2" unique_id=213499687]
+visible = false
+script = ExtResource("4_shape")
+rect_size = Vector2i(31, 6)
+material_id = 2
+
+[node name="BridgePlank3" type="Node2D" parent="PixelWorld" unique_id=1419145946]
+position = Vector2(399, 98)
+script = ExtResource("3_body")
+
+[node name="Shape" type="Node2D" parent="PixelWorld/BridgePlank3" unique_id=779688570]
+visible = false
+script = ExtResource("4_shape")
+rect_size = Vector2i(31, 6)
+material_id = 2
+
+[node name="BridgeHinge0" type="Node2D" parent="PixelWorld" unique_id=201747637]
+z_index = 5
+position = Vector2(306, 101)
+script = ExtResource("11_nwon6")
+body_b = NodePath("../BridgePlank0")
+
+[node name="BridgeHinge1" type="Node2D" parent="PixelWorld" unique_id=2143791735]
+z_index = 5
+position = Vector2(337, 101)
+script = ExtResource("11_nwon6")
+body_a = NodePath("../BridgePlank0")
+body_b = NodePath("../BridgePlank1")
+
+[node name="BridgeHinge2" type="Node2D" parent="PixelWorld" unique_id=1253618806]
+z_index = 5
+position = Vector2(368, 101)
+script = ExtResource("11_nwon6")
+body_a = NodePath("../BridgePlank1")
+body_b = NodePath("../BridgePlank2")
+
+[node name="BridgeHinge3" type="Node2D" parent="PixelWorld" unique_id=944760270]
+z_index = 5
+position = Vector2(399, 101)
+script = ExtResource("11_nwon6")
+body_a = NodePath("../BridgePlank2")
+body_b = NodePath("../BridgePlank3")
+
+[node name="BridgeHinge4" type="Node2D" parent="PixelWorld" unique_id=1313277437]
+z_index = 5
+position = Vector2(430, 101)
+script = ExtResource("11_nwon6")
+body_a = NodePath("../BridgePlank3")
+
+[node name="SpringPost" type="Node2D" parent="PixelWorld" unique_id=1409304928]
+position = Vector2(240, 96)
+script = ExtResource("3_body")
+is_static = true
+
+[node name="Shape" type="Node2D" parent="PixelWorld/SpringPost" unique_id=1074315589]
+visible = false
+script = ExtResource("4_shape")
+rect_size = Vector2i(8, 8)
+
+[node name="SpringCrate" type="Node2D" parent="PixelWorld" unique_id=3232666]
+position = Vector2(236, 160)
+script = ExtResource("3_body")
+
+[node name="Shape" type="Node2D" parent="PixelWorld/SpringCrate" unique_id=1581684648]
+visible = false
+script = ExtResource("4_shape")
+material_id = 2
+
+[node name="SpringJoint" type="Node2D" parent="PixelWorld" unique_id=455398417]
+z_index = 5
+position = Vector2(244, 104)
+script = ExtResource("11_nwon6")
+kind = 4
+body_a = NodePath("../SpringPost")
+body_b = NodePath("../SpringCrate")
+anchor_b_offset = Vector2(0, 56)
+rest_length = 25.0
+
+[node name="RopePost" type="Node2D" parent="PixelWorld" unique_id=1235438555]
+position = Vector2(272, 96)
+script = ExtResource("3_body")
+is_static = true
+
+[node name="Shape" type="Node2D" parent="PixelWorld/RopePost" unique_id=917492807]
+visible = false
+script = ExtResource("4_shape")
+rect_size = Vector2i(8, 8)
+
+[node name="RopeCrate" type="Node2D" parent="PixelWorld" unique_id=397866697]
+position = Vector2(266, 160)
+script = ExtResource("3_body")
+
+[node name="Shape" type="Node2D" parent="PixelWorld/RopeCrate" unique_id=161599476]
+visible = false
+script = ExtResource("4_shape")
+rect_size = Vector2i(20, 20)
+material_id = 2
+
+[node name="RopeJoint" type="Node2D" parent="PixelWorld" unique_id=1246404989]
+z_index = 5
+position = Vector2(276, 104)
+script = ExtResource("11_nwon6")
+kind = 3
+body_a = NodePath("../RopePost")
+body_b = NodePath("../RopeCrate")
+anchor_b_offset = Vector2(0, 56)
+rest_length = 45.0
+
+[node name="Wheel" type="Node2D" parent="PixelWorld" unique_id=1665109442]
+position = Vector2(438, 80)
+script = ExtResource("3_body")
+source = 1
+radius = 14.0
+
+[node name="MotorJoint" type="Node2D" parent="PixelWorld" unique_id=2111141750]
+z_index = 5
+position = Vector2(452, 94)
+script = ExtResource("11_nwon6")
+body_b = NodePath("../Wheel")
+motor = 1
+motor_target = 3.0
+
+[node name="WeldA" type="Node2D" parent="PixelWorld" unique_id=124425430]
+position = Vector2(346.00003, 70)
+rotation = -0.21022502
+script = ExtResource("3_body")
+
+[node name="Shape" type="Node2D" parent="PixelWorld/WeldA" unique_id=72564709]
+visible = false
+script = ExtResource("4_shape")
+material_id = 3
+
+[node name="WeldB" type="Node2D" parent="PixelWorld" unique_id=189287394]
+position = Vector2(364.99997, 56)
+rotation = 0.4
+script = ExtResource("3_body")
+
+[node name="Shape" type="Node2D" parent="PixelWorld/WeldB" unique_id=33779444]
+visible = false
+script = ExtResource("4_shape")
+material_id = 3
+
+[node name="WeldJoint" type="Node2D" parent="PixelWorld" unique_id=2073185246]
+z_index = 5
+position = Vector2(361, 70)
+script = ExtResource("11_nwon6")
+kind = 2
+body_a = NodePath("../WeldA")
+body_b = NodePath("../WeldB")
+
+[node name="SliderCrate" type="Node2D" parent="PixelWorld" unique_id=1892654880]
+position = Vector2(257, 201)
+script = ExtResource("3_body")
+
+[node name="Shape" type="Node2D" parent="PixelWorld/SliderCrate" unique_id=1147189281]
+visible = false
+script = ExtResource("4_shape")
+material_id = 2
+
+[node name="SliderJoint" type="Node2D" parent="PixelWorld" unique_id=1971359818]
+z_index = 5
+position = Vector2(265, 210)
+script = ExtResource("11_nwon6")
+kind = 1
+body_b = NodePath("../SliderCrate")
+limits_enabled = true
+min_limit = -16.0
+max_limit = 16.0
+motor = 1
+motor_target = 1.0
+motor_max_force = 10.0
 
 [node name="UI" type="CanvasLayer" parent="." unique_id=2074847731]
 

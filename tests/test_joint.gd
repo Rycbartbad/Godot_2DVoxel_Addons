@@ -52,6 +52,8 @@ func _initialize() -> void:
 	_test_hinge_motor()
 	_test_slider()
 	_test_weld()
+	_test_overlap_no_contacts()
+	_test_grab_welded()
 	_test_rope()
 	_test_spring()
 	_test_remove_and_body_delete()
@@ -148,6 +150,105 @@ func _test_slider() -> void:
 	_check("限位挡住了滑动", j.movement() < 4.5, "movement=%.3f" % j.movement())
 
 
+## 重合体素 + 关节：默认**不生成接触**，否则接触求解器和关节会一直打架（抽搐）。
+##
+## ⚠️ 判据不能用"求解后的速度" —— 两股冲量在同一子步里互相抵消，速度看着是 0，
+##    而位置在一步步来回弹。要量**逐帧位移跳变**（见 diag_joint_overlap 的实测：
+##    互碰时 0.785 px/步、关节冲量 121280；不碰时 0.0000、冲量 0）。
+func _overlap_jump(contacts: bool) -> Array:
+	var world := _make_world()
+	world.gravity = Vector2.ZERO
+	var a := PBody.new()
+	a.position = Vector2(100, 100)
+	world.add_body(a, [_box_shape(16, 16)])
+	var b := PBody.new()
+	b.position = Vector2(108, 100)      # 与 a 重合 8 像素
+	world.add_body(b, [_box_shape(16, 16)])
+	var j: PJoint = world.add_weld(a, b, Vector2(108, 108))
+	j.contacts_enabled = contacts
+	var max_jump := 0.0
+	var max_contacts := 0
+	var pa := a.position
+	var pb := b.position
+	for i in 240:
+		world.step(1.0 / 60.0)
+		max_jump = maxf(max_jump, a.position.distance_to(pa) + b.position.distance_to(pb))
+		pa = a.position
+		pb = b.position
+		max_contacts = maxi(max_contacts, world.last_contacts)
+	return [max_jump, max_contacts]
+
+
+## 拖**焊接组件**：力控 + 正确的支点/惯量。
+##
+## ⚠️⚠️ 这条测试**曾经断言"组件不转"** —— 那是"按质心分配冲量、力矩为 0"的错误实现。
+##    甲方明确指出「转动的支点/惯量不太对」：抓一个点，物体本来就该**绕那个点**转。
+##    现在断言三件事：
+##      1. 焊接不被拉变形（中心距恒定）；
+##      2. 抓点跟得上（力控允许滞后，但必须有界 —— 不能"抓丢了"）；
+##      3. **重力力矩生效**：抓点偏在一侧时，组件必须转下去（钟摆）。
+func _grab_welded(grab_b: bool, offset: Vector2, steps: int) -> Array:
+	var world := _make_world()
+	var a := PBody.new()
+	a.position = Vector2(100, 240)
+	world.add_body(a, [_box_shape(16, 16)])
+	var b := PBody.new()
+	b.position = Vector2(120, 240)
+	world.add_body(b, [_box_shape(16, 16)])
+	world.add_weld(a, b, Vector2(116, 248))
+	var target: PBody = b if grab_b else a
+	var start: Vector2 = target.position + Vector2(8, 8) + offset
+	world.grab(target, start)
+	var ja := 0.0
+	var jb := 0.0
+	var max_d := 0.0
+	var min_d := 999.0
+	var max_err := 0.0
+	var ang0: float = a.position.angle_to_point(b.position)
+	var ang := 0.0
+	var pa: Vector2 = a.position
+	var pb: Vector2 = b.position
+	var drag := offset == Vector2.ZERO      # offset=0 时才是"拖动"，否则是"挂着看它垂"
+	for i in steps:
+		if drag:
+			world.set_grab_target(start + Vector2(2.0 * i, 0))     # 120 px/s
+		world.step(1.0 / 60.0)
+		ja = maxf(ja, a.position.distance_to(pa))
+		jb = maxf(jb, b.position.distance_to(pb))
+		var d: float = a.position.distance_to(b.position)
+		max_d = maxf(max_d, d)
+		min_d = minf(min_d, d)
+		var g0 = world.grabs[0]
+		max_err = maxf(max_err, g0.target.distance_to(g0.anchor_world()))
+		ang = rad_to_deg(absf(angle_difference(a.position.angle_to_point(b.position), ang0)))
+		pa = a.position
+		pb = b.position
+	return [ja, jb, max_d - min_d, max_err, ang]
+func _test_grab_welded() -> void:
+	print("[拖动焊接组件：力控 / 支点 / 重力力矩]")
+	for grab_b in [false, true]:
+		var r: Array = _grab_welded(grab_b, Vector2.ZERO, 300)
+		var who := "抓右边" if grab_b else "抓左边"
+		_check("%s：焊接处没被拉开" % who, r[2] < 0.01, "中心距波动 %.4f" % r[2])
+		# 力控允许滞后（这正是"重物要滞后"的手感），但不能抓丢。
+		_check("%s：抓点跟得上（滞后有界）" % who, r[3] < 60.0, "最大滞后 %.1f px" % r[3])
+	# 钟摆：抓点在组件左上方 40px -> 组件质心必须转下去（重力力矩生效）。
+	var p: Array = _grab_welded(false, Vector2(-40, -20), 480)
+	_check("重力力矩生效（挂起来会垂下去）", p[4] > 20.0, "转角 %.1f 度" % p[4])
+
+
+func _test_overlap_no_contacts() -> void:
+	print("[重合体素：关节默认不生成接触]")
+	_check("默认就是关（Box2D 的 collideConnected=false 同款默认）",
+		not PJoint.new().contacts_enabled)
+	var off: Array = _overlap_jump(false)
+	_check("不碰：不抖", off[0] < 0.01, "逐帧跳变=%.4f" % off[0])
+	_check("不碰：真的没有接触", off[1] == 0, "接触数=%d" % off[1])
+	var on: Array = _overlap_jump(true)
+	_check("打开后会打架（对照，证明判据抓得到）", on[0] > 0.1,
+		"逐帧跳变=%.4f 接触数=%d" % [on[0], on[1]])
+
+
 func _test_weld() -> void:
 	print("[weld: 焊接]")
 	var world := _make_world()
@@ -164,6 +265,24 @@ func _test_weld() -> void:
 	_check("焊接保持相对朝向（不会被拧正）", absf(rel1 - rel0) < 0.05, "rel0=%.3f rel1=%.3f" % [rel0, rel1])
 	_check("焊接点没散开", j.anchor_a_world().distance_to(j.anchor_b_world()) < 1.0,
 		"距离=%.3f" % j.anchor_a_world().distance_to(j.anchor_b_world()))
+	# ⚠️ 建关节时的"零位"必须用**刚体当前**的位姿（而不是 Rapier 那边的旧值）。
+	#    这条是加 demo 演示时踩出来的：add_body 之后改 rotation 再建焊接，
+	#    关节零位会错位（表现是"焊完自己转一下才停"）。
+	var world3 := _make_world()
+	var wa := _static_box(world3, Vector2(100, 100), 0.0)
+	var wb := PBody.new()
+	wb.position = Vector2(140, 100)
+	world3.add_body(wb, [_box_shape(16, 16)])
+	world3.step(1.0 / 60.0)    # 先跑一步：它有了 rapier_id，位姿也已经同步过
+	wb.rotation = 0.7          # 现在才转 —— 这一改动**还没**推给 Rapier
+	# （⚠️ 必须先跑一步：如果刚体是在同一子步里建的，_rp_create_missing 会带着
+	#   当前旋转建体，那条路本来就不会错 —— 测不到这个坑。第一版就是这么写的，
+	#   探针去掉修复后仍然全绿，等于白测。）
+	var j3: PJoint = world3.add_weld(wa, wb, Vector2(120, 105))
+	for i in 120:
+		world3.step(1.0 / 60.0)
+	_check("建关节时用的是当前位姿（不会被拧回 0）", absf(wrapf(wb.rotation - 0.7, -PI, PI)) < 0.05,
+		"rot=%.3f" % wb.rotation)
 
 
 func _test_rope() -> void:

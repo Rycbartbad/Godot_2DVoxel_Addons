@@ -30,6 +30,7 @@ pub struct World {
     /// 外部关节 id -> 记录。见 rb_joint_new。
     joints: HashMap<u32, JointRec>,
     next_joint_id: u32,
+
 }
 
 /// 一个关节在我们这边的记录（Rapier 侧只有句柄，类型得自己记 —— 限位/马达
@@ -642,6 +643,26 @@ pub extern "C" fn rb_joint_count(w: *mut World) -> i32 {
     w.ij.len() as i32
 }
 
+/// 两个**被关节连着**的刚体之间要不要生成接触。默认 **关**（0）。
+///
+/// 为什么默认关：关节和接触是**两个求解器**，目标相反 ——
+/// 关节要把两个刚体按创建时的相对位姿按住，接触要把重叠的体素推开。
+/// 于是"焊在一起但体素重合"的两个刚体会**一直抽搐**（实测：速度在 0~40 之间来回，
+/// 关节冲量几十倍于静止载荷）。关掉接触，关节才是唯一权威。
+///
+/// 这条和 Box2D 的 `collideConnected = false` 是同一个默认值；
+/// 确实需要"连在一起还互相碰"时再打开（Rapier 的窄相会查这个标志并跳过配对，
+/// 见 rapier 的 geometry/narrow_phase/pair_update.rs）。
+#[no_mangle]
+pub extern "C" fn rb_joint_set_contacts(w: *mut World, id: u32, enabled: i32) {
+    let Some(w) = (unsafe { wref(w) }) else { return };
+    let Some(rec) = w.joints.get(&id) else { return };
+    let handle = rec.handle;
+    if let Some(j) = w.ij.get_mut(handle, true) {
+        j.data.set_contacts_enabled(enabled != 0);
+    }
+}
+
 // ================= 碰撞层 / 掩码 =================
 
 /// 碰撞层（layer，位 0..31）与掩码（mask，位 0..31）—— 映射到 Rapier 的 InteractionGroups。
@@ -673,3 +694,42 @@ pub extern "C" fn rb_body_set_groups(w: *mut World, id: u32, layer: u32, mask: u
         w.colliders[c].set_collision_groups(groups);
     }
 }
+
+/// 设置刚体的**密度**（材质密度），并按新密度重算质量 / 惯量。
+///
+/// ⚠️⚠️ 这个函数修的是一个**静默的质量分叉**：
+///     GDScript 侧 `PBody.mass` 是按**材质密度**算的（`Σ density(material)`），
+///     而 Rapier 侧的碰撞体一直拿的是默认密度 **1.0** —— 两边质量差一个密度倍率，
+///     而且**不报任何错**。
+///
+///     后果不是"手感差一点"，而是所有按 mass 算出来的力全错：抓取的限力是
+///     `max_accel * mass * dt`。实测（密度 7.8 的金属、目标不动）：
+///     一步就把速度从 +9.9 打成 **-73.4**（8.4 倍过冲），随后在 ±280 之间来回，
+///     也就是甲方看到的"拖动焊接物体不断抽搐"。
+///
+/// ⚠️ 两步缺一不可：`Collider::set_density` 只改碰撞体，**不会**自动更新刚体的
+///     质量属性（Rapier 文档明说），必须再调 `recompute_mass_properties_from_colliders`。
+#[no_mangle]
+pub extern "C" fn rb_body_set_density(w: *mut World, id: u32, density: f64) {
+    let Some(w) = (unsafe { wref(w) }) else { return };
+    let Some(&h) = w.map.get(&id) else { return };
+    // 先收集再改：colliders() 借着 bodies，直接在循环里改 colliders 过不了借用检查。
+    let cols: Vec<ColliderHandle> = w.bodies[h].colliders().iter().copied().collect();
+    for c in cols {
+        w.colliders[c].set_density(density as Real);
+    }
+    if let Some(rb) = w.bodies.get_mut(h) {
+        rb.recompute_mass_properties_from_colliders(&w.colliders);
+    }
+}
+
+// ---- 抓取：这里**故意没有**任何 FFI ----
+//
+// ⚠️ 试过"鼠标关节"（运动学锚点刚体 + 两轴位置马达），已删除。原因是 Rapier 的马达
+//    只在**锁住的轴**上生效，而锁住的轴本身就是硬约束：
+//      · 锁住 LIN_X|LIN_Y + 马达 -> 跟踪误差恒为 0.0~0.36 px，等于**强制位移跟随**
+//        （甲方："不应该强制位移跟随鼠标，使用力控"）；
+//      · 放开轴（JointAxesMask::empty()）-> 马达完全不产生力，物体自由落体。
+//    抓取现在在 GDScript 侧做**力控**（src/physics/grab.gd：每子步一个受限的力），
+//    这里不需要新原语。
+

@@ -15,6 +15,12 @@ extends Node2D
 ##   X          = 切换材质
 ##   Shift+左键 = 绘制动态刚体（而不是地形）
 ##   R          = 重置    空格 = 暂停物理
+##   L          = 切换"碎块层"的掩码（碎块之间互撞 / 不互撞）
+##   M          = 在鼠标处生成幽灵方块（layer 0：穿过一切）
+##   D          = 调试叠加层开关（碰撞矩形/接触点/质心…，左上角自带图例）
+##
+## 关节（吊桥/弹簧/绳/马达轮/焊接/滑轨）与碎块层都在 scenes/demo.tscn 里 ——
+## 它们是**场景节点**（PixelJoint2D / PixelBody2D），编辑器里能选中、能调参数。
 
 const PBody := preload("res://src/physics/pbody.gd")
 const PWorld := preload("res://src/physics/pworld.gd")
@@ -58,6 +64,8 @@ var _shot_at := -1
 @onready var _world_node: Node2D = $PixelWorld
 @onready var camera: Camera2D = $Camera2D
 @onready var hud: Label = $UI/Hint
+## 调试叠加层（场景里 visible=false；D 键开关）
+@onready var _overlay: Node2D = get_node_or_null("PixelWorld/DebugOverlay")
 
 
 func _ready() -> void:
@@ -113,6 +121,51 @@ func _ready() -> void:
 #    地面就是"一个 768x100 的矩形"，不需要在 .tscn 里手写几十万个像素。
 #    （更复杂的关卡仍然可以在代码里生成后 add_body，两条路并存。）
 
+
+# ---------------------------------------------------------------- 掩码演示（行为）
+#
+# 关节与掩码的**结构**现在都在 scenes/demo.tscn 里（PixelJoint2D / PixelBody2D 节点），
+# 和关卡走同一条路：编辑器里能选中、能拖、能在 Inspector 里调参数。
+# 这里只留两件**节点表达不了**的事：
+#
+#   L = 切换"碎块层"的掩码（只碰地形 <-> 谁都碰）—— 掩码是个运行时开关；
+#   M = 生成一个幽灵方块（layer 0：穿过一切）—— 它一出生就掉出关卡，
+#       当场景节点摆着的话，打开场景的瞬间就没了。
+#
+# 哪些是演示碎块由**节点组** debris_demo 标记（写在场景里，编辑器里能看见），
+# 代码按组找 —— 不在代码里再维护一张名单。
+
+const GROUP_DEBRIS := "debris_demo"
+const LAYER_TERRAIN := 1     ## 场景里的地面/墙/箱子都在这一层
+
+var _debris_collide := false   ## 碎块当前是否互相碰撞
+
+
+func _debris_bodies() -> Array:
+	var out: Array = []
+	for n in get_tree().get_nodes_in_group(GROUP_DEBRIS):
+		if n.body != null:
+			out.append(n.body)
+	return out
+
+
+## L：切换碎块层的掩码。躺成一片的碎块会当场互相弹开 —— 掩码在干什么一眼可见。
+func _toggle_debris_collide() -> void:
+	_debris_collide = not _debris_collide
+	var mask := 0xFFFFFFFF if _debris_collide else LAYER_TERRAIN
+	for b in _debris_bodies():
+		b.collision_mask = mask
+
+
+## M：幽灵方块 —— layer = 0 表示"不在任何层"，它穿过一切（包括地面）后掉出关卡。
+func _spawn_ghost() -> void:
+	var s := PixelShape.new()
+	s.fill_rect(Rect2i(0, 0, 12, 12), 3)
+	var b := PBody.new()
+	b.position = get_global_mouse_position().floor()
+	b.collision_layer = 0          # 不在任何层：谁也碰不到它，它也碰不到谁
+	world.add_body(b, [s])
+	renderer.sync(b)
 
 # ---------------------------------------------------------------- 主循环
 
@@ -230,9 +283,10 @@ func _update_hud() -> void:
 	for b in world.bodies:
 		if not b.is_static:
 			rects += b.rects.size()
-	hud.text = "FPS %.0f | Body %d | 接触 %d | 碰撞矩形 %d | 笔刷 %.0f | 材质 %d | 体素 %sx%s | %s\n滚轮 笔刷大小   [ ] 微调   X 材质   - / = 体素大小   Ctrl+滚轮 视角缩放   Shift+左键 画刚体(松手生效)   Ctrl+左键 拖动   R 重置   空格 暂停" % [
+	hud.text = "FPS %.0f | Body %d | 接触 %d | 碰撞矩形 %d | 笔刷 %.0f | 材质 %d | 体素 %sx%s | %s\n滚轮 笔刷大小   [ ] 微调   X 材质   - / = 体素大小   Ctrl+滚轮 视角缩放   Shift+左键 画刚体(松手生效)   Ctrl+左键 拖动   R 重置   空格 暂停\nL 碎块互撞: %s   M 幽灵方块(鼠标处)   D 调试叠加层   关节 %d 个（关节与碎块层都在 demo.tscn 里）" % [
 		_fps, world.bodies.size(), world.last_contacts, rects, brush_radius, material_id,
-		String.num(PixelScale.get_scale(), 1), String.num(PixelScale.get_scale(), 1), mode]
+		String.num(PixelScale.get_scale(), 1), String.num(PixelScale.get_scale(), 1), mode,
+		"是" if _debris_collide else "否", world.joints.size()]
 
 
 # ---------------------------------------------------------------- 输入
@@ -302,6 +356,13 @@ func _unhandled_input(event: InputEvent) -> void:
 				_set_voxel_scale(3.0)
 			KEY_R:
 				get_tree().reload_current_scene()
+			KEY_D:
+				if _overlay != null:
+					_overlay.visible = not _overlay.visible
+			KEY_L:
+				_toggle_debris_collide()
+			KEY_M:
+				_spawn_ghost()
 			KEY_SPACE:
 				paused = not paused
 			KEY_F11:

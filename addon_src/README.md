@@ -198,6 +198,14 @@ core/               像素与破坏
   pixel_editor.gd   应用层编辑（笔画 -> 多个 Body）
   pixel_scale.gd    "一个体素在屏幕上多大"
 
+nodes/              节点层（像用 Godot 内置引擎一样用本引擎）
+  pixel_world.gd    ★ 世界容器：烘焙子节点、每帧推进一次物理
+  pixel_body_2d.gd  刚体（对标 RigidBody2D）：可拖动、可继承、带编辑器抓手
+  pixel_shape_2d.gd 形状子节点（对标 CollisionShape2D）：一个刚体可挂多个
+  pixel_joint_2d.gd 关节（节点位置 = 锚点 A；body_a/body_b 留空 = 静态世界）
+  pixel_sprite_2d.gd 渲染子节点（对标 Sprite2D）
+  pixel_material.gd 材质资源（颜色 + 密度 + 强度一份数据）
+
 render/             可选
   pixel_renderer.gd 每个 Body 一张 ImageTexture 的 Sprite2D
 

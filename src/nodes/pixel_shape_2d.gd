@@ -140,6 +140,12 @@ func get_shape() -> PixelShape:
 func invalidate_shape() -> void:
 	_cache_valid = false
 	queue_redraw()
+	# ⚠️ 还要让**父刚体**的抓手失效：抓手现在按"所有形状子节点的并集"算
+	#    （见 PixelBody2D._gizmo_aabb）。子节点改了尺寸而父体缓存不失效的话，
+	#    编辑器里会出现"精灵已经是新尺寸、抓手还是旧框"—— 又是一次静默分叉。
+	var pb := get_parent()
+	if pb != null and pb.has_method("invalidate_gizmo"):
+		pb.invalidate_gizmo()
 	if Engine.is_editor_hint():
 		var p := get_parent()
 		while p != null and not p.has_method("on_child_moved"):

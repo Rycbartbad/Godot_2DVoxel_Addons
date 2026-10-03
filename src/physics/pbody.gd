@@ -15,6 +15,14 @@ var linear_velocity := Vector2.ZERO
 var angular_velocity := 0.0
 
 var mass := 0.0
+## 材质的**平均密度**（= mass / 像素数）。
+##
+## ⚠️ 为什么要存它：Rapier 侧碰撞体默认密度是 1.0，而 GDScript 侧 mass 是按材质
+##    密度算的 —— 不把这个值推过去，两边质量就差一个密度倍率（金属 7.8 倍），
+##    所有按 mass 算的力（抓取限力等）全错。见 PWorld 里推 op 34 的那段。
+var density := 1.0
+## 推给 Rapier 的镜像（-1 = 未推送）
+var _rp_density := -1.0
 var inertia := 0.0
 var inv_mass := 0.0
 var inv_inertia := 0.0
@@ -355,16 +363,21 @@ func rebuild(shape_list: Array, density_of: Callable = Callable(),
 		inv_mass = 0.0
 		inv_inertia = 0.0
 		local_com = Vector2.ZERO
+		# 静态体不算质量（跳过逐像素扫描是实打实的收益），密度给默认值：
+		# 万一之后被 rb_body_set_type 变成动态体，Rapier 会按 1.0 算质量，而不是 0。
+		density = 1.0
 		refresh_com()
 		update_aabb()
 		return
 	var m_total := 0.0
 	var com := Vector2.ZERO
 	var inertia_c := 0.0
+	var n_px := 0
 	for s in shape_list:
 		var p: MassProps.Props = MassProps.compute(s, density_of)
 		m_total += p.mass
 		com += p.com * p.mass
+		n_px += p.pixel_count
 	var had_mass := m_total > 0.0
 	if had_mass:
 		com /= m_total
@@ -377,6 +390,9 @@ func rebuild(shape_list: Array, density_of: Callable = Callable(),
 			rects.append(rect)
 	mass = m_total
 	inertia = inertia_c
+	# 平均密度 = 质量 / 像素数（材质逐像素不同时取平均值：Rapier 的碰撞体密度是
+	# 均匀的，用平均值能让**总质量**精确对上，惯量分布的差异可以忽略）。
+	density = m_total / float(n_px) if n_px > 0 else 1.0
 	local_com = com if had_mass else Vector2.ZERO
 	if is_static:
 		inv_mass = 0.0

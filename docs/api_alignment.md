@@ -123,6 +123,8 @@
 | `IsJointBroken(joint)` | `PJoint.is_broken()` + `break_impulse` | + **自己判**：约束冲量超阈值就断（Rapier 没有断裂概念） |
 | `DetachJointFromShape(joint, shape)` | `PWorld.remove_joint(j)` / `PJoint.remove()` | ✓ 整条关节（没有「从某一侧解绑」的半边形式） |
 | `GetJointedBodies(joint)` | `PJoint.body_a / body_b`；`PWorld.joints_of(body)` | + |
+| `Body:SetMass` / `Body:SetDensity` | `PWorld.set_material_density(material, d)` -> `PBody.density`（平均密度）-> op 34 `rb_body_set_density` | + 按材质给密度，质量自动随破坏增减 |
+| （参考 API 没有这一项） | `PJoint.contacts_enabled` | + **默认 false**：被关节连着的两个刚体之间不生成接触（否则体素重合时会一直抽搐） |
 | `GetRopeNumberOfPoints / GetRopePointPosition / BreakRope` | — | ✗ 绳索**解算**（多段绳）没做：`add_rope` 是两点距离约束 |
 
 `Grab` 仍然在，但它已经**不是求解器约束** —— 它是每子步算一个限力的策略层

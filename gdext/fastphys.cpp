@@ -129,6 +129,9 @@ alignas(16) static unsigned char g_str_empty_hint[64];
 //
 // ---- 碰撞层 / 掩码 ----
 //  32  body_set_groups(u32 id, u32 layer, u32 mask)     （Rapier InteractionGroups）
+//  33  joint_set_contacts(u32 jid, i32 enabled)         0 = 两个被关节连着的刚体之间不生成接触
+//  34  body_set_density(u32 id, f64 density)             材质密度 -> Rapier 质量（不推就是两边质量分叉）
+//  （35~37 曾用于"鼠标关节"抓取，已删除 —— 见 rapier_bridge/src/lib.rs 的墓碑注释）
 
 typedef void *RPWorld;
 
@@ -170,6 +173,9 @@ struct RapierApi {
 	int32_t (*joint_impulse)(RPWorld, uint32_t, double *) = nullptr;
 	int32_t (*joint_count)(RPWorld) = nullptr;
 	void (*body_set_groups)(RPWorld, uint32_t, uint32_t, uint32_t) = nullptr;
+	void (*joint_set_contacts)(RPWorld, uint32_t, int32_t) = nullptr;
+	void (*body_set_density)(RPWorld, uint32_t, double) = nullptr;
+
 	bool tried = false;
 	bool ok = false;
 };
@@ -238,6 +244,9 @@ static bool load_rapier() {
 	RP_GET(joint_impulse, "rb_joint_impulse")
 	RP_GET(joint_count, "rb_joint_count")
 	RP_GET(body_set_groups, "rb_body_set_groups")
+	RP_GET(joint_set_contacts, "rb_joint_set_contacts")
+	RP_GET(body_set_density, "rb_body_set_density")
+
 #undef RP_GET
 	g_rap.ok = true;
 	printf("[RapierPhys] rapier_bridge.dll 已加载: %s\n", local.c_str());
@@ -382,6 +391,18 @@ static void run_rapier_cmd(RapierInstance *inst, const uint8_t *in, size_t in_n,
 				uint32_t layer = r.u32();
 				uint32_t mask = r.u32();
 				g_rap.body_set_groups(W, id, layer, mask);
+				break;
+			}
+			case 33: {
+				uint32_t jid = r.u32();
+				int32_t en = r.i32();
+				g_rap.joint_set_contacts(W, jid, en);
+				break;
+			}
+			case 34: {
+				uint32_t id = r.u32();
+				double dens = r.f64();
+				g_rap.body_set_density(W, id, dens);
 				break;
 			}
 			default:

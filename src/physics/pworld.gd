@@ -588,18 +588,30 @@ func _rp_create_missing() -> void:
 ##
 ## 休眠完全交给 Rapier（它的岛管理器），所以这里**不**调 _update_sleep / _wake_pass。
 ## 接触事件走单独的通道（见 _collect_contacts），这里不碰。
-func _substep_rapier(dt: float) -> void:
+## 确保 Rapier 扩展已实例化（懒加载）。
+##
+## ⚠️ 任何**可能在第一次 step 之前**发命令的路径都必须先调它。
+##    抓取就踩过这个坑：探针在 step 之前 grab()，报错是
+##    "Nonexistent function 'cmd' in base 'Nil'" —— 完全指不到"还没实例化"这个真因。
+func _rp_ensure() -> bool:
+	if _rp != null:
+		return true
+	_rp = ClassDB.instantiate("RapierPhys")
 	if _rp == null:
-		_rp = ClassDB.instantiate("RapierPhys")
-		if _rp == null:
-			# ⚠️ 这里必须**吵闹地**失败。扩展加载失败时 ClassDB.instantiate 返回 null，
-			#    而如果放任下去，报错会是 "Nonexistent function 'cmd' in base 'Nil'" ——
-			#    那句话完全指不到"扩展没加载"这个真因（实测排查了很久）。
-			push_error("RapierPhys 扩展不可用：gdext/fastphys.gdextension 没加载成功。" +
-				"物理无法运行。先确认 fastphys.dll 与 rapier_bridge.dll **两个都**存在且都是最新的" +
-				"（只重建一个会导致 load_rapier 失败），再跑 python tools/build_addon.py --verify。")
-			assert(false, "RapierPhys 扩展不可用")
-			return
+		# ⚠️ 这里必须**吵闹地**失败。扩展加载失败时 ClassDB.instantiate 返回 null，
+		#    而如果放任下去，报错会是 "Nonexistent function 'cmd' in base 'Nil'" ——
+		#    那句话完全指不到"扩展没加载"这个真因（实测排查了很久）。
+		push_error("RapierPhys 扩展不可用：gdext/fastphys.gdextension 没加载成功。" +
+			"物理无法运行。先确认 fastphys.dll 与 rapier_bridge.dll **两个都**存在且都是最新的" +
+			"（只重建一个会导致 load_rapier 失败），再跑 python tools/build_addon.py --verify。")
+		assert(false, "RapierPhys 扩展不可用")
+		return false
+	return true
+
+
+func _substep_rapier(dt: float) -> void:
+	if not _rp_ensure():
+		return
 	_rp_create_missing()
 	_rp_create_joints()
 	# ---- 抓取约束：必须在**推送之前**解 ----
@@ -607,14 +619,22 @@ func _substep_rapier(dt: float) -> void:
 	# 这样它改出来的速度能在**同一子步**里被 Rapier 的接触求解看到（否则会慢一帧）。
 	# 引擎那条路径是在求解迭代里解 10 次（约束更硬）；这里是每子步一次 —— 手感略软，
 	# 但限力 max_accel * mass * dt 仍然精确成立，这是"重物要滞后"的来源。
+	# ---- 抓取：必须在**推送之前**解 ----
+	#
+	# 这样它改出来的速度能在**同一子步**里被 Rapier 的接触求解看到（否则会慢一帧）。
+	# 力控：限力 max_accel * mass * dt 精确成立，这是"重物要滞后"的来源。
 	_rp_grabbed.clear()
 	for b: PBody in bodies:
 		b.grab_force = Vector2.ZERO
 		b.grab_torque = 0.0
 	for g in grabs:
+		# 每子步重取焊接组件：关节可能在上一子步断了（断裂阈值）或新建了。
+		g.bodies = weld_group(g.body) if not joints.is_empty() else [g.body]
 		g.apply(dt)
-		if g.body != null:
-			_rp_grabbed[g.body] = true
+		# ⚠️ 记的是**整个组件**：组件里除被抓那个以外的刚体也在被驱动，
+		#    漏掉它们的话 enforce_body_budget 可能把正在拖的刚体当成"闲置碎块"淘汰掉。
+		for p in g.bodies:
+			_rp_grabbed[p] = true
 	var t0 := Time.get_ticks_usec()
 	var cmds := PackedByteArray()
 	# 长度单位 / 最大线速度：只在第一次（或改了之后）推一次
@@ -684,6 +704,8 @@ func _substep_rapier(dt: float) -> void:
 			#    就会让那个刚体的层/掩码静默失效（子弹又开始打中它）。
 			b._rp_layer = -1
 			b._rp_mask = -1
+			# ⚠️ 同理：新碰撞体的密度也回到 Rapier 默认的 1.0，必须重推。
+			b._rp_density = -1.0
 		if b._rp_layer != b.collision_layer or b._rp_mask != b.collision_mask:
 			_rp_u8(cmds, 32)
 			_rp_u32(cmds, b.rapier_id)
@@ -691,6 +713,13 @@ func _substep_rapier(dt: float) -> void:
 			_rp_u32(cmds, b.collision_mask)
 			b._rp_layer = b.collision_layer
 			b._rp_mask = b.collision_mask
+		# 材质密度 -> Rapier 质量。不推的话两边质量差一个密度倍率，
+		# 抓取这类"按 mass 算力"的东西会过冲成振荡（见 rb_body_set_density 的墓碑注释）。
+		if b._rp_density != b.density:
+			_rp_u8(cmds, 34)
+			_rp_u32(cmds, b.rapier_id)
+			_rp_f64(cmds, b.density)
+			b._rp_density = b.density
 		if b.position.x != b._rp_x or b.position.y != b._rp_y or b.rotation != b._rp_rot:
 			_rp_u8(cmds, 6)
 			_rp_u32(cmds, b.rapier_id)
@@ -1462,8 +1491,10 @@ func fracture(body: PBody, damage, burst_speed: float = 40.0) -> Array:
 
 ## ---------- 抓取 ----------
 
-func grab(b: PBody, world_point: Vector2, accel: float = 2500.0) -> Grab:
-	## 同一个物体只允许一个抓取点；抓取会立刻唤醒它。
+func grab(b: PBody, world_point: Vector2, accel: float = 1500.0) -> Grab:
+	## 抓取：每子步一个**受限的力**（力控，不是强制位移）。见 grab.gd 的说明。
+	##
+	## accel = 力上限对应的加速度（默认 1500 ≈ 1.7g）。重物滞后、抓偏会转，都是设计意图。
 	release_grab()
 	if b == null or b.is_static:
 		return null
@@ -1491,7 +1522,41 @@ func is_grabbing() -> bool:
 	return not grabs.is_empty()
 
 
-## ---------- 关节 ----------
+## 这个刚体所在的**焊接组件**（含它自己；只收动态刚体）。
+##
+## 用途：抓取。力控的等效质量必须按**整个组件**算（见 grab.gd 文件头的坑 2），
+## 否则"按单体质量算的力"会把焊接处拽变形。
+##
+## ⚠️ 只走 **WELD**：焊接才是真正刚性的（"把两块拼成一块"）。铰链/滑轨允许相对运动，
+##    绳/弹簧更是软的 —— 把它们也算成"一个刚体"，拖绳子的手感会变成"整条链一起飞"。
+func weld_group(body: PBody) -> Array:
+	var out: Array = []
+	if body == null or body.is_static:
+		return out
+	var seen := {body: true}
+	var stack: Array = [body]
+	while not stack.is_empty():
+		var cur: PBody = stack.pop_back()
+		out.append(cur)
+		for j in joints:
+			if not j.active or j.kind != PJoint.WELD:
+				continue
+			var other = null
+			if j.body_a == cur:
+				other = j.body_b
+			elif j.body_b == cur:
+				other = j.body_a
+			else:
+				continue
+			if other == null or other.is_static:
+				continue
+			if not seen.has(other):
+				seen[other] = true
+				stack.append(other)
+	return out
+
+
+## ---------- 关节 ----------## ---------- 关节 ----------## ---------- 关节 ----------
 ##
 ## 五种关节都返回一个 PJoint（见 src/physics/joint.gd）；**b 传 null 表示接静态世界**。
 ## 求解在 Rapier 里（ImpulseJoint），这一层只负责"把参数翻译成命令流"，
@@ -1617,6 +1682,12 @@ func _joint_drop_silent(j) -> void:
 	j.world = null
 
 
+## ⚠️ 这里曾经有个 `weld_group()`（沿 WELD 关节 BFS 求焊接组件），
+##    因为抓取是"力控制器"、必须自己把组件质量算出来才不会过冲。
+##    抓取换成**鼠标关节**之后它就没有存在理由了：关节会把力通过焊接传下去，
+##    求解器自己知道整个组件有多重。**别再加回来** ——
+##    任何"脚本替求解器算等效质量"的做法都会和真实约束（软焊接）分叉。
+
 ## 连在这个刚体上的所有关节。
 func joints_of(body: PBody) -> Array:
 	var out: Array = []
@@ -1670,6 +1741,22 @@ func _rp_create_joints() -> void:
 			continue
 		if j.body_b != null and j.body_b.rapier_id <= 0:
 			continue
+		# ⚠️ 建关节**之前**必须把两端的位姿推过去。
+		#    Rapier 侧的关节零位是拿"它自己当前的刚体旋转"算出来的（见 rb_joint_new），
+		#    而刚体旋转是"变了才推"：调用方如果在 add_body 之后改了 rotation 再建关节，
+		#    Rapier 那边还是旧旋转 -> 关节零位错位，表现为"建完自己转一下才停"。
+		#    推一次很便宜（建关节是低频操作），换来"建关节时两端的位姿一定是准的"。
+		for body: PBody in [j.body_a, j.body_b]:
+			if body == null:
+				continue
+			_rp_u8(cmds, 6)
+			_rp_u32(cmds, body.rapier_id)
+			_rp_f64(cmds, body.position.x)
+			_rp_f64(cmds, body.position.y)
+			_rp_f64(cmds, body.rotation)
+			body._rp_x = body.position.x
+			body._rp_y = body.position.y
+			body._rp_rot = body.rotation
 		_rp_u8(cmds, 24)
 		_rp_i32(cmds, j.kind)
 		_rp_u32(cmds, 0 if j.body_a == null else j.body_a.rapier_id)
@@ -1718,6 +1805,13 @@ func _rp_push_joints(cmds: PackedByteArray) -> void:
 	for j in joints:
 		if j.rapier_id <= 0:
 			continue
+		# 接触开关：默认关（见 PJoint.contacts_enabled）。Rapier 侧默认是开，
+		# 所以第一子步一定会推一次。
+		if j.contacts_enabled != j._rp_contacts:
+			_rp_u8(cmds, 33)
+			_rp_u32(cmds, j.rapier_id)
+			_rp_i32(cmds, 1 if j.contacts_enabled else 0)
+			j._rp_contacts = j.contacts_enabled
 		if j.limits_enabled != j._rp_limits_on or j.min_limit != j._rp_min or j.max_limit != j._rp_max:
 			_rp_u8(cmds, 26)
 			_rp_u32(cmds, j.rapier_id)

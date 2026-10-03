@@ -62,6 +62,13 @@ var font_size_draw := 12.0
 
 
 func _ready() -> void:
+	# ⚠️ 必须画在**像素精灵之上**。
+	#    PixelRenderer 的 Sprite2D 是 PixelWorld.rebuild() 时**追加**进去的 ——
+	#    排在 DebugOverlay 后面，于是精灵把线盖住：1 px 宽的框有一半落在精灵里，
+	#    露在外面的只剩半个像素，实测**完全看不见**（第一版就踩了这个：
+	#    线宽从 6 px 改成 1 px 之后，截图里叠加层整个"消失"了）。
+	if z_index == 0:
+		z_index = 10
 	_resolve_world()
 	set_process(true)
 
@@ -109,6 +116,24 @@ func _resolve_world() -> void:
 
 
 
+## 屏幕 1 像素 = 多少**世界单位**。
+##
+## ⚠️ 叠加层画的是世界坐标，所以线宽/点半径不反算就会随取景缩放变粗：
+##    体素 3 px + 相机 zoom 6 时，1.0 世界单位的线宽 = **6 屏幕像素**。
+##    而 draw_rect/draw_polyline 的线是**以边界为中心**画的 —— 于是碰撞框
+##    看起来比像素图大一圈。实测（demo_shot.png）：墙的像素在 x=948..1667，
+##    叠加层外沿在 x=945..1670，正好各多 3 px = 半个线宽。
+##    结论：不是坐标错了，是**线太粗**。所有线宽都乘这个系数。
+func _screen_unit() -> float:
+	var cam := get_viewport().get_camera_2d()
+	if cam == null:
+		return 1.0        # 编辑器里没有相机 -> 用画布单位（和 Godot 自带抓手一致）
+	var z := cam.zoom
+	if z.x <= 0.0 or z.y <= 0.0:
+		return 1.0
+	return 1.0 / z.x
+
+
 ## 世界里的刚体（没有世界就返回空，编辑器里没摆 PixelPhysics 时不该报错）
 func _bodies() -> Array:
 	if world == null:
@@ -126,6 +151,7 @@ func _draw() -> void:
 
 	var bodies: Array = _bodies()
 	var font := ThemeDB.fallback_font
+	var u := _screen_unit()      # 线宽/点半径的换算（见 _screen_unit 的说明）
 
 	for b in bodies:
 		var col := obb_color
@@ -134,28 +160,28 @@ func _draw() -> void:
 
 		# ---- AABB / 扫掠 AABB ----
 		if show_aabbs:
-			draw_rect(b.aabb, aabb_color, false, 1.0)
+			draw_rect(b.aabb, aabb_color, false, u)
 		if show_swept_aabbs:
-			draw_rect(b.swept_aabb, swept_color, false, 1.0)
+			draw_rect(b.swept_aabb, swept_color, false, u)
 
 		# ---- 碰撞矩形（物理真正用的形状）----
 		if show_obbs:
 			for r: Rect2 in b.rects:
-				_draw_obb(b, r, col)
+				_draw_obb(b, r, col, u)
 
 		# ---- 质心 ----
 		if show_com and not b.is_static:
 			var c: Vector2 = b.com_world()
-			draw_line(c - Vector2(5, 0), c + Vector2(5, 0), com_color, 1.0)
-			draw_line(c - Vector2(0, 5), c + Vector2(0, 5), com_color, 1.0)
+			draw_line(c - Vector2(5, 0) * u, c + Vector2(5, 0) * u, com_color, u)
+			draw_line(c - Vector2(0, 5) * u, c + Vector2(0, 5) * u, com_color, u)
 
 		# ---- 速度矢量 ----
 		if show_velocity and not b.is_static:
 			var v: Vector2 = b.linear_velocity * velocity_scale
 			if v.length_squared() > 1.0:
 				var o: Vector2 = b.com_world()
-				draw_line(o, o + v, velocity_color, 2.0)
-				_draw_arrow_head(o + v, v.normalized(), velocity_color)
+				draw_line(o, o + v, velocity_color, 2.0 * u)
+				_draw_arrow_head(o + v, v.normalized(), velocity_color, u)
 
 		# ---- 角速度弧线（半径按角速度大小，正负用方向区分）----
 		if show_angular and not b.is_static and absf(b.angular_velocity) > 0.01:
@@ -163,7 +189,7 @@ func _draw() -> void:
 			var r2: float = clampf(8.0 + absf(b.angular_velocity) * 4.0, 8.0, 40.0)
 			var a0 := 0.0
 			var a1: float = clampf(b.angular_velocity * 0.5, -PI, PI)
-			draw_arc(o2, r2, a0, a1, 16, angular_color, 2.0)
+			draw_arc(o2, r2, a0, a1, 16, angular_color, 2.0 * u)
 
 		# ---- id ----
 		if show_ids:
@@ -174,34 +200,55 @@ func _draw() -> void:
 	if show_contacts:
 		for m in world.manifolds:
 			for p in m.points:
-				draw_circle(p.position, 2.5, contact_color)
+				draw_circle(p.position, 2.5 * u, contact_color)
 				draw_line(p.position, p.position + m.normal * contact_normal_len,
-					contact_color, 1.5)
+					contact_color, 1.5 * u)
 
-	# ---- 统计 ----
+	# ---- 统计（贴在屏幕左上角，跟着相机走）----
+	var frame := _screen_frame()
+	var y: float = frame["origin"].y
 	if show_stats:
-		_draw_stats(bodies, font)
+		_draw_stats(bodies, font, frame, y)
 
 
 ## 把一个局部矩形按刚体变换画成四边形（**不是**画轴对齐矩形 ——
 ## 刚体可以旋转，画 AABB 会骗人）。
-func _draw_obb(b, r: Rect2, col: Color) -> void:
+func _draw_obb(b, r: Rect2, col: Color, width := 1.0) -> void:
 	var pts := PackedVector2Array([
 		b.to_world(r.position),
 		b.to_world(r.position + Vector2(r.size.x, 0)),
 		b.to_world(r.position + r.size),
 		b.to_world(r.position + Vector2(0, r.size.y)),
 	])
-	draw_polyline(PackedVector2Array([pts[0], pts[1], pts[2], pts[3], pts[0]]), col, 1.0)
+	draw_polyline(PackedVector2Array([pts[0], pts[1], pts[2], pts[3], pts[0]]), col, width)
 
 
-func _draw_arrow_head(tip: Vector2, dir: Vector2, col: Color) -> void:
+func _draw_arrow_head(tip: Vector2, dir: Vector2, col: Color, width := 1.5) -> void:
 	var n := Vector2(-dir.y, dir.x)
-	draw_line(tip, tip - dir * 6.0 + n * 3.0, col, 1.5)
-	draw_line(tip, tip - dir * 6.0 - n * 3.0, col, 1.5)
+	var s := width / 1.5      # 箭头大小跟着线宽一起缩放（屏幕尺度恒定）
+	draw_line(tip, tip - dir * 6.0 * s + n * 3.0 * s, col, width)
+	draw_line(tip, tip - dir * 6.0 * s - n * 3.0 * s, col, width)
 
 
-func _draw_stats(bodies: Array, font: Font) -> void:
+## 屏幕左上角的锚点（**世界坐标**）与"屏幕 1 像素 = 多少世界单位"。
+##
+## ⚠️ _draw() 画的是世界坐标，直接写 (8,18) 会跑到镜头外面去
+##    （表现是"叠加层在画但看不到字"）。所以要跟着相机走：
+##    视口尺寸 ÷ 相机 zoom = 可视区大小，取它的左上角再加一点边距。
+func _screen_frame() -> Dictionary:
+	var u := _screen_unit()
+	var origin := Vector2(8, 18) * u
+	var cam := get_viewport().get_camera_2d()
+	if cam != null:
+		var z := cam.zoom
+		if z.x > 0.0 and z.y > 0.0:
+			origin = cam.get_screen_center_position() - get_viewport_rect().size * 0.5 / z \
+				+ Vector2(8, 18) * u
+	return {"origin": origin, "u": u}
+
+
+## 左上角统计。返回**画完之后**的 y（图例接着往下排）。
+func _draw_stats(bodies: Array, font: Font, frame: Dictionary, y0: float) -> float:
 	var awake := 0
 	var dyn := 0
 	for b in bodies:
@@ -219,22 +266,12 @@ func _draw_stats(bodies: Array, font: Font) -> void:
 			world.total_angular_momentum(world.center_of_mass_world()),
 			world.total_kinetic_energy()],
 	])
-	# ⚠️ _draw() 画的是**世界坐标**，直接写 (8,18) 会跑到镜头外面去
-	#    （表现是"叠加层在画但看不到字"）。要跟着相机走：
-	#    取视口尺寸 ÷ 相机 zoom 得到"屏幕上 1 像素 = 多少世界单位"，
-	#    再把文字放在相机可视区的左上角。
-	var origin := Vector2(8, 18)
-	var z := Vector2.ONE
-	var cam := get_viewport().get_camera_2d()
-	if cam != null:
-		z = cam.zoom
-		if z.x <= 0.0 or z.y <= 0.0:
-			z = Vector2.ONE
-		var vs: Vector2 = get_viewport_rect().size
-		origin = cam.get_screen_center_position() - vs * 0.5 / z + Vector2(8, 18) / z
-	font_size_draw = maxf(1.0, float(font_size) / maxf(0.001, z.y))
-	var y := origin.y
+	var u: float = frame["u"]
+	var origin: Vector2 = frame["origin"]
+	var size := maxf(1.0, font_size * u)
+	var y := y0
 	for s in lines:
 		draw_string(font, Vector2(origin.x, y), s, HORIZONTAL_ALIGNMENT_LEFT, -1,
-			int(font_size_draw), stats_color)
-		y += font_size_draw + 3.0 / maxf(0.001, z.y)
+			int(size), stats_color)
+		y += size + 3.0 * u
+	return y

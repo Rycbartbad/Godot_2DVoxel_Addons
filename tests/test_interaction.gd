@@ -35,6 +35,7 @@ func _initialize() -> void:
 	_test_erase_removes_body()
 	_test_grab_follows_target()
 	_test_grab_rejects_static()
+	_test_grab_heavy_material()
 	_test_grab_prevents_sleep()
 	print("=== %d passed, %d failed ===" % [_pass, _fail])
 	quit(1 if _fail > 0 else 0)
@@ -201,6 +202,36 @@ func _test_grab_follows_target() -> void:
 	for i in 10:
 		world.step(1.0 / 60.0)
 	_check("松手后继续飞出", box.com_world().x - x0 > 20.0, "dx=%.1f" % (box.com_world().x - x0))
+
+
+## ⚠️⚠️ 材质密度必须**真的传到 Rapier**，否则抓取会过冲成振荡。
+##
+## 病灶：GDScript 侧 `PBody.mass = Σ density(material)`（金属 7.8），而 Rapier 侧
+## 碰撞体一直拿的是默认密度 **1.0** —— 两边质量差一个密度倍率，且**不报任何错**。
+## 抓取的限力是 `max_accel * mass * dt`：按 7.8 倍算出来的力打在 1/7.8 的质量上，
+## 实测一步就把速度从 +9.9 打成 **-73.4**（8.4 倍过冲），目标不动也一直抖 ——
+## 甲方原话「拖动焊接物体还是会抽搐」。
+##
+## 判据：重材质被抓、目标不动 -> 速度必须收敛到 ~0（修之前是 84~173 px/s）。
+func _test_grab_heavy_material() -> void:
+	print("[材质密度 -> Rapier 质量]")
+	var world := PWorld.new()
+	world.gravity = Vector2(0, 900)
+	world.set_material_density(3, 7.8)                 # 金属
+	var heavy := PBody.new()
+	heavy.position = Vector2(100, 100)
+	world.add_body(heavy, [_block(16, 16, 3)])
+	_check("质量按材质密度算", absf(heavy.mass - 256.0 * 7.8) < 0.01, "mass=%.1f" % heavy.mass)
+	_check("平均密度算出来了", absf(heavy.density - 7.8) < 0.001, "density=%.3f" % heavy.density)
+	var hold: Vector2 = heavy.position + Vector2(8, 8)
+	world.grab(heavy, hold)
+	var vmax := 0.0
+	for i in 180:
+		world.set_grab_target(hold)
+		world.step(1.0 / 60.0)
+		if i >= 30:
+			vmax = maxf(vmax, heavy.linear_velocity.length())
+	_check("目标不动 -> 收敛不过冲", vmax < 1.0, "最大速度 %.3f" % vmax)
 
 
 func _test_grab_rejects_static() -> void:
