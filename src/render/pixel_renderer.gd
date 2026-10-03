@@ -46,6 +46,16 @@ var _warned_material := false
 ## body.id -> Image（**持久**，供分块增量重绘）。
 ## 以前每次重建都是新建一张 Image，所以"只重画脏块"无处落脚。
 var _images := {}
+## body.id -> Node2D（只持有 body 的 transform，不再自己带贴图）
+var _tiles := {}
+## body.id -> { 块键 -> ImageTexture }
+var _tile_tex := {}
+## body.id -> { 块键 -> Image }（源图，与 _tile_tex 一一对应）
+##
+## ⚠️ 为什么留一份 Image：**headless 下 ImageTexture.get_image() 拿不回图像**
+##    （没有渲染服务器）。测试和调试要逐像素读回，只能靠这份源图。
+##    这也是"读回验证"能在无头环境跑起来的前提。
+var _tile_img := {}
 
 ## 逐像素着色（边沿压暗 + 顶面提亮 + 色调扰动）。见 PixelShading 的说明。
 ##
@@ -107,6 +117,13 @@ func forget(body_id: int) -> void:
 	_bounds.erase(body_id)
 	_rev.erase(body_id)
 	_images.erase(body_id)
+	for key in (_tiles.get(body_id, {}) as Dictionary):
+		var sp: Sprite2D = (_tiles[body_id] as Dictionary)[key]
+		if sp != null:
+			sp.queue_free()
+	_tiles.erase(body_id)
+	_tile_tex.erase(body_id)
+	_tile_img.erase(body_id)
 
 ## 改一种材质的颜色（会自动扩容；id 0 忽略）。
 func set_material_color(material: int, color: Color) -> void:
@@ -131,13 +148,12 @@ func sync(body) -> void:
 	if aabb.size.x <= 0 or aabb.size.y <= 0:
 		forget(body.id)
 		return
-	var node: Sprite2D = _nodes.get(body.id)
-	if node == null:
-		node = Sprite2D.new()
-		node.centered = false
-		node.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-		add_child(node)
-		_nodes[body.id] = node
+	var holder: Node2D = _nodes.get(body.id)
+	if holder == null:
+		holder = Node2D.new()
+		holder.name = "Body%d" % body.id
+		add_child(holder)
+		_nodes[body.id] = holder
 		_bounds[body.id] = Rect2i()
 	# 🔥 只在**内容真的变了**时才重建贴图。
 	#
@@ -164,40 +180,86 @@ func sync(body) -> void:
 	#    mark_dirty_range 标出来的那一小块，blit 进持久 Image，再 tex.update。
 	#
 	#    擦除地面时：整张重建 ~44 ms，而伤害只碰到 2.4% 的块。
+	#
+	# 🔥🔥 每块**一张独立贴图**（"1 个 Node2D + N 个 Sprite2D"）。
+	#
+	# ⚠️ 为什么不能停在"整张一张贴图 + blit 脏块"：
+	#    CPU 光栅化确实只剩 2.4% 了，但 tex.update(img) 仍然要**上传整张**
+	#    768x100 贴图（307 KB），实测还剩 ~30 ms —— 瓶颈从 CPU 挪到了 GPU 上传。
+	#    拆成每块一张之后，update 只碰脏块那一张（64x64 = 16 KB）。
+	#
+	# ⚠️ 块格对齐到**局部像素空间的 64 的倍数**，不是对齐到 aabb ——
+	#    否则 aabb 一变所有块的边界跟着挪，缓存全部失效。
 	var rev := _content_revision(body)
 	var size_changed: bool = _bounds.get(body.id, Rect2i()) != aabb
 	var content_changed: bool = _rev.get(body.id, -1) != rev
+	var dirty := Rect2i()
+	if content_changed and not size_changed:
+		dirty = _take_dirty_rect(body, aabb)
 	if size_changed:
-		# 外接盒变了 -> 贴图尺寸跟着变，只能整张重建（碎片分裂走这条）
 		_bounds[body.id] = aabb
-		_rev[body.id] = rev
-		_textures.erase(body.id)
 		_clear_all_dirty(body)
-		node.texture = _build_texture(body, aabb)
-	elif content_changed:
+	if content_changed or size_changed:
 		_rev[body.id] = rev
-		var reg := _take_dirty_rect(body, aabb)
-		var img: Image = _images.get(body.id)
-		var tex: ImageTexture = _textures.get(body.id)
-		if reg.size.x <= 0 or img == null or tex == null:
-			# ⚠️ 保守回退：没有块级脏信息（例如 touch() 走的原生路径），
-			#    或者贴图还没建过。宁可多画，不能少画 ——
-			#    少画的症状是"右键擦掉了像素，画面上却还在"。
-			_textures.erase(body.id)
-			node.texture = _build_texture(body, aabb)
-		else:
-			img.blit_rect(_build_region_image(body.shapes, aabb, reg),
-				Rect2i(Vector2i.ZERO, reg.size), reg.position)
-			tex.update(img)
-			node.texture = tex
-	else:
-		var t: ImageTexture = _textures.get(body.id)
-		if t != null:
-			node.texture = t
-		else:
-			_rev[body.id] = rev
-			node.texture = _build_texture(body, aabb)
-	node.offset = Vector2(aabb.position)
+	var tiles: Dictionary = _tiles.get(body.id, {})
+	var tts: Dictionary = _tile_tex.get(body.id, {})
+	var tis: Dictionary = _tile_img.get(body.id, {})
+	if _tiles.get(body.id) == null:
+		_tiles[body.id] = tiles
+		_tile_tex[body.id] = tts
+		_tile_img[body.id] = tis
+	# 没有块级脏信息（touch() 路径）、尺寸变了、或还没建过 -> 全部块重建
+	var rebuild_all: bool = size_changed or tiles.is_empty() 			or (content_changed and dirty.size.x <= 0)
+	if content_changed or size_changed:
+		var live := {}
+		var x0 := aabb.position.x >> 6
+		var y0 := aabb.position.y >> 6
+		var x1 := (aabb.position.x + aabb.size.x - 1) >> 6
+		var y1 := (aabb.position.y + aabb.size.y - 1) >> 6
+		for ty in range(y0, y1 + 1):
+			for tx in range(x0, x1 + 1):
+				# ⚠️ 键用 Vector2i，**不要**用 (tx<<32)^ty 这种 64 位打包 ——
+				#    实测那个表达式把 ty 那一半吃成了 0（键变成 0, 1<<32, 2<<32...），
+				#    于是查表永远不命中、贴图全查不到，而画面"看起来"是对的。
+				var key := Vector2i(tx, ty)
+				live[key] = true
+				var rx := maxi(tx << 6, aabb.position.x)
+				var ry := maxi(ty << 6, aabb.position.y)
+				var rx2 := mini((tx << 6) + 64, aabb.position.x + aabb.size.x)
+				var ry2 := mini((ty << 6) + 64, aabb.position.y + aabb.size.y)
+				if rx2 <= rx or ry2 <= ry:
+					continue
+				var tr := Rect2i(rx - aabb.position.x, ry - aabb.position.y, rx2 - rx, ry2 - ry)
+				# ⚠️ Rect2i.intersects() 只有一个参数（include_borders 是 Rect2 的）——
+				#    传两个会编译失败，而且报错指向"依赖它的脚本"，不指向这里。
+				if not rebuild_all and not dirty.intersects(tr):
+					continue
+				var img := _build_region_image(body.shapes, aabb, tr)
+				tis[key] = img
+				var tex: ImageTexture = tts.get(key)
+				var sp: Sprite2D = tiles.get(key)
+				if tex == null or tex.get_width() != tr.size.x or tex.get_height() != tr.size.y:
+					tex = ImageTexture.create_from_image(img)
+					tts[key] = tex
+					if sp == null:
+						sp = Sprite2D.new()
+						sp.centered = false
+						sp.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+						holder.add_child(sp)
+						tiles[key] = sp
+					sp.texture = tex
+					sp.offset = Vector2(tx << 6, ty << 6)
+				else:
+					tex.update(img)
+		# 回收已经不在 aabb 里的块（形状被削小 / 分裂）
+		for key in tiles.keys():
+			if not live.has(key):
+				var sp2: Sprite2D = tiles[key]
+				if sp2 != null:
+					sp2.queue_free()
+				tiles.erase(key)
+				tts.erase(key)
+				tis.erase(key)
 	# 贴图是 1 纹素 = 1 体素；靠节点缩放把每个体素放大成"大块像素"。
 	# 最近邻采样（TEXTURE_FILTER_NEAREST）保证放大后依然是硬边方块，不会糊。
 	# 这里**不做任何缩放**：1 个体素 = 1 个世界单位，渲染与物理共用同一坐标系。
@@ -206,7 +268,7 @@ func sync(body) -> void:
 	# 视觉上物体整个扎进地面，而物理检测却说只嵌入了 0.6 像素。
 	var cs := cos(body.rotation)
 	var sn := sin(body.rotation)
-	node.transform = Transform2D(Vector2(cs, sn), Vector2(-sn, cs), body.position)
+	holder.transform = Transform2D(Vector2(cs, sn), Vector2(-sn, cs), body.position)
 
 static func _local_bounds(body) -> Rect2i:
 	var box := Rect2i()
@@ -318,6 +380,15 @@ func _build_region_image(shapes: Array, aabb: Rect2i, region: Rect2i) -> Image:
 					(int(col.r * 255.0)) | (int(col.g * 255.0) << 8)
 					| (int(col.b * 255.0) << 16) | (255 << 24))
 	return Image.create_from_data(w, h, false, Image.FORMAT_RGBA8, data)
+
+
+## 供测试 / 调试：读回某个**局部像素点**所在的块贴图（块内坐标另算）。
+func tile_image_at(body_id: int, local_x: int, local_y: int) -> Image:
+	var tiles: Dictionary = _tiles.get(body_id, {})
+	var key := Vector2i(local_x >> 6, local_y >> 6)
+	if not tiles.has(key):
+		return null
+	return (_tile_img.get(body_id, {}) as Dictionary).get(key)
 
 
 ## 全量重建之后把脏集合清掉 —— 那些块已经画过了。
