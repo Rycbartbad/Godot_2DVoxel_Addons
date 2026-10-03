@@ -42,8 +42,23 @@ const PixelRenderer := preload("res://addons/pixel_destruction/render/pixel_rend
 const Query := preload("res://addons/pixel_destruction/physics/query.gd")
 const ShapeOps := preload("res://addons/pixel_destruction/core/shape_ops.gd")
 
-## 世界（想直接调底层接口时用它，但优先用门面的方法）
-var world: PWorld
+## 世界（想直接调底层接口时用它，但优先用门面的方法）。
+##
+## ⚠️ **故意不写类型注解**（不写 `var world: PWorld`）。原因是 addon 会**自带一份**
+##    引擎脚本的副本：`addons/pixel_destruction/physics/pworld.gd`。
+##    而在开发仓库里 `src/physics/pworld.gd` 同时存在 —— 两份是**不同的 GDScript
+##    资源**，Godot 按脚本身份做类型检查，于是
+##        f.world = pixel_world_node.world
+##    会报 `Trying to assign value of type 'pworld.gd' to a variable of type 'pworld.gd'`
+##    （两边名字一样、报错却看不出所以然）。
+##
+##    这正是"节点版和门面版是两个并列前端"的底层原因：它们的对象互不认。
+##    去掉注解后，跨边界的赋值靠**鸭子类型**通过 —— 两份副本的结构本来就逐字相同
+##    （addon 就是 src 的拷贝），所以行为一致。
+##
+##    纯 addon 项目里两边都用同一份副本，本来就没这个问题；
+##    但开发仓库里两套并存，这条边界必须容忍它。
+var world = null
 
 ## 加进场景树后是否自动 _physics_process
 var auto_step := true
@@ -53,11 +68,67 @@ var auto_render := true
 var _palette: Array = [Color(0, 0, 0, 0)]
 var _renderer: Node2D = null
 var _accum := 0.0
+## 接管来的世界节点（见 attach_to）。为 null 表示世界是本门面自己建的。
+var _world_node = null
 
 
 func _init() -> void:
 	world = PWorld.new()
 	Query.attach(world)          # 查询是模块级的，建世界时挂上
+
+
+## 接管一个**已经存在的**世界（典型来源：场景里的 PixelWorld 节点）。
+##
+## ⚠️ 为什么需要它：PixelWorld（节点版）和 PixelPhysics（门面版）原本是
+##    两个**并列**的前端，各自 PWorld.new() 一个世界 —— 于是编辑器里摆出来的
+##    关卡和代码里 spawn 出来的刚体活在两个世界里：互相看不见、也不碰撞。
+##    这个方法让门面**接管节点的世界**，两个前端共用一个世界。
+##
+##    用法：
+##        var pw := PixelPhysics.new()
+##        add_child(pw)                  # 可选；不加进树就得自己调 step()
+##        pw.attach_to($PixelWorld)      # 场景里那个节点
+##        pw.spawn_rect(...)             # 加进去的就是**同一个**世界
+##
+## ⚠️ 接管后会**关掉本门面的 auto_step**：世界由 PixelWorld 节点驱动。
+##    两边都 step 会让物理一帧推进两次（而且各自维护累加器，时间尺度也会错）。
+func attach_to(world_node) -> void:
+	if world_node == null:
+		push_error("attach_to: 传进来的世界节点是 null")
+		return
+	# 节点可能还没 _ready（刚 instantiate、还没进树）—— 先让它把世界建出来
+	if world_node.world == null and world_node.has_method("rebuild"):
+		world_node.rebuild()
+	if world_node.world == null:
+		push_error("attach_to: 这个节点里没有 world —— 它是 PixelWorld 吗？")
+		return
+	world = world_node.world
+	_world_node = world_node
+	Query.attach(world)
+	# 渲染层也必须跟着接管：节点自己已经有一个渲染器，门面再建第二个的话，
+	# 同一个刚体会被**画两遍**（两份精灵重叠，半透明时尤其明显）。
+	_renderer = world_node.renderer
+	if _renderer != null and world_node.has_method("palette_for_render"):
+		_palette = world_node.palette_for_render()
+	# ⚠️ 两个 auto 都要关：世界由节点驱动。
+	#    · auto_step  —— 两边都 step 会让物理一帧推进两次（累加器还各自一份）
+	#    · auto_render —— PixelWorld._physics_process 每帧会给世界里的**所有**刚体
+	#      同步渲染器（含门面 spawn 出来的），门面再同步一遍是白做。
+	auto_step = false
+	auto_render = false
+	_accum = 0.0
+
+
+## 解除接管，回到"门面自己持有一个世界"的状态。
+func detach() -> void:
+	if _world_node == null:
+		return
+	_world_node = null
+	_renderer = null
+	world = PWorld.new()
+	Query.attach(world)
+	auto_step = true
+	_accum = 0.0
 
 
 ## 编辑器里是否自动重绘。构建世界的脚本（@tool）在编辑器里摆好刚体之后，
@@ -115,11 +186,10 @@ func configure(opts: Dictionary) -> void:
 		world.sleeping_enabled = bool(opts["sleeping"])
 	if opts.has("terminal_speed"):
 		world.terminal_speed = opts["terminal_speed"]
-	if opts.has("native"):
-		var on := bool(opts["native"])
-		world.use_native_solve = on
-		world.use_native_broadphase = on
-		world.use_native_collide = on
+	# ⚠️ 这里以前有 opts["native"] -> world.use_native_solve / use_native_broadphase
+	#    / use_native_collide。那些开关在"只保留 Rapier"时删掉了，但这几行留了下来
+	#    —— 一旦有人传 native 就会报 "Invalid assignment ... on a base object"。
+	#    现在物理只有一条路（Rapier），没有可选项。
 	if opts.has("auto_render"):
 		auto_render = bool(opts["auto_render"])
 
@@ -374,7 +444,7 @@ func explode(center: Vector2, radius: float, power: float,
 
 ## 只改颜色不破坏（世界坐标圆）。返回改动的像素数。
 func paint_circle(center: Vector2, radius: float, material: int) -> int:
-	var n := world.paint_circle(center, radius, material)
+	var n: int = world.paint_circle(center, radius, material)
 	if n > 0:
 		resync()
 	return n
@@ -563,7 +633,7 @@ func total_momentum() -> Vector2:
 
 
 func total_angular_momentum(about: Vector2 = Vector2.INF) -> float:
-	var p := world.center_of_mass_world() if about == Vector2.INF else about
+	var p: Vector2 = world.center_of_mass_world() if about == Vector2.INF else about
 	return world.total_angular_momentum(p)
 
 

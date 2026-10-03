@@ -127,17 +127,9 @@ func rebuild() -> void:
 	for c in get_children():
 		if not (c is PixelBody2D):
 			continue
-		var node := c as PixelBody2D
-		# ⚠️ 用 collect_shapes() 而不是 build_shape()：
-		#    一个刚体可以挂**多个形状子节点**（就像多个 CollisionShape2D），
-		#    也可以一个都不挂、退回自身的内置形状。
-		var shapes := node.collect_shapes()
-		if shapes.is_empty():
-			continue
-		# 造 body（配置位置/速度）与「加进世界」是两步，这里一起做完
-		world.add_body(node.bake(), shapes, dens_call)
-		_body_nodes.append(node)
-		n += 1
+		# 造 body（配置位置/速度）与「加进世界」是两步，bake_node 一起做完
+		if bake_node(c as PixelBody2D) != null:
+			n += 1
 	if auto_render:
 		# ⚠️ 必须先清空再重建：rebuild 会造出**新的 body.id**，
 		#    而渲染器按 id 索引贴图 —— 不清的话旧贴图会留在原地变成幽灵
@@ -155,6 +147,61 @@ func rebuild() -> void:
 	_sync_overlays()
 	if log_bake:
 		print("[PixelWorld] 烘焙 %d 个刚体（场景节点 -> RefCounted，之后热循环不碰 Node）" % n)
+
+
+## 把一个 PixelBody2D 子节点烘焙进**当前世界**，返回造出来的 PBody。
+##
+## ⚠️ 这是 rebuild() 的**增量版**，存在的理由是 rebuild() 太粗暴：
+##    它 PWorld.new() 造一个**全新的世界** —— 运行时状态（已经破坏掉的像素、
+##    正在飞的碎块、抓取）全部丢失，所以上面的注释写着"运行时不建议调"。
+##    但"画完立刻固化出一个刚体"这类需求，必须能在**运行时**往世界里加东西。
+##
+## 节点没有形状时返回 null（跳过，与 rebuild 的行为一致）。
+func bake_node(node: PixelBody2D) -> PBody:
+	if world == null:
+		rebuild()
+	# ⚠️ 用 collect_shapes() 而不是 build_shape()：
+	#    一个刚体可以挂**多个形状子节点**（就像多个 CollisionShape2D），
+	#    也可以一个都不挂、退回自身的内置形状。
+	var shapes := node.collect_shapes()
+	if shapes.is_empty():
+		return null
+	var b: PBody = world.add_body(node.bake(), shapes, Callable(self, "_density_of"))
+	# ⚠️ _body_nodes 与 world.bodies **按下标一一对应**（rebuild 末尾和
+	#    has_own_sprite 的过滤都依赖这个不变量）。两边必须同时 append/remove_at。
+	_body_nodes.append(node)
+	if auto_render and renderer != null and not has_own_sprite(node):
+		renderer.sync(b)
+	_sync_overlays()
+	return b
+
+
+## 运行时把一个 PixelBody2D 加进**活着的世界**：不重建、不丢破坏状态。
+##
+## 与 rebuild() 的区别就是这一点 —— 这是"节点版"和"门面版"能共存的关键：
+## 节点负责**编辑器里摆出来的**部分，运行时新增的部分走这里或门面的 spawn_*，
+## 两者落在**同一个 world** 上。
+func add_body_node(node: PixelBody2D) -> PBody:
+	if world == null:
+		rebuild()
+	var i := _body_nodes.find(node)
+	if i >= 0:
+		return world.bodies[i] as PBody      # 已经烘焙过了，幂等
+	return bake_node(node)
+
+
+## 把一个烘焙过的子节点从世界里摘掉（同样是增量，不重建）。
+func remove_body_node(node: PixelBody2D) -> bool:
+	var i := _body_nodes.find(node)
+	if i < 0:
+		return false
+	_body_nodes.remove_at(i)
+	if i < world.bodies.size():
+		world.remove_body(world.bodies[i])
+	if renderer != null:
+		renderer.prune(_live_ids())
+	_sync_overlays()
+	return true
 
 
 ## 供 PixelSprite2D 取用的调色板（保证与物理层同源）。

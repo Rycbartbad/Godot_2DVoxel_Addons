@@ -75,20 +75,38 @@ def main() -> int:
     # 一旦把 src/ 的 .uid 复制过来，Godot 4.4+ 会报
     #   "UID duplicate detected between res://src/... and res://addons/..."
     # 并且**编辑器直接打不开**。这条闸门就是防它复发的。
-    src_uids = {}
-    for root, _dirs, files in os.walk(SRC):
+    #
+    # ⚠️ 原来这里只拿 src/ 当对照物 —— 于是漏掉了另一半：**addon_src/ 也有 .uid**
+    #    （模板拷贝照抄进来的），重复的是 addon_src 那份，src/ 里根本没有。
+    #    实测漏掉 3 对（pixel_physics.gd + examples/ 两个），症状是双击
+    #    project.godot 一闪就没。只查一个目录的闸门等于没有闸门。
+    #
+    #    现在的判据是**全仓库唯一性**：把 OUT 之外（.godot/.git 除外）所有 .uid
+    #    收进一张表，OUT 里的任何一个撞上就是错误。这样不管重复来自 src/、
+    #    addon_src/ 还是以后新加的第三个目录，都会被抓住。
+    repo_uids = {}
+    for root, dirs, files in os.walk(ROOT):
+        dirs[:] = [d for d in dirs
+                   if d not in (".git", ".godot") and os.path.join(root, d) != OUT]
         for name in files:
-            if name.endswith(".uid"):
-                with open(os.path.join(root, name), encoding="utf-8") as f:
-                    src_uids[f.read().strip()] = name
+            if not name.endswith(".uid"):
+                continue
+            fp = os.path.join(root, name)
+            with open(fp, encoding="utf-8") as f:
+                v = f.read().strip()
+            repo_uids.setdefault(v, []).append(os.path.relpath(fp, ROOT).replace(os.sep, "/"))
     dup = []
     for root, _dirs, files in os.walk(OUT):
         for name in files:
-            if name.endswith(".uid"):
-                with open(os.path.join(root, name), encoding="utf-8") as f:
-                    v = f.read().strip()
-                if v in src_uids:
-                    dup.append("%s 与 src/ 的 %s 重复" % (name, src_uids[v]))
+            if not name.endswith(".uid"):
+                continue
+            fp = os.path.join(root, name)
+            with open(fp, encoding="utf-8") as f:
+                v = f.read().strip()
+            if v in repo_uids:
+                dup.append("%s 与 %s 重复（%s）"
+                           % (os.path.relpath(fp, ROOT).replace(os.sep, "/"),
+                              repo_uids[v][0], v))
     if dup:
         errors.append("有 %d 个重复 UID（Godot 会拒绝打开项目）: %s"
                       % (len(dup), "; ".join(dup[:3])))

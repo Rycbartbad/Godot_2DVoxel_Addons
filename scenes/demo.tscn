@@ -1,4 +1,4 @@
-[gd_scene load_steps=10 format=3 uid="uid://3wnbw8qpv4b2"]
+[gd_scene format=3 uid="uid://3wnbw8qpv4b2"]
 
 [ext_resource type="Script" uid="uid://odl8wa3oj3u0" path="res://src/demo/game.gd" id="1_game"]
 [ext_resource type="Script" uid="uid://c2ue2xs2ynpvn" path="res://src/nodes/pixel_world.gd" id="2_world"]
@@ -11,96 +11,83 @@
 [ext_resource type="Resource" path="res://materials/metal.tres" id="9_metal"]
 [ext_resource type="Resource" path="res://materials/brick.tres" id="10_brick"]
 
-; Demo —— 关卡**全部由场景节点摆出来**，game.gd 里没有一行生成关卡/相机/UI 的代码。
-;
-; 之前这个场景只是一个光秃秃的 Node2D + 437 行 game.gd：世界、渲染器、相机、
-; HUD、地形全在 _ready() 里 new 出来 —— 编辑器里看不到、调不了，
-; 也完全没用上 src/nodes/ 那套节点层。
-;
-; 现在的分工：
-;   场景节点  = 世界 / 地形 / 相机 / UI / 调试叠加层（可见、可调）
-;   game.gd   = 只剩**行为**：鼠标笔刷、擦除、拖动、HUD 文本、回收
-;
-; 关卡几何能做成节点，是因为 PixelShape2D 的 source=RECT ——
-; 地面就是"一个 768x100 的矩形"，不需要在 .tscn 里手写几十万个像素。
-[node name="Demo" type="Node2D"]
+[node name="Demo" type="Node2D" unique_id=204230944]
 script = ExtResource("1_game")
 
-[node name="Camera2D" type="Camera2D" parent="."]
+[node name="Camera2D" type="Camera2D" parent="." unique_id=1548728324]
 position = Vector2(310, 175)
 
-[node name="PixelWorld" type="Node2D" parent="."]
+[node name="PixelWorld" type="Node2D" parent="." unique_id=1043475145]
 script = ExtResource("2_world")
-gravity = Vector2(0, 600)
-terminal_speed = 650.0
 materials = Array[ExtResource("6_mat")]([ExtResource("7_stone"), ExtResource("8_wood"), ExtResource("9_metal"), ExtResource("10_brick")])
 
-[node name="Ground" type="Node2D" parent="PixelWorld"]
+[node name="Ground" type="Node2D" parent="PixelWorld" unique_id=1099258811]
 position = Vector2(0, 220)
 script = ExtResource("3_body")
 is_static = true
 
-[node name="Shape" type="Node2D" parent="PixelWorld/Ground"]
+[node name="Shape" type="Node2D" parent="PixelWorld/Ground" unique_id=423950259]
 visible = false
 script = ExtResource("4_shape")
 rect_size = Vector2i(768, 100)
 
-[node name="Wall" type="Node2D" parent="PixelWorld"]
+[node name="Wall" type="Node2D" parent="PixelWorld" unique_id=103555653]
 position = Vector2(300, 130)
 script = ExtResource("3_body")
 is_static = true
 
-[node name="Shape" type="Node2D" parent="PixelWorld/Wall"]
+[node name="Shape" type="Node2D" parent="PixelWorld/Wall" unique_id=1403849352]
 visible = false
 script = ExtResource("4_shape")
 rect_size = Vector2i(120, 90)
 material_id = 4
 
-[node name="Box1" type="Node2D" parent="PixelWorld"]
+[node name="Box1" type="Node2D" parent="PixelWorld" unique_id=1245244440]
 position = Vector2(150, 30)
 script = ExtResource("3_body")
 
-[node name="Shape" type="Node2D" parent="PixelWorld/Box1"]
+[node name="Shape" type="Node2D" parent="PixelWorld/Box1" unique_id=1484544684]
 visible = false
 script = ExtResource("4_shape")
 material_id = 2
 
-[node name="Box2" type="Node2D" parent="PixelWorld"]
+[node name="Box2" type="Node2D" parent="PixelWorld" unique_id=1560653289]
 position = Vector2(184, 24)
 rotation = 0.1
 script = ExtResource("3_body")
 
-[node name="Shape" type="Node2D" parent="PixelWorld/Box2"]
+[node name="Shape" type="Node2D" parent="PixelWorld/Box2" unique_id=621975187]
 visible = false
 script = ExtResource("4_shape")
 material_id = 2
 
-[node name="Box3" type="Node2D" parent="PixelWorld"]
+[node name="Box3" type="Node2D" parent="PixelWorld" unique_id=1347694507]
 position = Vector2(218, 18)
 rotation = 0.2
 script = ExtResource("3_body")
 
-[node name="Shape" type="Node2D" parent="PixelWorld/Box3"]
+[node name="Shape" type="Node2D" parent="PixelWorld/Box3" unique_id=100016388]
 visible = false
 script = ExtResource("4_shape")
 material_id = 2
 
-[node name="Box4" type="Node2D" parent="PixelWorld"]
+[node name="Box4" type="Node2D" parent="PixelWorld" unique_id=587318388]
 position = Vector2(252, 12)
 rotation = 0.3
 script = ExtResource("3_body")
 
-[node name="Shape" type="Node2D" parent="PixelWorld/Box4"]
+[node name="Shape" type="Node2D" parent="PixelWorld/Box4" unique_id=1013424469]
 visible = false
 script = ExtResource("4_shape")
 material_id = 2
 
-[node name="DebugOverlay" type="Node2D" parent="PixelWorld"]
+[node name="DebugOverlay" type="Node2D" parent="PixelWorld" unique_id=1720671846]
+visible = false
 script = ExtResource("5_overlay")
 
-[node name="UI" type="CanvasLayer" parent="."]
+[node name="UI" type="CanvasLayer" parent="." unique_id=2074847731]
 
-[node name="Hint" type="Label" parent="UI"]
+[node name="Hint" type="Label" parent="UI" unique_id=1535563621]
 offset_left = 12.0
 offset_top = 8.0
 theme_override_colors/font_color = Color(1, 1, 1, 1)

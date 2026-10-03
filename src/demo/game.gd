@@ -137,8 +137,16 @@ func _process(delta: float) -> void:
 	if world.is_grabbing():
 		world.set_grab_target(mouse)
 
-	if not paused:
-		world.advance(delta)
+	# ⚠️ 这里**不能**再推进物理 —— 世界已经由 PixelWorld 节点在 _physics_process
+	#    里按 fixed_dt 推进了（auto_step 默认 true）。
+	#
+	#    节点化之前 game.gd 自己 PWorld.new()，没人和它抢；节点化之后如果这里
+	#    也 advance，同一个世界一帧会被推进**两次** —— 症状是"重力怎么突然变大了"，
+	#    其实是时间过了两倍：速度、位移、下落手感全部翻倍。
+	#    （已用 diag_gravity.gd 排除物理层：单步 vy 增量 9.956，期望 g*dt=10.00 ✓）
+	#
+	#    想由本脚本控节奏的话，把 PixelWorld 的 auto_step 关掉，再在这里 advance。
+	pass
 
 	_budget_tick += 1
 	if _budget_tick % 60 == 0:

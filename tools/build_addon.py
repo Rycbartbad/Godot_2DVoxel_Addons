@@ -174,16 +174,32 @@ def main() -> int:
         print("  %-8s LICENSE 已拷入" % "license")
 
     # 2) 原样拷贝手写模板（README / docs / examples / pixel_physics.gd）
+    #
+    # ⚠️ **跳过 .uid** —— 和上面 src/ 那条同一个理由，而且这里是真正踩过的坑。
+    #    addon_src/ 住在同一棵项目树里，Godot 会（也必须）给它生成 .uid；
+    #    模板拷贝如果照抄，addon 就拿到一份**和 addon_src/ 逐字相同**的 .uid：
+    #        uid://dlug6t3xhmw1e  addon_src/pixel_physics.gd.uid
+    #                             addons/pixel_destruction/pixel_physics.gd.uid
+    #    实测 3 对（pixel_physics.gd + examples/ 两个）。Godot 4.4+ 对重复 UID 是
+    #    硬错误，症状是**编辑器打不开**（双击 project.godot 一闪就没）。
+    #    addon 里没有任何 .tscn，引用全是 res:// 路径，本来就不需要 .uid。
+    #    使用方把 addon 拷进自己的项目时，Godot 会自己生成一套唯一 UID。
+    #    ⚠️ 目录要递归跳过：examples/ 是整棵 copytree 拷过去的，只在顶层
+    #    endswith(".uid") 挡不住 examples/*.uid —— 第一版就是这么漏的，
+    #    被 check_addon.py 当场抓住（2 对）。
+    def _skip_uid(_dir, names):
+        return [n for n in names if n.endswith(".uid")]
+
     for name in sorted(os.listdir(TEMPLATE)):
-        if name == ".gdignore":
+        if name == ".gdignore" or name.endswith(".uid"):
             continue
         s = os.path.join(TEMPLATE, name)
         d = os.path.join(out, name)
         if os.path.isdir(s):
-            shutil.copytree(s, d)
+            shutil.copytree(s, d, ignore=_skip_uid)
         else:
             shutil.copyfile(s, d)
-    print("  %-8s 手写模板已拷入" % "template")
+    print("  %-8s 手写模板已拷入（.uid 已剔除）" % "template")
 
     # 3) 原生加速源码
     if os.path.isdir(GDEXT):
