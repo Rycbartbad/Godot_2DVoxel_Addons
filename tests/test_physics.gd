@@ -29,6 +29,7 @@ func _initialize() -> void:
 	_test_single_drop()
 	_test_stack()
 	_test_sleep()
+	_test_torque_reaches_engine()
 	_test_fracture()
 	_test_offset_origin_rotation()
 	_test_advance()
@@ -85,6 +86,29 @@ func _test_stack() -> void:
 		_check("box %d no tilt" % i, absf(b2.rotation) < 0.001,
 			"rot=%.6f" % b2.rotation)
 		_check("box %d sleeping" % i, not b2.awake, "awake=%s" % b2.awake)
+
+## ⚠️⚠️ 力矩必须真的传到物理内核。
+##
+## 病灶（2026 年这轮才发现）：桥接函数 `rb_body_add_force(id, fx, fy, torque)` 的
+## **torque 参数接了但没用** —— 函数体里只有 `add_force`，没有 `add_torque`。
+## 后果是整个项目的力矩**静默失效**：`accum_torque`、抓取的角阻尼、任何靠力矩
+## 转起来的玩法全都不动。表现是"摆动怎么调都不衰减"（实测摆幅 12 秒恒在 150~180 度，
+## 阻尼从 0 调到 20 毫无变化）—— 甲方原话"摆动的方式不对"。
+##
+## 这条断言把"力矩生效"钉死：无重力、无力，只给力矩 -> 角速度必须涨。
+func _test_torque_reaches_engine() -> void:
+	print("[力矩真的生效]")
+	var world := PWorld.new()
+	world.gravity = Vector2.ZERO
+	var b := PBody.new()
+	b.position = Vector2(100, 100)
+	world.add_body(b, [_box_shape(16, 16)])
+	b.accum_torque = 200000.0                 # 持续力矩（每子步推一次）
+	for i in 30:
+		world.step(1.0 / 60.0)
+	_check("持续力矩把物体转起来", b.angular_velocity > 1.0,
+		"30 步后角速度 %.3f rad/s" % b.angular_velocity)
+
 
 func _test_sleep() -> void:
 	print("[sleep]")

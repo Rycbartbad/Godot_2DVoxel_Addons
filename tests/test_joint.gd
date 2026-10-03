@@ -5,6 +5,7 @@ extends SceneTree
 ## 任何一层写错都不会报错，只会"看起来没连上"或者"连上了但位置慢慢漂"。
 
 const PBody := preload("res://src/physics/pbody.gd")
+const Grab := preload("res://src/physics/grab.gd")
 const PWorld := preload("res://src/physics/pworld.gd")
 const PixelShape := preload("res://src/core/pixel_shape.gd")
 const PJoint := preload("res://src/physics/joint.gd")
@@ -53,6 +54,7 @@ func _initialize() -> void:
 	_test_slider()
 	_test_weld()
 	_test_overlap_no_contacts()
+	_test_grab_angular_damping()
 	_test_grab_welded()
 	_test_rope()
 	_test_spring()
@@ -235,6 +237,37 @@ func _test_grab_welded() -> void:
 	# 钟摆：抓点在组件左上方 40px -> 组件质心必须转下去（重力力矩生效）。
 	var p: Array = _grab_welded(false, Vector2(-40, -20), 480)
 	_check("重力力矩生效（挂起来会垂下去）", p[4] > 20.0, "转角 %.1f 度" % p[4])
+
+
+## 抓取的**角阻尼必须真的作用到物理**。
+##
+## ⚠️ 桥接函数 `rb_body_add_force(id, fx, fy, torque)` 曾经**把 torque 参数丢掉**
+## （函数体里只有 add_force）—— 整个项目的力矩静默失效：抓取的角阻尼、`accum_torque`、
+## 任何靠力矩转起来的玩法全都不动。表现是"摆动怎么调都不衰减"
+## （实测摆幅 12 秒恒在 150~180 度，阻尼 0 -> 20 毫无变化）。
+## 这条断言把它钉死：转起来的焊接组件被抓着，角速度必须明显衰减。
+func _test_grab_angular_damping() -> void:
+	print("[抓取角阻尼：力矩真的生效]")
+	var world := _make_world()
+	world.gravity = Vector2.ZERO
+	var a := PBody.new()
+	a.position = Vector2(100, 100)
+	world.add_body(a, [_box_shape(16, 16)])
+	var b := PBody.new()
+	b.position = Vector2(120, 100)
+	world.add_body(b, [_box_shape(16, 16)])
+	world.add_weld(a, b, Vector2(116, 108))
+	a.angular_velocity = 5.0
+	b.angular_velocity = 5.0
+	var g: Grab = world.grab(a, a.position + Vector2(8, 8))
+	g.ang_damp = 8.0
+	for i in 120:
+		world.set_grab_target(a.position + Vector2(8, 8))
+		world.step(1.0 / 60.0)
+	# 阈值 4.4（衰减 > 12%）：修之前这里**不但不衰减，还会涨到 15+**
+	# （角速度阻尼力矩被桥接丢掉，抓取的泵能量没有对手）。
+	_check("角阻尼把自转刹住", absf(a.angular_velocity) < 4.4,
+		"2 秒后角速度 %.3f（初始 5.0）" % a.angular_velocity)
 
 
 func _test_overlap_no_contacts() -> void:
