@@ -16,7 +16,7 @@
 script = ExtResource("1_game")
 
 [node name="Camera2D" type="Camera2D" parent="." unique_id=1548728324]
-position = Vector2(302, 163)
+position = Vector2(368, 157)
 
 [node name="PixelWorld" type="Node2D" parent="." unique_id=1043475145]
 script = ExtResource("2_world")
@@ -44,7 +44,7 @@ rect_size = Vector2i(120, 90)
 material_id = 4
 
 [node name="Box1" type="Node2D" parent="PixelWorld" unique_id=1245244440]
-position = Vector2(150, 30)
+position = Vector2(308, 25)
 script = ExtResource("3_body")
 
 [node name="Shape" type="Node2D" parent="PixelWorld/Box1" unique_id=1484544684]
@@ -53,7 +53,7 @@ script = ExtResource("4_shape")
 material_id = 2
 
 [node name="Box2" type="Node2D" parent="PixelWorld" unique_id=1560653289]
-position = Vector2(184, 24)
+position = Vector2(342, 19)
 rotation = 0.1
 script = ExtResource("3_body")
 
@@ -63,7 +63,7 @@ script = ExtResource("4_shape")
 material_id = 2
 
 [node name="Box3" type="Node2D" parent="PixelWorld" unique_id=1347694507]
-position = Vector2(218, 18)
+position = Vector2(376, 13)
 rotation = 0.2
 script = ExtResource("3_body")
 
@@ -73,7 +73,7 @@ script = ExtResource("4_shape")
 material_id = 2
 
 [node name="Box4" type="Node2D" parent="PixelWorld" unique_id=587318388]
-position = Vector2(252, 12)
+position = Vector2(410, 7.0000005)
 rotation = 0.3
 script = ExtResource("3_body")
 
@@ -235,7 +235,7 @@ motor = 1
 motor_target = 3.0
 
 [node name="WeldA" type="Node2D" parent="PixelWorld" unique_id=124425430]
-position = Vector2(346.00003, 70)
+position = Vector2(448, 190)
 rotation = -0.21022502
 script = ExtResource("3_body")
 
@@ -245,7 +245,7 @@ script = ExtResource("4_shape")
 material_id = 3
 
 [node name="WeldB" type="Node2D" parent="PixelWorld" unique_id=189287394]
-position = Vector2(364.99997, 56)
+position = Vector2(466.99994, 176)
 rotation = 0.4
 script = ExtResource("3_body")
 
@@ -256,7 +256,7 @@ material_id = 3
 
 [node name="WeldJoint" type="Node2D" parent="PixelWorld" unique_id=2073185246]
 z_index = 5
-position = Vector2(361, 70)
+position = Vector2(462.99997, 190)
 script = ExtResource("11_nwon6")
 kind = 2
 body_a = NodePath("../WeldA")
@@ -273,7 +273,7 @@ material_id = 2
 
 [node name="SliderJoint" type="Node2D" parent="PixelWorld" unique_id=1971359818]
 z_index = 5
-position = Vector2(265, 210)
+position = Vector2(265, 209)
 script = ExtResource("11_nwon6")
 kind = 1
 body_b = NodePath("../SliderCrate")

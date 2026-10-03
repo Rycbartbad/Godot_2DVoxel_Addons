@@ -652,6 +652,27 @@ static func _assemble(shape: PixelShape, keys: Array, parts: Dictionary, min_pix
 	for root: int in groups:
 		var g2: Dictionary = groups[root]
 		var s := PixelShape.new()
+		# ⚠️⚠️ **继承母形状的按块分解缓存**。分片保留局部坐标系与 chunk key，
+		#    所以"块内像素没被这一笔碰过"的块，它的分解结果与母形状**完全相同** ——
+		#    而按块缓存是**自校验**的（比对每块 64 个 chunk 的占用字），
+		#    所以只有被伤害真正碰到的块会重算（切口穿过的那 2~4 个）。
+		#    没有这一条：每个分片（**包括留在原 body 的那块**）都要从零分解，
+		#    768x100 切成两半 = 两块各 ~10 个块 × ~0.5 ms = ~10 ms，
+		#    而其中真正需要重算的只有切口那几个 —— 这就是"生成新实体那一下"的卡顿。
+		#
+		#    ⚠️ 块 key 列表必须按**本分片自己拥有的块**重建（从 g2 推），
+		#    不能直接继承：继承过来会多出"别的部分的块"，它们在本分片里是空块，
+		#    指纹一变就得跑一次 _decompose_block（每个空块 ~0.5 ms）—— 白付。
+		#    末尾 sort 一次是为了让矩形输出顺序与母形状一致（确定性）。
+		s._rect_blocks = shape._rect_blocks.duplicate()
+		s._grid_sigs = shape._grid_sigs.duplicate()
+		var last_bk := -1
+		for k3: int in g2:
+			var bk3 := ((k3 >> 35) << 32) | (((k3 << 32) >> 35) & 0xFFFFFFFF)
+			if bk3 != last_bk:
+				s._grid_keys.append(bk3)
+				last_bk = bk3
+		s._grid_keys.sort()
 		var total := 0
 		for k3: int in g2:
 			var mask: int = g2[k3]
