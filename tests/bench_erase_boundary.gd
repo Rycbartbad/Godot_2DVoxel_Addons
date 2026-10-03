@@ -59,14 +59,20 @@ func _initialize() -> void:
 		if i3 >= 1:
 			t += (Time.get_ticks_usec() - t2) / 1000.0
 	print("沿边界拖一笔 90px              %6.2f ms/笔" % (t / 5.0))
+	# ⚠️⚠️ **第一次切必须单独报**：它是冷的、而且形状最大（还没被切开过），
+	#    后面几次作用在已经裂开的碎片上，便宜得多 —— 平均值会把尖峰埋掉，
+	#    而用户感受到的恰恰是第一次那一下（实测尖峰曾是平均值的 2 倍）。
 	var pw4 = AddonWorld.new()
 	await _mk(pw4)
+	var t3 := Time.get_ticks_usec()
+	Editor.erase(pw4.world, Vector2(384.0, 270.0), Vector2(384.0, 271.0), 60.0, 25.0)
+	print("大半径切一刀（r=60）**第一次**   %6.2f ms（冷 + 形状最大）" % ((Time.get_ticks_usec() - t3) / 1000.0))
 	t = 0.0
 	for i4 in 4:
 		var f4 := Vector2(150.0 + i4 * 160.0, 270.0)
-		var t3 := Time.get_ticks_usec()
+		var t4 := Time.get_ticks_usec()
 		Editor.erase(pw4.world, f4, f4 + Vector2(0, 1), 60.0, 25.0)
 		if i4 >= 1:
-			t += (Time.get_ticks_usec() - t3) / 1000.0
-	print("大半径切一刀（r=60，生成碎片）  %6.2f ms/笔" % (t / 3.0))
+			t += (Time.get_ticks_usec() - t4) / 1000.0
+	print("大半径切一刀（r=60）后续平均   %6.2f ms/笔" % (t / 3.0))
 	quit(0)

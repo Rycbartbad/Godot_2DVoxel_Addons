@@ -34,6 +34,16 @@ static func compute(shape: PixelShape, density_of: Callable = Callable()) -> Pro
 	var sy := 0.0
 	var i_origin := 0.0
 	var n := 0
+	# ⚠️⚠️ **密度按材质记忆化**：density_of 的契约是 Callable(material) -> float，
+	#    也就是**只依赖材质**。但旧代码逐像素调一次 —— 3 万像素的碎片就是 3 万次
+	#    Callable 调用，实测占这个函数三分之一以上，而材质种类通常只有一两种。
+	#
+	#    ⚠️ 这个缓存**只在本次 compute 内有效**（不跨调用、不存在 shape 上），
+	#    所以密度表之后被改了也不会读到旧值 —— 不需要任何失效逻辑。
+	#    （跨调用缓存密度才会引入"缓存判错不报错"的风险，这里刻意不做。）
+	var has_density := density_of.is_valid()
+	var dens := {}
+	var dscale := shape.density_scale
 	for k: int in shape.chunks:
 		var c: PixelChunk = shape.chunks[k]
 		var bx := PixelShape.key_x(k) << 3
@@ -45,10 +55,15 @@ static func compute(shape: PixelShape, density_of: Callable = Callable()) -> Pro
 			var px := float(bx + (i & 7)) + 0.5
 			var py := float(by + (i >> 3)) + 0.5
 			var d := 1.0
-			if density_of.is_valid():
-				d = density_of.call(c.mat[i])
+			if has_density:
+				var mi: int = c.mat[i]
+				var cached = dens.get(mi)
+				if cached == null:
+					cached = density_of.call(mi)
+					dens[mi] = cached
+				d = cached
 			# 形状级的密度倍率（Teardown 的 SetShapeDensity）。默认 1.0，不影响既有行为。
-			d *= shape.density_scale
+			d *= dscale
 			m += d
 			sx += d * px
 			sy += d * py
