@@ -124,26 +124,45 @@ static func _build_grid(shape: PixelShape) -> Grid:
 ## 两种顺序都是精确覆盖，但矩形数量可能不同。
 static func _greedy(grid: PackedByteArray, w: int, h: int, horizontal_first: bool) -> Array:
 	var rects: Array = []
-	for y in h:
+	# ⚠️⚠️ 用 PackedByteArray.find()（**原生 memchr**）找下一个占用格，
+	#    不要写 GDScript 的双重循环逐格扫。
+	#
+	#    原来写的是 for y in h: for x in w: if grid[...] == 0: continue ——
+	#    768x100 的地面每遍要跑 **76800 次 GDScript 迭代**，而 decompose 跑两遍，
+	#    实测就是 **42 ms/笔**（擦除路径上最大的一块）。
+	#
+	#    find() 在 C++ 里扫，同样的数据只要几十微秒。
+	#    这是"把 GDScript 循环换成原生扫描"的典型场景：
+	#    算法没变、结果逐字相同，只是把扫描搬进了引擎。
+	var cursor := 0
+	var n := w * h
+	while cursor < n:
+		var idx := grid.find(1, cursor)
+		if idx < 0:
+			break
+		var y := idx / w
+		var x := idx - y * w
 		var base := y * w
-		for x in w:
-			if grid[base + x] == 0:
-				continue
-			var rw := 1
-			var rh := 1
-			if horizontal_first:
-				while x + rw < w and grid[base + x + rw] != 0:
-					rw += 1
-				rh = _extend_down(grid, w, h, x, y, rw)
-			else:
-				while y + rh < h and grid[(y + rh) * w + x] != 0:
-					rh += 1
-				rw = _extend_right(grid, w, h, x, y, rh)
-			for j in rh:
-				var cb := (y + j) * w + x
-				for i in rw:
-					grid[cb + i] = 0
-			rects.append(Rect2(x, y, rw, rh))
+		var rw := 1
+		var rh := 1
+		if horizontal_first:
+			while x + rw < w and grid[base + x + rw] != 0:
+				rw += 1
+			rh = _extend_down(grid, w, h, x, y, rw)
+		else:
+			while y + rh < h and grid[(y + rh) * w + x] != 0:
+				rh += 1
+			rw = _extend_right(grid, w, h, x, y, rh)
+		# ⚠️ 试过用 grid.fill(0, cb, cb+rw) 逐行清零 —— **不行**：
+		#    PackedByteArray.fill() 只接受一个参数（没有范围重载），
+		#    传三个会让整个 GreedyRects 编译失败，而报错落在**依赖它的脚本**上
+		#    （pbody.gd:331），不指向这里。所以还是逐格写。
+		for j in rh:
+			var cb := (y + j) * w + x
+			for i in rw:
+				grid[cb + i] = 0
+		rects.append(Rect2(x, y, rw, rh))
+		cursor = base + x
 	return rects
 
 

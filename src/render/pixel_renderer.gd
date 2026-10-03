@@ -275,21 +275,33 @@ func sync(body) -> void:
 				last_tiles_rebuilt += 1
 				var img := _build_region_image(body.shapes, aabb, tr)
 				tis[key] = img
-				var tex: ImageTexture = tts.get(key)
 				var sp: Sprite2D = tiles.get(key)
+				if sp == null:
+					sp = Sprite2D.new()
+					sp.centered = false
+					sp.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+					holder.add_child(sp)
+					tiles[key] = sp
+				var tex: ImageTexture = tts.get(key)
 				if tex == null or tex.get_width() != tr.size.x or tex.get_height() != tr.size.y:
 					tex = ImageTexture.create_from_image(img)
 					tts[key] = tex
-					if sp == null:
-						sp = Sprite2D.new()
-						sp.centered = false
-						sp.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-						holder.add_child(sp)
-						tiles[key] = sp
 					sp.texture = tex
-					sp.offset = Vector2(tx << 6, ty << 6)
 				else:
 					tex.update(img)
+				# ⚠️⚠️ offset 必须是**区域**在局部坐标里的原点（rx, ry），
+				#    不是块的网格原点 Vector2(tx << 6, ty << 6)。
+				#
+				#    图像从 rx = maxi(tx<<6, aabb.position.x) 开始 ——
+				#    两者只在 aabb 原点恰好是 64 的倍数时相等。
+				#
+				#    **碎片就是反例**：它们的局部 aabb 起点是任意值（比如 -13），
+				#    于是 tx<<6 = -64 而图像从 -13 开始，sprite 被摆到 -64 ——
+				#    "擦除生成的形状和碰撞箱之间有一个 offset"就是它。
+				#
+				#    而且必须**每次都设**：aabb 一变，区域原点就跟着变，
+				#    只在创建时设一次的话，旧的 offset 会一直留着。
+				sp.offset = Vector2(rx, ry)
 		# 回收已经不在 aabb 里的块（形状被削小 / 分裂）
 		for key in tiles.keys():
 			if not live.has(key):
