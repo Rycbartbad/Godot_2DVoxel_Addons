@@ -526,10 +526,14 @@ static void register_solve() {
 //   9  body_is_sleeping(u32 id)                   -> i32
 //  10  body_wake(u32 id)
 //  11  contact_count()                            -> i32
-//  12  contact_get(i32 idx)                       -> f64 id_a, id_b, nx, ny, px, py, dist
+//  12  contact_get(i32 idx)                       -> f64 id_a, id_b, nx, ny, px, py, dist, impulse
+//                                                    （法向与点都是**世界系**）
 //  13  body_count()                               -> i32
 //  14  body_add_force(u32 id, f64 fx, fy, torque)
 //  15  body_set_type(u32 id, i32 is_static)
+//  16  body_set_damping(u32 id, f64 linear, f64 angular)
+//  17  body_set_gravity_scale(u32 id, f64 scale)
+//  18  body_reset_forces(u32 id)
 
 typedef void *RPWorld;
 
@@ -552,6 +556,9 @@ struct RapierApi {
 	int32_t (*body_count)(RPWorld) = nullptr;
 	void (*body_add_force)(RPWorld, uint32_t, double, double, double) = nullptr;
 	void (*body_set_type)(RPWorld, uint32_t, int32_t) = nullptr;
+	void (*body_set_damping)(RPWorld, uint32_t, double, double) = nullptr;
+	void (*body_set_gravity_scale)(RPWorld, uint32_t, double) = nullptr;
+	void (*body_reset_forces)(RPWorld, uint32_t) = nullptr;
 	bool tried = false;
 	bool ok = false;
 };
@@ -603,6 +610,9 @@ static bool load_rapier() {
 	RP_GET(body_count, "rb_body_count")
 	RP_GET(body_add_force, "rb_body_add_force")
 	RP_GET(body_set_type, "rb_body_set_type")
+	RP_GET(body_set_damping, "rb_body_set_damping")
+	RP_GET(body_set_gravity_scale, "rb_body_set_gravity_scale")
+	RP_GET(body_reset_forces, "rb_body_reset_forces")
 #undef RP_GET
 	g_rap.ok = true;
 	printf("[RapierPhys] rapier_bridge.dll 已加载: %s\n", local.c_str());
@@ -694,9 +704,9 @@ static void run_rapier_cmd(RapierInstance *inst, const uint8_t *in, size_t in_n,
 			case 11: { w.i32(g_rap.contact_count(W)); break; }
 			case 12: {
 				int32_t idx = r.i32();
-				for (int k = 0; k < 7; ++k) buf[k] = 0.0;
+				for (int k = 0; k < 8; ++k) buf[k] = 0.0;
 				g_rap.contact_get(W, idx, buf);
-				for (int k = 0; k < 7; ++k) w.f64(buf[k]);
+				for (int k = 0; k < 8; ++k) w.f64(buf[k]);
 				break;
 			}
 			case 13: { w.i32(g_rap.body_count(W)); break; }
@@ -704,6 +714,11 @@ static void run_rapier_cmd(RapierInstance *inst, const uint8_t *in, size_t in_n,
 				g_rap.body_add_force(W, id, fx, fy, tq); break; }
 			case 15: { uint32_t id = r.u32(); int32_t st = r.i32();
 				g_rap.body_set_type(W, id, st); break; }
+			case 16: { uint32_t id = r.u32(); double lin = r.f64(), ang = r.f64();
+				g_rap.body_set_damping(W, id, lin, ang); break; }
+			case 17: { uint32_t id = r.u32(); double sc = r.f64();
+				g_rap.body_set_gravity_scale(W, id, sc); break; }
+			case 18: { uint32_t id = r.u32(); g_rap.body_reset_forces(W, id); break; }
 			default: break;   // 未知命令：跳过（长度未知，只能就此收尾）
 		}
 	}

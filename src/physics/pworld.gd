@@ -368,6 +368,7 @@ func remove_body(body: PBody) -> void:
 		_rp_u8(cmds, 4)
 		_rp_u32(cmds, body.rapier_id)
 		_rp_send(cmds, 4)
+		_rp_by_id.erase(body.rapier_id)
 		body.rapier_id = 0
 	bodies.erase(body)
 
@@ -423,10 +424,19 @@ func bodies_in(bounds: Rect2) -> Array:
 ##
 ## ⚠️ 新建刚体要**单独一趟**：Rapier 分配的 id 在结果流里，而同一趟里后面的命令
 ##    就要用这个 id。新建是低频事件（破坏/分裂才发生），多一趟无所谓。
-var use_rapier := false
+var use_rapier := true
 var _rp: Object = null
 var _rp_gravity_pushed := Vector2(INF, INF)
 var _rp_cmd_us := 0
+## rapier_id -> PBody。接触事件从 Rapier 拿回来的是 id，要映射回刚体。
+var _rp_by_id := {}
+## 本子步被抓住的刚体（每子步重建）。
+var _rp_grabbed := {}
+## 阻尼与引擎 _integrate_forces 里那两行**同值**。Rapier 的公式也是 v *= 1/(1+d*dt)，
+## 所以直接设进去就等价，不需要自己再乘一遍。
+## ⚠️ 改引擎那两行时必须同步改这里，否则两条路径会静默分叉。
+var rp_linear_damping := 0.35
+var rp_angular_damping := 0.6
 
 # 命令流的写入辅助（PackedByteArray 必须自己 resize，encode_* 不会自动扩容）
 static func _rp_u8(b: PackedByteArray, v: int) -> void:
@@ -480,11 +490,38 @@ func _rp_create_missing() -> void:
 		return
 	var res := _rp_send(cmds, n * 4)
 	var off := 4
+	# ⚠️ 刚体属性必须**第二趟**设：id 是 Rapier 分配的，第一趟发命令时还不知道。
+	#    阻尼少了它，Rapier 用默认 0（引擎是 0.35/0.6）—— 力矩积分会整条错掉。
+	var props := PackedByteArray()
+	var m := 0
 	for b: PBody in bodies:
 		if b.rapier_id != 0:
 			continue
 		b.rapier_id = res.decode_s32(off)
+		_rp_by_id[b.rapier_id] = b
 		off += 4
+		_rp_u8(props, 16)
+		_rp_u32(props, b.rapier_id)
+		_rp_f64(props, rp_linear_damping)
+		_rp_f64(props, rp_angular_damping)
+		_rp_u8(props, 17)
+		_rp_u32(props, b.rapier_id)
+		_rp_f64(props, b.gravity_scale)
+		b._rp_gravity_scale = b.gravity_scale
+		# ⚠️ 必须**显式推一次位姿与速度**。第一版只把镜像设成当前值，于是
+		#    "建体之前就设好的" angular_velocity / position 被当成"已推过"，
+		#    永远送不到 Rapier —— 表现为 test_physics 的 "body did rotate" 恒为 0。
+		_rp_u8(props, 6)
+		_rp_u32(props, b.rapier_id)
+		_rp_f64(props, b.position.x)
+		_rp_f64(props, b.position.y)
+		_rp_f64(props, b.rotation)
+		_rp_u8(props, 7)
+		_rp_u32(props, b.rapier_id)
+		_rp_f64(props, b.linear_velocity.x)
+		_rp_f64(props, b.linear_velocity.y)
+		_rp_f64(props, b.angular_velocity)
+		m += 1
 		# 新刚体一律先推一次矩形与全部状态
 		b._rp_rects_rev = -1
 		b._rp_x = b.position.x
@@ -494,6 +531,9 @@ func _rp_create_missing() -> void:
 		b._rp_vx = b.linear_velocity.x
 		b._rp_vy = b.linear_velocity.y
 		b._rp_w = b.angular_velocity
+	if m > 0:
+		_rp_send(props, 4)
+
 
 
 ## Rapier 版子步：推 -> step -> 读回。
@@ -504,6 +544,16 @@ func _substep_rapier(dt: float) -> void:
 	if _rp == null:
 		_rp = ClassDB.instantiate("RapierPhys")
 	_rp_create_missing()
+	# ---- 抓取约束：必须在**推送之前**解 ----
+	#
+	# 这样它改出来的速度能在**同一子步**里被 Rapier 的接触求解看到（否则会慢一帧）。
+	# 引擎那条路径是在求解迭代里解 10 次（约束更硬）；这里是每子步一次 —— 手感略软，
+	# 但限力 max_accel * mass * dt 仍然精确成立，这是"重物要滞后"的来源。
+	_rp_grabbed.clear()
+	for g in grabs:
+		g.apply(dt)
+		if g.body != null:
+			_rp_grabbed[g.body] = true
 	var t0 := Time.get_ticks_usec()
 	var cmds := PackedByteArray()
 	# 重力变了才推
@@ -517,11 +567,20 @@ func _substep_rapier(dt: float) -> void:
 	for b: PBody in bodies:
 		if b.rapier_id <= 0:
 			continue
+		# 求解前的速度 —— 接触事件的 approach 要用它（见 PBody.pre_vx 的说明）
+		b.pre_vx = b.linear_velocity.x
+		b.pre_vy = b.linear_velocity.y
+		b.pre_w = b.angular_velocity
 		if b.is_static != b._rp_static:
 			_rp_u8(cmds, 15)
 			_rp_u32(cmds, b.rapier_id)
 			_rp_i32(cmds, 1 if b.is_static else 0)
 			b._rp_static = b.is_static
+		if b._rp_gravity_scale != b.gravity_scale:
+			_rp_u8(cmds, 17)
+			_rp_u32(cmds, b.rapier_id)
+			_rp_f64(cmds, b.gravity_scale)
+			b._rp_gravity_scale = b.gravity_scale
 		if b._rp_rects_rev != b.rects_rev:
 			_rp_u8(cmds, 5)
 			_rp_u32(cmds, b.rapier_id)
@@ -552,12 +611,24 @@ func _substep_rapier(dt: float) -> void:
 			b._rp_vx = b.linear_velocity.x
 			b._rp_vy = b.linear_velocity.y
 			b._rp_w = b.angular_velocity
-		if b.accum_force != Vector2.ZERO or b.accum_torque != 0.0:
-			_rp_u8(cmds, 14)
+		# 外力/力矩：变了才推，而且是 **reset + add**（等价于 set）。
+		# Rapier 的 add_force 跨步累积，直接每步 add 会让力矩按 1+2+…+N 涨 ——
+		# 实测 60 步差 33 倍（validation_dynamics 的"持续力矩"就是这么挂的）。
+		# 被抓住的刚体**每子步强制推一次**（不只是变化时）：
+		# Rapier 的 add_force(f, wake_up=true) 顺带把它唤醒，
+		# 这正是"被抓着不入睡"需要的 —— 不需要另写一套保醒逻辑。
+		if _rp_grabbed.has(b) or b.accum_force.x != b._rp_fx or b.accum_force.y != b._rp_fy 				or b.accum_torque != b._rp_tq:
+			_rp_u8(cmds, 18)
 			_rp_u32(cmds, b.rapier_id)
-			_rp_f64(cmds, b.accum_force.x)
-			_rp_f64(cmds, b.accum_force.y)
-			_rp_f64(cmds, b.accum_torque)
+			if b.accum_force != Vector2.ZERO or b.accum_torque != 0.0:
+				_rp_u8(cmds, 14)
+				_rp_u32(cmds, b.rapier_id)
+				_rp_f64(cmds, b.accum_force.x)
+				_rp_f64(cmds, b.accum_force.y)
+				_rp_f64(cmds, b.accum_torque)
+			b._rp_fx = b.accum_force.x
+			b._rp_fy = b.accum_force.y
+			b._rp_tq = b.accum_torque
 	# ---- 走一步 ----
 	_rp_u8(cmds, 2)
 	_rp_f64(cmds, dt)
@@ -601,6 +672,76 @@ func _substep_rapier(dt: float) -> void:
 		b6.refresh_com()
 		b6.update_aabb()
 	_rp_cmd_us = Time.get_ticks_usec() - t0
+	_collect_contacts_rapier()
+
+
+## 求解前的速度在接触点处的线速度（含转动贡献）。
+func _vel_at_pre(b: PBody, p: Vector2) -> Vector2:
+	var r := p - b.com_world()
+	return Vector2(b.pre_vx, b.pre_vy) + Vector2(-b.pre_w * r.y, b.pre_w * r.x)
+
+
+## Rapier 版的接触采集。
+##
+## 与手写路径的区别：冲量**直接用 Rapier 的**（pair.total_impulse()），
+## 不再靠"求解前后的速度差 × 有效质量"去估 —— 那是拿不到真值时的替代品。
+## 但 approach 仍然必须用**求解前**的速度算（求解后接触点相对速度已归零）。
+func _collect_contacts_rapier() -> void:
+	if not contact_events_enabled:
+		return
+	if _rp == null:
+		return
+	var cnt_cmds := PackedByteArray()
+	_rp_u8(cnt_cmds, 11)
+	var cnt_res := _rp_send(cnt_cmds, 4)
+	var n: int = cnt_res.decode_s32(4)
+	var seen := {}
+	if n > 0:
+		var cmds := PackedByteArray()
+		for i in n:
+			_rp_u8(cmds, 12)
+			_rp_i32(cmds, i)
+		var res := _rp_send(cmds, n * 64)
+		var off := 4
+		for i in n:
+			var ida := int(res.decode_double(off))
+			var idb := int(res.decode_double(off + 8))
+			var nx := res.decode_double(off + 16)
+			var ny := res.decode_double(off + 24)
+			var px := res.decode_double(off + 32)
+			var py := res.decode_double(off + 40)
+			var imp := res.decode_double(off + 56)
+			off += 64
+			var a: PBody = _rp_by_id.get(ida)
+			var b: PBody = _rp_by_id.get(idb)
+			if a == null or b == null:
+				continue
+			_contact_add_rapier(a, b, Vector2(px, py), Vector2(nx, ny), imp)
+			var ka := a.id
+			var kb := b.id
+			seen[(ka << 32) | (kb & 0xFFFFFFFF) if ka < kb else (kb << 32) | (ka & 0xFFFFFFFF)] = true
+	_contact_prev = seen
+
+
+func _contact_add_rapier(a: PBody, b: PBody, point: Vector2, normal: Vector2, impulse: float) -> void:
+	if contacts.size() >= max_contacts:
+		return
+	var c := Contact.new()
+	c.a = a
+	c.b = b
+	c.point = point
+	c.normal = normal
+	var rel := _vel_at_pre(b, point) - _vel_at_pre(a, point)
+	c.approach = -rel.dot(normal)
+	# _fill_contact_stress 会按"接近速度全部被吃掉"先填一个近似冲量，
+	# 下面立刻用 Rapier 的真值覆盖它。contact_width / shear_ratio 仍然要它算。
+	_fill_contact_stress(c, a, b, rel, 0.0)
+	c.impulse = impulse
+	var ka := a.id
+	var kb := b.id
+	var key := (ka << 32) | (kb & 0xFFFFFFFF) if ka < kb else (kb << 32) | (ka & 0xFFFFFFFF)
+	c.is_new = not _contact_prev.has(key)
+	contacts.append(c)
 
 
 func step(dt: float) -> void:
@@ -660,6 +801,10 @@ func _compute_substeps(dt: float) -> int:
 
 
 func _substep(dt: float) -> void:
+	# 抓取是**游戏层策略**（见 grab.gd）：它只往 accum_force 里塞一个受限的力，
+	# 所以必须在 _integrate_forces **之前**施。求解器完全不知道抓取的存在。
+	for g in grabs:
+		g.apply(dt)
 	for b0 in bodies:
 		b0.clear_pseudo()
 	_integrate_forces(dt)
@@ -982,46 +1127,14 @@ func _solve_native(dt: float) -> void:
 	# ⚠️ 这里让扩展**原生支持抓取**，是为了不再因为"有抓取"整条退回对象路径：
 	# 实测 49 个物体时拖动会让 step 从 1.28 ms 涨到 10.21 ms（慢 8 倍），
 	# 拖动时肉眼可见地卡。扩展里做同一件事只多花几个微秒。
-	var gn := grabs.size()
-	var grab_off := NATIVE_SV_HEADER + n * NATIVE_SV_BODY
-	var need_bod := grab_off + gn * NATIVE_SV_GRAB
-	if _sv_bod.size() != need_bod:
-		_sv_bod.resize(need_bod)
-	for gi in gn:
-		var g: Grab = grabs[gi]
-		var gb: PBody = g.body
-		var o2 := grab_off + gi * NATIVE_SV_GRAB
-		var bi := -1
-		for j in n:
-			if (bodies[j] as PBody) == gb:
-				bi = j
-				break
-		_sv_bod.encode_s32(o2, bi)
-		if bi < 0 or gb == null or gb.is_static:
-			_sv_bod.encode_double(o2 + 40, 0.0)     # is_static：Grab.solve 直接返回
-			continue
-		var anchor := g.anchor_world()
-		var gr := anchor - gb.com_world()
-		var err := g.target - anchor
-		var omega: float = g.max_omega
-		var err_len := err.length()
-		if err_len > 1e-4:
-			omega = minf(g.max_omega, sqrt(g.max_accel / err_len))
-		var gbias := err * omega
-		if gbias.length() > g.max_speed:
-			gbias = gbias.normalized() * g.max_speed
-		_sv_bod.encode_double(o2 + 8, gr.x)
-		_sv_bod.encode_double(o2 + 16, gr.y)
-		_sv_bod.encode_double(o2 + 24, gbias.x)
-		_sv_bod.encode_double(o2 + 32, gbias.y)
-		_sv_bod.encode_double(o2 + 40, g.max_accel * gb.mass * dt)
-		# Grab.solve 里的唤醒副作用。必须放在**物体表编码之后**：
-		# 对象路径里 prepare 先读到旧的 awake，抓取求解时才把它置真，顺序不能反。
-		gb.awake = true
-		gb.sleep_timer = 0.0
-	for g2: Grab in grabs:
-		g2.reset_accumulator()      # 累积冲量在扩展里是每次调用局部变量
-	_sv_bod.encode_s32(88, gn)
+	# ⚠️ 抓取**不再**走求解器（见 grab.gd）：它现在是"每子步一个受限的力"，
+	#    在 _substep 开头就进了 accum_force，求解器完全不需要知道它存在。
+	#    这里固定送 0 个抓取，扩展侧那段抓取分支随之成为死代码（内核删除时一并清）。
+	#
+	#    历史：这里曾经把抓取编码给扩展，为的是不让"有抓取"整条退回对象路径 ——
+	#    坑 31 实测 49 个物体拖动时 step 从 1.28 ms 涨到 10.21 ms（慢 8 倍）。
+	#    现在这个问题从根上不存在了：抓取根本不在求解器里。
+	_sv_bod.encode_s32(88, 0)
 
 	var need_out := 8 + n * NATIVE_SV_OUT
 	if _sv_out.size() != need_out:

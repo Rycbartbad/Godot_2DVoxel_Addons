@@ -180,6 +180,41 @@ pub extern "C" fn rb_body_add_force(w: *mut World, id: u32, fx: f64, fy: f64, to
     }
 }
 
+/// 清空累积的力与力矩。
+///
+/// ⚠️ 必须有这个：Rapier 的 add_force 是**跨步累积**的（直到 reset_forces），
+/// 而引擎的 accum_force 是"当前总力"语义（Box2D 那种，显式 clear_forces 才清）。
+/// 直接每步 add 一次会让力矩按 1+2+…+N 增长 —— 实测 60 步差 33 倍。
+/// 正确做法是"先 reset 再 add"，等价于 set。
+#[no_mangle]
+pub extern "C" fn rb_body_reset_forces(w: *mut World, id: u32) {
+    let Some(w) = (unsafe { wref(w) }) else { return };
+    if let Some(&h) = w.map.get(&id) {
+        w.bodies[h].reset_forces(false);
+        w.bodies[h].reset_torques(false);
+    }
+}
+
+/// 线性/角阻尼。Rapier 的公式是 v *= 1/(1+damping*dt)，与引擎 _integrate_forces
+/// 里那两行**完全同构** —— 所以直接把引擎的值设进去就等价，不需要自己再乘一遍。
+#[no_mangle]
+pub extern "C" fn rb_body_set_damping(w: *mut World, id: u32, lin: f64, ang: f64) {
+    let Some(w) = (unsafe { wref(w) }) else { return };
+    if let Some(&h) = w.map.get(&id) {
+        w.bodies[h].set_linear_damping(lin as f32);
+        w.bodies[h].set_angular_damping(ang as f32);
+    }
+}
+
+/// 重力缩放（对应 PBody.gravity_scale）。Rapier 是逐刚体的 —— 直接设。
+#[no_mangle]
+pub extern "C" fn rb_body_set_gravity_scale(w: *mut World, id: u32, scale: f64) {
+    let Some(w) = (unsafe { wref(w) }) else { return };
+    if let Some(&h) = w.map.get(&id) {
+        w.bodies[h].set_gravity_scale(scale as f32, true);
+    }
+}
+
 /// 静态 <-> 动态切换（对应 PBody.make_static / make_dynamic）。
 #[no_mangle]
 pub extern "C" fn rb_body_set_type(w: *mut World, id: u32, is_static: i32) {
@@ -214,8 +249,13 @@ pub extern "C" fn rb_contact_count(w: *mut World) -> i32 {
         .count() as i32
 }
 
-/// 读第 i 个接触对：out 至少 7 个 f64 —— id_a, id_b, nx, ny, px, py, dist。
-/// 点取流形的第一个（与项目 Contact.point 的取法一致）。
+/// 读第 i 个接触对：out 至少 **8** 个 f64 ——
+/// id_a, id_b, nx, ny, px, py, dist, impulse。
+///
+/// ⚠️ 法向与接触点都必须是**世界系**：
+///   · 法向直接取 Rapier 的 \`ContactManifoldData.normal\`（它本来就是世界系）；
+///   · 点要由 **collider1 的位姿**把 \`local_p1\` 变换过去 —— 它本身是 collider1 的局部坐标。
+///     第一版直接把它当世界坐标输出，结果是错的（但看起来"有个数"）。
 #[no_mangle]
 pub extern "C" fn rb_contact_get(w: *mut World, i: i32, out: *mut f64) -> i32 {
     let Some(w) = (unsafe { wref(w) }) else { return 0 };
@@ -234,10 +274,12 @@ pub extern "C" fn rb_contact_get(w: *mut World, i: i32, out: *mut f64) -> i32 {
         if let Some(m) = pair.manifolds().first() {
             n = m.data.normal;
             if let Some(pt) = m.points.first() {
-                p = pt.local_p1; // 局部点（在 collider1 的局部系里），调用方按需换算
+                let pose = w.colliders[ca].position();
+                p = pose.translation + pose.rotation * pt.local_p1;
                 d = pt.dist;
             }
         }
+        let imp = pair.total_impulse();
         unsafe {
             *out = ida as f64;
             *out.add(1) = idb as f64;
@@ -246,6 +288,7 @@ pub extern "C" fn rb_contact_get(w: *mut World, i: i32, out: *mut f64) -> i32 {
             *out.add(4) = p.x as f64;
             *out.add(5) = p.y as f64;
             *out.add(6) = d as f64;
+            *out.add(7) = imp.length() as f64;
         }
         return 1;
     }

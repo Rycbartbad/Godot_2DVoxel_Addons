@@ -54,8 +54,24 @@ var _rp_w := 0.0
 var _rp_static := false
 ## 上次推给 Rapier 的矩形版本号（-1 = 还没推过）
 var _rp_rects_rev := -1
+## 上次推给 Rapier 的重力缩放（运行时可以改，所以要镜像）
+var _rp_gravity_scale := 1.0
+## 上次推给 Rapier 的外力/力矩。
+## ⚠️ Rapier 的 add_force 是**跨步累积**的，引擎的 accum_force 是"当前总力"语义 ——
+##    所以推的时候必须"先 reset 再 add"（等价于 set），并且变了才推。
+var _rp_fx := 0.0
+var _rp_fy := 0.0
+var _rp_tq := 0.0
 ## 矩形分解的版本号：rebuild() 每次 +1。用来判断"要不要把矩形推给 Rapier"。
 var rects_rev := 0
+
+## 上一子步**求解之前**的速度。
+##
+## 接触事件的 approach（"撞得多猛"）必须用它：求解之后接触点的相对法向速度
+## 已经被吃掉了（那正是求解器干的事），拿求解后的速度算出来恒等于 0。
+var pre_vx := 0.0
+var pre_vy := 0.0
+var pre_w := 0.0
 
 ## 位置修正专用的"伪速度"（split impulse）。
 ## 它只参与下一次位置积分，不进入真实速度 —— 所以
