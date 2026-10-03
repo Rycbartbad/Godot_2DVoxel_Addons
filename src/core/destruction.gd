@@ -486,10 +486,18 @@ static func _group(shape: PixelShape, keys: Array, parts: Dictionary) -> Diction
 			var rmasks: Array = comp_masks[rk]
 			var rnodes: Array = node_of[rk]
 			var common := (c.occ & col7) & ((rc.occ & col0) << 7)
-			while common != 0:
-				var bi := Bits.first_bit_index(common)
-				_union(parent, nodes[_mask_index(masks, 1 << bi)], rnodes[_mask_index(rmasks, 1 << (bi - 7))])
-				common &= common - 1
+			# ⚠️⚠️ **两边都只有 1 个分量时，所有连通的 bit 连的都是同一对 node** ——
+			#    逐 bit 跑一遍 union 是纯重复。实心地面每块都是 8 个水平 + 8 个垂直
+			#    接缝 bit，1248 块 = 2 万次 union，实测 _group 27.1 ms 里九成在这里。
+			#    多分量的块（少见）照旧逐 bit 跑，行为不变。
+			if common != 0:
+				if masks.size() == 1 and rmasks.size() == 1:
+					_union(parent, nodes[0], rnodes[0])
+				else:
+					while common != 0:
+						var bi := Bits.first_bit_index(common)
+						_union(parent, nodes[_mask_index(masks, 1 << bi)], rnodes[_mask_index(rmasks, 1 << (bi - 7))])
+						common &= common - 1
 
 		var dk := PixelShape.make_key(cx, cy + 1)
 		if shape.chunks.has(dk):
@@ -497,10 +505,14 @@ static func _group(shape: PixelShape, keys: Array, parts: Dictionary) -> Diction
 			var dmasks: Array = comp_masks[dk]
 			var dnodes: Array = node_of[dk]
 			var common2 := (c.occ & row7) & ((dc.occ & row0) << 56)
-			while common2 != 0:
-				var b2 := Bits.first_bit_index(common2)
-				_union(parent, nodes[_mask_index(masks, 1 << b2)], dnodes[_mask_index(dmasks, 1 << (b2 - 56))])
-				common2 &= common2 - 1
+			if common2 != 0:
+				if masks.size() == 1 and dmasks.size() == 1:
+					_union(parent, nodes[0], dnodes[0])
+				else:
+					while common2 != 0:
+						var b2 := Bits.first_bit_index(common2)
+						_union(parent, nodes[_mask_index(masks, 1 << b2)], dnodes[_mask_index(dmasks, 1 << (b2 - 56))])
+						common2 &= common2 - 1
 
 	# 按 root 归组并组装 Shape（同一 chunk 的多个 node 需要按位 OR）
 	var groups := {}
