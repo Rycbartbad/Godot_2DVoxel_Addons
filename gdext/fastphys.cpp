@@ -111,6 +111,7 @@ alignas(16) static unsigned char g_str_empty_hint[64];
 //  17  body_set_gravity_scale(u32 id, f64 scale)
 //  18  body_reset_forces(u32 id)
 //  19  body_set_ccd(u32 id, i32 enabled)
+//  20  world_set_length_unit(f64 unit)
 
 typedef void *RPWorld;
 
@@ -137,6 +138,7 @@ struct RapierApi {
 	void (*body_set_gravity_scale)(RPWorld, uint32_t, double) = nullptr;
 	void (*body_reset_forces)(RPWorld, uint32_t) = nullptr;
 	void (*body_set_ccd)(RPWorld, uint32_t, int32_t) = nullptr;
+	void (*world_set_length_unit)(RPWorld, double) = nullptr;
 	bool tried = false;
 	bool ok = false;
 };
@@ -192,6 +194,7 @@ static bool load_rapier() {
 	RP_GET(body_set_gravity_scale, "rb_body_set_gravity_scale")
 	RP_GET(body_reset_forces, "rb_body_reset_forces")
 	RP_GET(body_set_ccd, "rb_body_set_ccd")
+	RP_GET(world_set_length_unit, "rb_world_set_length_unit")
 #undef RP_GET
 	g_rap.ok = true;
 	printf("[RapierPhys] rapier_bridge.dll 已加载: %s\n", local.c_str());
@@ -299,6 +302,7 @@ static void run_rapier_cmd(RapierInstance *inst, const uint8_t *in, size_t in_n,
 				g_rap.body_set_gravity_scale(W, id, sc); break; }
 			case 18: { uint32_t id = r.u32(); g_rap.body_reset_forces(W, id); break; }
 			case 19: { uint32_t id = r.u32(); int32_t en = r.i32(); g_rap.body_set_ccd(W, id, en); break; }
+			case 20: { double u = r.f64(); g_rap.world_set_length_unit(W, u); break; }
 			default:
 				// ⚠️ 未知操作码**必须立刻停**：它的载荷长度未知，继续读下去会把
 				//    后面的字节当成操作码，整条流错位 —— 而错位往往表现为"写出了
@@ -453,28 +457,7 @@ extern "C" __declspec(dllexport) GDExtensionBool gdextension_init(
 		printf("[FastPhys] 关键接口缺失\n");
 		return 0;
 	}
-	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_class.buf, "FastPhys");
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_parent.buf, "RefCounted");
-	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_method.buf, "collide_batch");
-	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_ret.buf, "contacts");
-	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_a0.buf, "pairs");
-	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_a1.buf, "shape");
-	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_a2.buf, "shape");
-	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_a3.buf, "count");
-	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_bp.buf, "broadphase");
-	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_bp0.buf, "bod");
-	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_bp1.buf, "rect");
-	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_bp2.buf, "order");
-	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_bp3.buf, "shape");
-	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_bpret.buf, "mans");
-	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_sv.buf, "solve");
-	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_sv0.buf, "bod");
-	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_sv1.buf, "mans");
-	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_sv2.buf, "shape");
-	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_svret.buf, "vel");
-	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_cw.buf, "clear_warm");
-	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_probe.buf, "warm_probe");
-	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_probe0.buf, "shape");
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_rp_class.buf, "RapierPhys");
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_rp_cmd.buf, "cmd");
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_rp_a0.buf, "input");
@@ -486,11 +469,11 @@ extern "C" __declspec(dllexport) GDExtensionBool gdextension_init(
 	g_pba_copy_ctor = g_get_ctor(GDEXTENSION_VARIANT_TYPE_PACKED_BYTE_ARRAY, 1);
 	g_pba_default_ctor = g_get_ctor(GDEXTENSION_VARIANT_TYPE_PACKED_BYTE_ARRAY, 0);
 	if (!g_pba_copy_ctor || !g_pba_default_ctor) { printf("[FastPhys] 拿不到 PackedByteArray 构造函数\n"); return 0; }
-	if (!g_get_builtin) { printf("[FastPhys] 缺少 variant_get_ptr_builtin_method\n"); return 0; }
-	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_resize.buf, "resize");
-	g_pba_resize = g_get_builtin(GDEXTENSION_VARIANT_TYPE_PACKED_BYTE_ARRAY,
-		(GDExtensionConstStringNamePtr)g_sn_resize.buf, PBA_RESIZE_HASH);
-	if (!g_pba_resize) { printf("[FastPhys] 拿不到 PackedByteArray.resize\n"); return 0; }
+	// ⚠️ 这里曾经解析并检查 PackedByteArray.resize —— 那是手写后端用来"现造输出数组"的。
+	//    RapierPhys 的输出走"按模板拷贝"（C++ 侧 resize 一个 PackedByteArray 实测段错误），
+	//    不需要它。删掉内核后这段检查还在，导致扩展**整个加载失败** ——
+	//    而症状是 GDScript 侧 "Nonexistent function 'cmd' in base 'Nil'"，完全指不到这里。
+	//    教训：删掉一个子系统时，它的**启动期自检**要一起删。
 	if (!g_get_to_type || !g_get_from_type || !g_get_destructor) {
 		printf("[FastPhys] 缺少 Variant 转换接口\n");
 		return 0;

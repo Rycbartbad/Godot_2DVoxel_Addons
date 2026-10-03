@@ -180,6 +180,29 @@ pub extern "C" fn rb_body_add_force(w: *mut World, id: u32, fx: f64, fy: f64, to
     }
 }
 
+/// 设置长度单位。
+///
+/// ⚠️ **这是像素世界必须设的一个参数，不设会静默地错一大片。**
+/// Rapier 的 IntegrationParameters 默认按"米"调（length_unit = 1.0），
+/// 而下面这**一整组**长度相关参数都是乘 length_unit 得到的：
+///
+///     allowed_linear_error        0.005 * u     （默认 0.005 px —— 紧到几乎为零）
+///     max_corrective_velocity     3.0   * u     （默认 3 px/s —— 穿透挤出慢得离谱）
+///     prediction_distance         0.02  * u     （默认 0.02 px —— 等于没有推测接触）
+///     max_linear_velocity         400.0 * u     （默认 400 px/s —— **钳住所有速度**）
+///     contact_recycle_distance    0.05  * u
+///
+/// 实测症状：自由落体的速度无论重力多大都停在 **397.68 px/s**（正好逼近 400），
+/// g=900 和 g=600 给出同一个终速 —— 一眼看去很像阻尼，其实不是
+/// （阻尼的终速是 g/d，会随重力变）。
+///
+/// 100.0 是 Rapier 文档自己给像素游戏的建议值（"100 pixels = 1 meter"）。
+#[no_mangle]
+pub extern "C" fn rb_world_set_length_unit(w: *mut World, unit: f64) {
+    let Some(w) = (unsafe { wref(w) }) else { return };
+    w.params.length_unit = unit as f32;
+}
+
 /// 开关 CCD（对应 PWorld.ccd_enabled）。
 /// ⚠️ Rapier 的 CCD **默认是关的**（逐刚体），不设的话这个开关等于被静默忽略。
 #[no_mangle]

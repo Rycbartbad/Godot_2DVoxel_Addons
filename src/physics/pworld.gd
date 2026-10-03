@@ -194,6 +194,11 @@ var _packed_manifolds := false
 var grabs: Array = []
 var max_dynamic_bodies := 400
 
+## 上一子步的接触点数（只读统计，给 debug_overlay / demo 用）。
+##
+## ⚠️ 它曾经在手写后端里由宽相填，换成 Rapier 后一度**永远是 0** ——
+##    而 game.gd / debug_overlay.gd / bench.gd 都在读它。静默为 0 的统计
+##    比没有统计更糟：看板上显示"接触 0"会让人以为物理没在跑。
 var last_contacts := 0
 var _accum := 0.0
 var _next_id := 1
@@ -366,12 +371,33 @@ var _rp_cmd_us := 0
 var _rp_by_id := {}
 ## 本子步被抓住的刚体（每子步重建）。
 var _rp_grabbed := {}
+
 ## 阻尼与引擎 _integrate_forces 里那两行**同值**。Rapier 的公式也是 v *= 1/(1+d*dt)，
 ## 所以直接设进去就等价，不需要自己再乘一遍。
 ## ⚠️ 改引擎那两行时必须同步改这里，否则两条路径会静默分叉。
 var _rp_ccd_pushed := false
 ## 临时探针：打印每次 cmd 的容量/实际写入量。
 var rp_debug := false
+## Rapier 的长度单位：把它的"米"制默认参数换算到本引擎的像素尺度。
+##
+## ⚠️ **不设会静默错一大片。** Rapier 的 allowed_linear_error / max_corrective_velocity /
+##    prediction_distance / max_linear_velocity / contact_recycle_distance
+##    全都是"归一化值 × length_unit"，默认 length_unit=1.0 是按米调的。
+##    实测症状：自由落体速度无论重力多大都停在 **397.68 px/s**
+##    （Rapier 的 normalized_max_linear_velocity 默认 400）。
+##
+## ⚠️ **实测：设成 100.0 会让"力/力矩"整条失效。**
+##    validation_dynamics 的"持续力矩 60 步"变成 ω 恒为 0（1.0 时 16/16 全过）。
+##    length_unit 缩放的是**一整组**参数，牵动的不止速度上限 —— 所以这里先留在
+##    1.0（Rapier 默认），保证套件全绿；像素尺度该改哪些参数要做**外科式**处理，
+##    不能靠一个 length_unit 一刀切。见 docs/development_log.md。
+##
+## 已经量到的确定问题：normalized_max_linear_velocity 默认 400，
+## 于是自由落体速度无论重力多大都停在 **397.68 px/s**（g=900 和 g=600 给出同一个终速，
+## 一眼看去很像阻尼，其实不是 —— 阻尼的终速是 g/d，会随重力变）。
+var rp_length_unit := 1.0
+var _rp_length_unit_pushed := 0.0
+
 var rp_linear_damping := 0.35
 var rp_angular_damping := 0.6
 
@@ -485,6 +511,15 @@ func _rp_create_missing() -> void:
 func _substep_rapier(dt: float) -> void:
 	if _rp == null:
 		_rp = ClassDB.instantiate("RapierPhys")
+		if _rp == null:
+			# ⚠️ 这里必须**吵闹地**失败。扩展加载失败时 ClassDB.instantiate 返回 null，
+			#    而如果放任下去，报错会是 "Nonexistent function 'cmd' in base 'Nil'" ——
+			#    那句话完全指不到"扩展没加载"这个真因（实测排查了很久）。
+			push_error("RapierPhys 扩展不可用：gdext/fastphys.gdextension 没加载成功。" +
+				"物理无法运行。先确认 fastphys.dll 与 rapier_bridge.dll **两个都**存在且都是最新的" +
+				"（只重建一个会导致 load_rapier 失败），再跑 python tools/build_addon.py --verify。")
+			assert(false, "RapierPhys 扩展不可用")
+			return
 	_rp_create_missing()
 	# ---- 抓取约束：必须在**推送之前**解 ----
 	#
@@ -502,6 +537,11 @@ func _substep_rapier(dt: float) -> void:
 	_rp_ccd_pushed = ccd_enabled
 	var t0 := Time.get_ticks_usec()
 	var cmds := PackedByteArray()
+	# 长度单位：只在第一次（或改了之后）推一次
+	if rp_length_unit != _rp_length_unit_pushed:
+		_rp_u8(cmds, 20)
+		_rp_f64(cmds, rp_length_unit)
+		_rp_length_unit_pushed = rp_length_unit
 	# 重力变了才推
 	if gravity != _rp_gravity_pushed:
 		_rp_u8(cmds, 1)
@@ -608,11 +648,24 @@ func _substep_rapier(dt: float) -> void:
 		b4.rotation = res.decode_double(off + 16)
 		b4.linear_velocity = Vector2(res.decode_double(off + 24), res.decode_double(off + 32))
 		b4.angular_velocity = res.decode_double(off + 40)
+		var raw_vy := b4.linear_velocity.y
+		# 终端速度：Rapier 没有这个概念，所以在这里钳制。
+		#
+		# ⚠️ 关键是**镜像要留在 Rapier 的实际值（钳制前）**，而不是钳制后的值 ——
+		#    镜像的语义就是"Rapier 现在是多少"。留成钳制后的值会让下一子步的
+		#    "变了才推"判断认为无需推送，于是 Rapier 继续按未钳制的速度积分，
+		#    钳制等于没做。留成钳制前的值，下一子步自然会把钳制值推过去。
+		#    （代价是一个子步的滞后，对"终端速度"这种上限语义无所谓。）
+		#
+		# 为什么必须落实：terminal_speed 是 pixel_physics / pixel_world /
+		# validation_fall_feel 都在用的公开旋钮，静默失效比没有它更糟。
+		if terminal_speed > 0.0 and raw_vy > terminal_speed:
+			b4.linear_velocity.y = terminal_speed
 		b4._rp_x = b4.position.x
 		b4._rp_y = b4.position.y
 		b4._rp_rot = b4.rotation
 		b4._rp_vx = b4.linear_velocity.x
-		b4._rp_vy = b4.linear_velocity.y
+		b4._rp_vy = raw_vy
 		b4._rp_w = b4.angular_velocity
 		off += 48
 	for b5: PBody in bodies:
@@ -655,14 +708,16 @@ func _vel_at_pre(b: PBody, p: Vector2) -> Vector2:
 ## 不再靠"求解前后的速度差 × 有效质量"去估 —— 那是拿不到真值时的替代品。
 ## 但 approach 仍然必须用**求解前**的速度算（求解后接触点相对速度已归零）。
 func _collect_contacts_rapier() -> void:
-	if not contact_events_enabled:
-		return
 	if _rp == null:
 		return
+	# 接触数**无条件**取 —— 它是只读统计（看板在读），与是否订阅接触事件无关。
 	var cnt_cmds := PackedByteArray()
 	_rp_u8(cnt_cmds, 11)
 	var cnt_res := _rp_send(cnt_cmds, 4)
 	var n: int = cnt_res.decode_s32(4)
+	last_contacts = n
+	if not contact_events_enabled:
+		return
 	var seen := {}
 	if n > 0:
 		var cmds := PackedByteArray()
