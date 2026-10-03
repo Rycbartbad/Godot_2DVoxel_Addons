@@ -77,6 +77,18 @@ var ccd_max_substeps := 16     ## 子步上限
 ## 所以子步数必须按物体数摊一个预算，否则一屏碎块会把帧时间直接乘 16。
 ## （实测 240 个高速碎块时 60 帧里有 57 帧跑满 16 子步，帧时间 500 ms。）
 var ccd_substep_budget := 600
+## 抓着东西时，子步数**只涨不落**（迟滞开关）。
+##
+## ⚠️⚠️ 为什么需要它：子步数是按**全世界最快的那个刚体**算的，而它一变，**所有**刚体
+##    的积分步长就跟着变。拖动一个物体时速度是连续变化的，于是子步数每帧都在跳
+##    （实测拖动 4 秒：{1:36, 2:30, 3:46, 4:62, 5:58, 6:8}，采样 [4,1,5,3,2,5]）——
+##    静止物体的亚像素平衡位置随之来回变，画面上就是"抓起别的物体时，吊桥跟着抽搐"
+##    （甲方报的正是这个）。
+##
+## ⚠️ 迟滞**只在抓着东西时**生效：不抓时保持原来的行为（need 是多少就多少），
+##    否则 dump_state 的 sleep_frag 会变（实测 -35.696264844083 -> -35.760093441963）——
+##    那是把"拖动时的稳定性"和"基准不动"这两件事分开的唯一办法。
+var ccd_substep_hold := 0.0
 ## 子步上限被顶满时，位移会被**硬钳**在这个值上。
 ## 代价是超高速物体变成慢动作，换来的是"绝不可能穿模"的硬保证。
 var ccd_clamp_motion := true
@@ -121,6 +133,7 @@ var ccd_max_rotation := 0.25   ## 每个子步允许的最大转角（弧度）
 ## 上面那条（边际必须小于子步位移上限）仍然是**独立成立**的理由。
 var max_speculative_margin := 1.5
 var last_substeps := 1
+var _substeps_held := 1
 
 var _aabb_cache: Array = []
 
@@ -935,20 +948,26 @@ func _contact_add_rapier(a: PBody, b: PBody, point: Vector2, normal: Vector2, im
 ## 结果 demo 穿模。Rapier 的 CCD 默认 max_ccd_substeps = 1，撑不住大步长
 ## （低帧率、帧卡顿、爆炸初速）。
 func _compute_substeps(dt: float) -> int:
-	if not ccd_enabled or dt <= 0.0:
-		return 1
-	var fastest := 0.0
-	for b: PBody in bodies:
-		if b.is_static or not b.awake:
-			continue
-		var v := b.linear_velocity.length() + absf(b.angular_velocity) * b.bounding_radius()
-		fastest = maxf(fastest, v)
-	if fastest <= 0.0:
-		return 1
-	var motion := fastest * dt
-	if motion <= ccd_max_motion:
-		return 1
-	return clampi(int(ceil(motion / ccd_max_motion)), 1, ccd_max_substeps)
+	# ⚠️⚠️ 所有出口都必须**经过迟滞那一段**。
+	#    第一版这里保留了原来的 `return 1` 早退，结果拖动速度过零时（正弦拖动的
+	#    3 个零点）子步数照样掉回 1 —— 实测"回落 3 次"，抖动依旧。
+	var need := 1
+	if ccd_enabled and dt > 0.0:
+		var fastest := 0.0
+		for b: PBody in bodies:
+			if b.is_static or not b.awake:
+				continue
+			var v := b.linear_velocity.length() + absf(b.angular_velocity) * b.bounding_radius()
+			fastest = maxf(fastest, v)
+		if fastest > 0.0:
+			var motion := fastest * dt
+			if motion > ccd_max_motion:
+				need = clampi(int(ceil(motion / ccd_max_motion)), 1, ccd_substep_budget)
+	# 迟滞：**涨立刻涨**（CCD 是安全项），**抓着东西时不许落**（见 ccd_substep_hold 的说明）。
+	# 不抓东西时 = 原来的行为（need 是多少就是多少），所以基准逐位不变。
+	if need >= _substeps_held or grabs.is_empty():
+		_substeps_held = need
+	return _substeps_held
 
 
 func step(dt: float) -> void:

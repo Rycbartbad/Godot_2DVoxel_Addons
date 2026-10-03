@@ -29,6 +29,7 @@ func _initialize() -> void:
 	_test_single_drop()
 	_test_stack()
 	_test_sleep()
+	_test_substeps_stable_while_grabbing()
 	_test_fracture()
 	_test_offset_origin_rotation()
 	_test_advance()
@@ -85,6 +86,49 @@ func _test_stack() -> void:
 		_check("box %d no tilt" % i, absf(b2.rotation) < 0.001,
 			"rot=%.6f" % b2.rotation)
 		_check("box %d sleeping" % i, not b2.awake, "awake=%s" % b2.awake)
+
+## 拖动时全世界的子步数必须**稳定**（抓着东西时只涨不落）。
+##
+## ⚠️ 子步数是按"全世界最快的那个刚体"算的，它一变，**所有**刚体的积分步长就跟着变。
+##    实测拖动一个物体时子步数每帧在 1~6 之间跳，静止物体的亚像素平衡位置随之来回变，
+##    画面症状就是"抓起别的物体时，吊桥跟着抽搐"（甲方报的）。
+##
+##    迟滞只在**抓着东西时**生效：不抓时保持原行为，所以 dump_state 的 8 条基准逐位不变
+##    （试过全局迟滞：sleep_frag 从 -35.696264844083 变成 -35.760093441963）。
+func _test_substeps_stable_while_grabbing() -> void:
+	print("[拖动时子步数稳定]")
+	var world := PWorld.new()
+	world.gravity = Vector2(0, 600)
+	var ground := PBody.new()
+	ground.position = Vector2(0, 220)
+	ground.make_static()
+	world.add_body(ground, [_box_shape(768, 100)])
+	var b := PBody.new()
+	b.position = Vector2(150, 200)
+	world.add_body(b, [_box_shape(16, 16)])
+	for i in 120:
+		world.step(1.0 / 60.0)
+	world.grab(b, b.position)
+	# ⚠️ 只统计"**涨上去之后**又落下来"。拖动是从静止开始的，起步阶段子步数本来就
+	#    从低到高爬（1->2->...->6），那不是抖动。
+	var drops := 0
+	var prev: int = world.last_substeps
+	var initial: int = prev
+	var peak: int = prev
+	var rose := false
+	for i in 240:
+		var spd := 600.0 * sin(float(i) * 0.05)          # 0 -> 600 px/s -> 0
+		world.set_grab_target(world.grabs[0].target + Vector2(spd / 60.0, 0))
+		world.step(1.0 / 60.0)
+		var n: int = world.last_substeps
+		peak = maxi(peak, n)
+		if n > initial:
+			rose = true
+		if rose and n < prev:                            # 涨上去之后又落 = 抖
+			drops += 1
+		prev = n
+	_check("拖动时子步数只涨不落", drops == 0, "回落 %d 次，峰值 %d 子步" % [drops, peak])
+
 
 func _test_sleep() -> void:
 	print("[sleep]")
