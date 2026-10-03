@@ -197,7 +197,10 @@ func _process(_dt: float) -> void:
 
 func _ready() -> void:
 	PixelScale.set_scale(voxel_size)
-	rebuild()
+	# ⚠️ 可能已经被"按需烘焙"建过了（子节点在 _ready 里读了 .body，见 PixelBody2D.body）——
+	#    那就别再 rebuild：rebuild 会 PWorld.new() 造一个新世界，把刚拿到的引用作废。
+	if world == null:
+		rebuild()
 	_apply_voxel_size()
 	# ⚠️ 显式打开：编辑器里要靠它跟踪相机的变化来重画取景框。
 	set_process(true)
@@ -246,7 +249,13 @@ func rebuild() -> void:
 	if renderer == null:
 		renderer = PixelRenderer.new()
 		renderer.name = "PixelRenderer"
-		add_child(renderer)
+		# ⚠️⚠️ 必须**延迟**加：rebuild() 现在可能被"按需烘焙"从**别的节点的 _ready**
+		#    里触发（子节点读 .body，见 PixelBody2D.body），而那时本节点还在
+		#    "busy setting up children" 状态 —— 同步 add_child 会失败：
+		#      Parent node is busy setting up children, `add_child()` failed.
+		#    渲染器的贴图节点挂在它自己的 holder 下，**不需要在树里**也能建，
+		#    所以延迟到帧末入树不影响这一趟 rebuild。
+		add_child.call_deferred(renderer)
 	renderer.palette = pal
 	var dens_call := Callable(self, "_density_of")
 	_body_nodes.clear()

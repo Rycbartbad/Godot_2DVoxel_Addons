@@ -345,7 +345,37 @@ func invalidate_gizmo() -> void:
 ##    而 PBody 是 RefCounted —— 加 @export 会直接报
 ##    "Export type can only be built-in, a resource, a node, or an enum"。
 ##    它本来就是运行时状态，不该序列化。
-var body = null
+## 这个节点烘焙出来的 PBody。
+##
+## ⚠️⚠️ 以前它只是"运行时才有值的普通字段"，于是：
+##     Godod 的 _ready 是**子节点先、父节点后**，而 PixelWorld 是在自己的 _ready 里
+##     才 rebuild() 的 —— 所以子脚本里 `@onready var b = $Placed.body` 拿到的是 **null**，
+##     只能写 `await get_tree().process_frame` 或者自己 find_children 找一遍。
+##
+##     现在改成**访问时按需烘焙**（幂等，走 PixelWorld.add_body_node）：
+##     不管 _ready 顺序、不管世界有没有建好，第一次读 .body 就能拿到东西。
+##     编辑器里也一样（@tool 下读它就会烘）。
+##
+## 想在 Inspector 里"拖一个刚体进来"的话，导出**节点**而不是 PBody：
+##     @export var body_node: PixelBody2D      # 拖节点
+##     var body = body_node.body               # 拿到 PBody
+## （PBody 是 RefCounted，@export 不支持；Resource 化是另一场重构。）
+var _body = null
+var body:
+	get:
+		if _body == null:
+			_body = _bake_lazily()
+		return _body
+	set(v):
+		_body = v
+
+
+## 按需烘焙：交给 PixelWorld.add_body_node（它自己处理"世界还没建"和幂等）。
+func _bake_lazily():
+	var pw := get_parent()
+	if pw != null and pw.has_method("add_body_node"):
+		return pw.add_body_node(self)
+	return bake()      # 没有 PixelWorld 时至少给出一个没进世界的 PBody
 
 
 ## 按当前导出属性造出 PixelShape。
