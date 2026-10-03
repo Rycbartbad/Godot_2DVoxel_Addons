@@ -273,8 +273,6 @@ func sync(body) -> void:
 				if not rebuild_all and not dirty.intersects(tr):
 					continue
 				last_tiles_rebuilt += 1
-				var img := _build_region_image(body.shapes, aabb, tr)
-				tis[key] = img
 				var sp: Sprite2D = tiles.get(key)
 				if sp == null:
 					sp = Sprite2D.new()
@@ -282,13 +280,37 @@ func sync(body) -> void:
 					sp.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 					holder.add_child(sp)
 					tiles[key] = sp
+				var cur: Image = tis.get(key)
 				var tex: ImageTexture = tts.get(key)
-				if tex == null or tex.get_width() != tr.size.x or tex.get_height() != tr.size.y:
-					tex = ImageTexture.create_from_image(img)
+				var need_full: bool = rebuild_all or cur == null or tex == null \
+						or tex.get_width() != tr.size.x or tex.get_height() != tr.size.y
+				if need_full:
+					cur = _build_region_image(body.shapes, aabb, tr)
+					tis[key] = cur
+					tex = ImageTexture.create_from_image(cur)
 					tts[key] = tex
 					sp.texture = tex
 				else:
-					tex.update(img)
+					# 🔥🔥 只画**脏矩形与本块的交集**，再 blit 进持久图。
+					#
+					# ⚠️ 这里以前是"整块 64x64 重画"：一笔擦除的脏矩形只有 24x24
+					#    （实测 _take_dirty_rect -> 24x24），却要重画 4096 个像素 ——
+					#    **7 倍的浪费**，而逐像素循环是 sync 的几乎全部成本
+					#    （64x64 实心块实测 2.41 ms ≈ 0.59 us/像素）。
+					#
+					#    blit_rect 是原生操作（逐字节拷贝），所以"画一小块 + 贴进去"
+					#    比"整块重画"便宜得多。贴图上传仍然要整块（tex.update），
+					#    那部分没法省 —— 但它不是瓶颈。
+					#
+					# ⚠️ 正确性依赖两条既有契约，缺一不可：
+					#    · dirty 覆盖本次**全部**改动像素（mark_dirty_range 的契约）
+					#    · 有未记录改动时 rebuild_all 为真（revision != range_revision）
+					#    两者任一不成立，持久图就会**静默**落后于形状。
+					var sub := dirty.intersection(tr)
+					if sub.size.x > 0 and sub.size.y > 0:
+						var patch := _build_region_image(body.shapes, aabb, sub)
+						cur.blit_rect(patch, Rect2i(0, 0, sub.size.x, sub.size.y), sub.position - tr.position)
+					tex.update(cur)
 				# ⚠️⚠️ offset 必须是**区域**在局部坐标里的原点（rx, ry），
 				#    不是块的网格原点 Vector2(tx << 6, ty << 6)。
 				#
