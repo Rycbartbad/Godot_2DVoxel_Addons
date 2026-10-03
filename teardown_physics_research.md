@@ -403,7 +403,7 @@ README 自己也指出了已知瓶颈：**命令粒度是 `target shape + target
 | 项 | 状态 |
 |---|---|
 | Dennis Gustafsson 原博客 `tuxedolabs.blogspot.com` | **无法访问**（本网络下 DNS 被污染 + 超时；`web.archive.org` 同样超时）。所有关于他原文的内容均改由官方 API/官方 modding 文档/媒体转述佐证。 |
-| Teardown 体素边长 = 0.1 m | **未核实**（社区广泛引用，本次未取得一手来源） |
+| Teardown 体素边长 = 0.1 m | ✅ **已核实（一手）**：Dennis 在 Software Engineering Daily EP1772（2025-01-02）访谈里说 "1 voxel is 10 centimeters" |
 | Teardown 求解器具体算法（子步数、迭代数、是否 warm start） | **无公开一手证据**。官方仅暴露 `Constrain*` 的限幅式约束接口，可作为"冲量层可限幅求解"的间接证据。 |
 | "Teardown 使用 small steps / XPBD" 的流行说法 | **判为误传**：其来源是 2025 年 Dennis **新引擎**的报道。 |
 | `devops-geek.net` 的 Teardown 引擎分析 | **AI 生成内容**（页面自带 `AI Mode: tech`），不作为证据。 |

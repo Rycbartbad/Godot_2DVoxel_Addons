@@ -1,18 +1,26 @@
 # 体素破坏：别人怎么做的（对照总结）
 
-> 起因：擦除性能。本项目的擦除路径约 12 ms/笔，其中 `decompose` 占绝大部分
-> （`_build_grid` 8.7 ms + `_greedy` 3.8 ms）。写这份是因为**一直在自己的实现里
-> 打转**，应该先看别人解过没有。
+> ⚠️ 本文只讲**破坏管线**。碰撞那一层（碰撞建在哪、怎么增量更新）见
+> [`docs/voxel_collision_research.md`](voxel_collision_research.md)。
+>
+> 起因：擦除性能。写这份的时候擦除约 12 ms/笔；位网格改造之后
+> **今天重跑**：一笔 10.5~12.9 ms，其中 `rebuild` 占 96~97%
+> （`_build_grid` 4.8 ms + `local_aabb` 重算 3.3 ms + 贪心/合并 ~1.5 ms，
+> Rapier 推送 0.17 ms）。数字与分解见
+> [`docs/voxel_collision_research.md`](voxel_collision_research.md) §1。
 
 ## 一、根本差别：碰撞建在哪里
 
 **Teardown（及其公开的破坏管线实现）在体素网格上直接做碰撞** ——
 自定义空间索引 + spatial hashing，**不是**把形状分解成多边形再交给物理引擎。
 
-> 原文（[Dissecting the Teardown Engine](https://devops-geek.net/nerd-space/dissecting-the-teardown-engine-a-technical-autopsy-of-voxel-destruction-pipelines/)）：
-> "…executing rigid body dynamics, material stress propagation, and ray-traced
-> rendering directly on uniform spatial data structures… can bypass the
-> computational bottlenecks of traditional CAD-style breaking mechanics."
+> ⚠️ 这里原本引用的是 devops-geek.net 那篇《Dissecting the Teardown Engine》。
+> **已撤掉** —— 该页面自带 `AI Mode: tech` 标记，是 AI 生成内容，不作为证据
+> （判定见 `teardown_physics_research.md` §4）。
+>
+> 这条结论的**一手依据**是官方 API/modding 文档：Shape 是"a voxel object"、
+> `GetShapeVoxelCount`/`SetShapeDensity` 决定质量、连接判据只有共面、
+> `SplitShape` 是引擎原语 —— 见 `teardown_physics_research.md` §1。
 
 **这对我们意味着什么**：`GreedyRects.decompose` 存在的**唯一理由**是
 Rapier 需要矩形碰撞体。这个成本是"用通用物理引擎"的代价，不是破坏系统本身需要的。
@@ -76,8 +84,10 @@ DestructionShapeChunkOverlapJob      破坏形状 chunk × 目标 chunk 重叠�
 
 **另外三条值得单独评估**（按性价比）：
 
-1. **核对连通性邻域**（4 vs 8）—— 可能是**行为差异**而不只是性能。
-   便宜、且影响正确性，应该先查。
+1. ~~**核对连通性邻域**（4 vs 8）~~ ✅ **已查清：我们是 4 邻域**
+   （`_group()` 跨块只查 +X/+Y，对角不算连接），与 Teardown 的共面判据一致。
+   `touches_boundary()` 里的八邻域只是**保守预筛**，不会错判。
+   详见 `docs/voxel_collision_research.md` §1.5。
 2. **碎块上限（每 chunk 最多 N 个）** —— 直接降 `split` 与后续 `rebuild` 的成本。
 3. **碎块独立碰撞层** —— 2D 里可以让碎块之间不互相碰撞，
    省掉大量接触对。但要确认手感是否可接受。
@@ -89,6 +99,7 @@ DestructionShapeChunkOverlapJob      破坏形状 chunk × 目标 chunk 重叠�
 ## 来源
 
 - [qrisquinn/Vex-2.0](https://github.com/qrisquinn/Vex-2.0) — greedy meshing + 池化的体素破坏
-- [Dissecting the Teardown Engine](https://devops-geek.net/nerd-space/dissecting-the-teardown-engine-a-technical-autopsy-of-voxel-destruction-pipelines/) — Teardown 破坏管线剖析
+- ~~Dissecting the Teardown Engine（devops-geek.net）~~ —— **已判定为 AI 生成内容，撤掉**
 - [Need help properly understanding how colliders work in Teardown](https://gamedev.stackexchange.com/questions/216959/need-help-properly-understanding-how-colliders-work-in-teardown) — 碰撞体讨论
 - 工作区 `teardown_physics_research.md` §2.3 破坏管线
+- 碰撞那一层：[docs/voxel_collision_research.md](voxel_collision_research.md)（godot_voxel / Vex-2.0 源码精读 + 本机实测）
