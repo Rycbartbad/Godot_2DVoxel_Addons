@@ -52,38 +52,96 @@ class Result:
 		return a
 
 
+## 块边长（像素）。64 是研究文档 §4.2 的推荐值，也是实测选的：
+##   32x32 的矩形更多、合并更贵；128 的脏块本身太大（一笔擦除要重算 4 倍面积）。
+const BLOCK_SHIFT := 6
+const BLOCK_SIZE := 64
+const BLOCK_CHUNKS := 8          # 64 / 8：每边 8 个 chunk（8 整除 64，所以 chunk 不会跨块）
+
 static func decompose(shape: PixelShape, max_rects: int = 0) -> Result:
 	var res := Result.new()
-	var g := _build_grid(shape)
-	if g == null:
+	var aabb := shape.local_aabb()
+	if aabb.size.x <= 0 or aabb.size.y <= 0:
 		return res
-
-	# 双向贪心：横优先 / 竖优先各跑一遍，取矩形更少的那份（两者都精确）
-	#
-	# ⚠️ 第一遍就是 1 个矩形的话，**第二遍不可能更好**（1 已经是最少），
-	#    直接跳过 —— 精确、通用，不是特例优化。
-	#
-	#    实心地面（768x100）走的正是这条：第一遍立刻得到覆盖全形状的 1 个矩形，
-	#    省掉第二遍的 76800 格扫描 + 76800 格清零。
-	#    实测 decompose 42.36 -> 20.58 ms 是靠原生 find()，
-	#    这一条再砍掉其中一半。
-	var a := _greedy(g.words.duplicate(), g.wq, g.w, g.h, true)
-	var rects: Array = a
-	if a.size() > 1:
-		var b := _greedy(g.words.duplicate(), g.wq, g.w, g.h, false)
-		if b.size() < a.size():
-			rects = b
-	rects = _merge_pass(rects)
-
-	var offset := Vector2(g.origin)
-	for i in rects.size():
-		var r: Rect2 = rects[i]
-		rects[i] = Rect2(r.position + offset, r.size)
-	res.origin = offset
+	var rects := _merge_pass(_block_rects(shape))
+	res.origin = Vector2(aabb.position)
 	res.rects = rects
 	if max_rects > 0 and rects.size() > max_rects:
 		res.budget_exceeded = true
 	return res
+
+
+## 按块（64x64）分解 + 缓存：只重算**指纹变了的块**。
+##
+## ⚠️⚠️ 为什么按块：全形状贪心的代价随**形状尺寸**走，而一笔擦除只动一小块。
+##    768x100 实测（10 笔擦除后 115 个矩形）：
+##      _build_grid 0.51 + 横优先 1.66 + **竖优先 3.78** + merge 0.00 = 5.95 ms
+##    而竖优先那一遍在这个形状上产出的矩形数**完全相同（115 = 115）**，纯白跑 ——
+##    它只是"两个方向取更少那份"里的比较对象，而比较结果常常是平手。
+##    按块之后一笔只重算 1~2 个块（每块约 0.5 ms）。
+##
+## ⚠️ 块锚在**局部像素坐标的 0/64/128...**，不是 AABB 原点：
+##    AABB 会随"擦到边界"而变，锚在 AABB 上的话每笔边缘擦除都要全量重算。
+##
+## ⚠️⚠️ 缓存不过期的判据：**比对该块 64 个 chunk 的占用字**（指纹），
+##    不依赖任何"谁改了要通知我"的脏标记 —— 理由见 _build_grid 的说明
+##    （脏标记那条路栽过多次，而**缓存判错是不报错的**）。
+##
+## ⚠️ 代价：矩形**不再跨块**，实心区域会凭空多出接缝 —— 必须靠 _merge_pass 的
+##    最大行程合并并回去（实心区域并成 1 个矩形 = 零接缝）。
+##    即便如此矩形集合仍会变 -> 8 条基准会移动（必须单独一个提交）。
+static func _block_rects(shape: PixelShape) -> Array:
+	var cache: Dictionary = shape._rect_blocks
+	var sigs: Dictionary = shape._grid_sigs
+	var keys: Array = shape._grid_keys
+	# 1) 新块。chunk 属于哪个块是它的 key 的函数，所以"新块"一定伴随"新 chunk"。
+	for k: int in shape.chunks:
+		var bk := ((k >> 35) << 32) | (((k << 32) >> 35) & 0xFFFFFFFF)
+		if not sigs.has(bk):
+			sigs[bk] = PackedInt64Array()
+			_sorted_insert(keys, bk)
+			cache[bk] = []
+	# 2) 指纹变了才重算这一块
+	var out: Array = []
+	for bk2: int in keys:
+		var sig := _block_sig(shape, bk2)
+		if sig != sigs[bk2]:
+			sigs[bk2] = sig
+			cache[bk2] = _decompose_block(shape, bk2)
+		for r: Rect2 in cache[bk2]:
+			out.append(r)
+	return out
+
+
+## 把一个块（64x64）重算成矩形列表（形状局部像素坐标）。
+## 块内网格宽恰好 1 个 word，所以每行是**一次直接 OR 写入**，不需要跨 word 掩码。
+static func _decompose_block(shape: PixelShape, bk: int) -> Array:
+	var bix := PixelShape.key_x(bk)
+	var biy := PixelShape.key_y(bk)
+	var cx0 := bix << 3
+	var cy0 := biy << 3
+	var words := PackedInt64Array()
+	words.resize(BLOCK_SIZE)
+	for oy in BLOCK_CHUNKS:
+		var row0 := oy << 3
+		for ox in BLOCK_CHUNKS:
+			var c: PixelChunk = shape.chunks.get(((cx0 + ox) << 32) | ((cy0 + oy) & 0xFFFFFFFF))
+			if c == null:
+				continue
+			var shift := ox << 3
+			for y in 8:
+				words[row0 + y] |= Bits.row_bits(c.occ, y) << shift
+	var a := _greedy(words.duplicate(), 1, BLOCK_SIZE, BLOCK_SIZE, true)
+	var rects: Array = a
+	if a.size() > 1:
+		var b := _greedy(words.duplicate(), 1, BLOCK_SIZE, BLOCK_SIZE, false)
+		if b.size() < a.size():
+			rects = b
+	var off := Vector2(bix << BLOCK_SHIFT, biy << BLOCK_SHIFT)
+	for i in rects.size():
+		var r: Rect2 = rects[i]
+		rects[i] = Rect2(r.position + off, r.size)
+	return rects
 
 
 ## 显式选择的近似代理：矩形数被压到 max_rects 以内，但会引入幻影碰撞体积。
@@ -458,100 +516,78 @@ static func _clear_rect(words: PackedInt64Array, wq: int, x: int, y: int, rw: in
 			cx += take
 
 
-## 合并共享整条边且跨度相同的矩形（精确，不会引入幻影）。
+## 合并：把"另一根轴上区间相同、主轴上也相邻"的矩形并成**极大行程**。
 ##
-## ⚠️⚠️ 旧版是 O(n^2) 的**顺序过程**，重写必须逐位复现它，不能顺手"改好"：
-##    · 它从 i 往后线性扫 j，**扫过的 j 永不回头**（a 变长之后也不会重看）。
-##    · 于是它只做到"等尺寸且相邻的两两配对、反复跑到不动点"，**不是**最大合并 ——
-##      3 个等尺寸矩形排成一行会停在 2 个（先并了前两个，第三个的尺寸已经对不上），
-##      4 个才会在第二轮并成 1 个。
-##    这个"不最大"是被 8 条基准钉住的行为（矩形集合就是 Rapier 的碰撞形状集合），
-##    所以这一版是**换数据结构、不换结果**，不是行为改进。
+## ⚠️⚠️ 语义与上一版（"进位"）**故意不同**：这是一次**行为变更**，不是等价重构。
+##    上一版是"等尺寸相邻两两配对、反复跑到不动点" —— 3 个等尺寸连排会停在 2 个，
+##    于是实心区域被切成 2 的幂那样的一串（4000 宽 -> [0,2048]+[2048,3072]+…），
+##    留下 log2 个**接缝**。
 ##
-## 实测（tests/diag_decompose_scale.gd，374 个矩形）：6.61 -> 1.15 ms；
-## 矩形越多差距越大 —— 旧版是平方增长，新实现是线性。
-## 等价性证据：600 组语料（真实擦除序列 / 结构对抗集 / 随机洗牌）与旧实现逐位相同，
-## 其中 469 组另按**像素**重建覆盖做独立对拍 —— 见 tests/validation_merge_equiv.gd。
+##    ⚠️ 接缝是**物理缺陷**，不是审美问题。实测（tests/diag_seam_matrix.gd）：
+##    地面被切成 6 块、接缝落在静止箱子边缘 **1 像素**处时，箱子会**翻倒**
+##    （30 个里 2 个翻 90°、滑走 47 像素）；而 [0,4000] 整块、或同样 6 块但接缝
+##    都不在箱子附近时，30 个箱子**纹丝不动**。机制已查清：触发条件就是
+##    "矩形边界落在离静止物体边缘 ~1 像素处" —— 与矩形数、顺序、裂缝都无关。
+##
+##    最大行程合并把实心区域并成 1 个矩形（= 旧全局贪心的结果）-> **零接缝**。
+##    这是"按块分解"能上线的**前提**：拿增量速度，但不把物理质量搭进去。
+##
+## 精确性：只并"另一轴区间相同 + 主轴相邻"的矩形 —— 并集不变、不重叠，
+## 覆盖仍逐像素精确（tests/validation_rect_shapes.gd 的像素级对拍守着）。
 static func _merge_pass(rects: Array) -> Array:
-	for r: Rect2 in rects:
-		if not _is_int_rect(r):
-			# 旧版比的是 absf(a.end.x - b.position.x) < 0.001 的**容差**，
-			# 而容差不是等价关系（不满足传递性），精确键索引复现不了它。
-			# 宁可整段退回旧实现，也不要静默给出另一个矩形集合 ——
-			# 矩形集合错了是不报错的，只会让形状与碰撞箱静默错位（用户报过两次）。
-			# 真实调用方只有 decompose()，喂进来的永远是整数像素矩形。
-			return _merge_pass_ref(rects)
 	var changed := true
 	while changed:
 		changed = false
-		var n := rects.size()
-		if n < 2:
-			break
-		# 键 = "能跟 a 拼上的那个 b 长什么样"。四个分量全部取自 b 自己：
-		#   横拼要 b.size == a.size、b.y == a.y、b.x == a.end.x
-		#   竖拼要 b.size == a.size、b.x == a.x、b.y == a.end.y
-		#
-		# ⚠️ 用 Vector4 而不是"把四个分量打包成一个 int"：打包要额外假设坐标范围与
-		#    整数性，一旦有人喂进小数或超大值就会**静默撞键** —— 缓存判错是不报错的，
-		#    这个项目在这上面栽过多次。Vector4 当字典键是**精确**比较
-		#    （已用 0.0005 偏差反证过它不会误命中）。
-		#
-		# 顺带：这两个键都是"尺寸 + 位置"的完整标识，所以正常情况下一个键只对应
-		# 一个矩形 —— 只有**完全重复**的矩形才会让候选表超过 1 项。
-		var hidx := {}
-		var vidx := {}
-		for j in n:
-			var b: Rect2 = rects[j]
-			var hk := Vector4(b.size.x, b.size.y, b.position.y, b.position.x)
-			var vk := Vector4(b.size.x, b.size.y, b.position.x, b.position.y)
-			if hidx.has(hk):
-				hidx[hk].append(j)
-			else:
-				hidx[hk] = [j]
-			if vidx.has(vk):
-				vidx[vk].append(j)
-			else:
-				vidx[vk] = [j]
-		var out: Array = []
-		var used := []
-		used.resize(n)
-		used.fill(false)
-		for i in n:
-			if used[i]:
-				continue
-			var a: Rect2 = rects[i]
-			# cursor 就是旧版内层循环的 j 位置。旧版**扫过的 j 不回头**，
-			# 所以候选必须 > cursor —— 这就是那条规则本身，不是近似。
-			#
-			# （试过再加一个"每个键记住上次扫到哪"的摊还指针：实测 0.793 vs
-			#   0.780 ms，落在噪声里，却多了一条"游标只会变大"的隐含不变量。不做。）
-			var cursor := i
-			while true:
-				var qh := _merge_candidate(hidx, used, Vector4(a.size.x, a.size.y, a.position.y, a.end.x), cursor)
-				var qv := _merge_candidate(vidx, used, Vector4(a.size.x, a.size.y, a.position.x, a.end.y), cursor)
-				# 旧版对同一个 j 先试横拼、再试竖拼；取两者里**下标更小**的那个，
-				# 等价于"线性扫到的第一个"。
-				var best := -1
-				var horiz := false
-				if qh >= 0 and (qv < 0 or qh <= qv):
-					best = qh
-					horiz = true
-				elif qv >= 0:
-					best = qv
-				if best < 0:
-					break
-				var b2: Rect2 = rects[best]
-				if horiz:
-					a = Rect2(a.position, Vector2(a.size.x + b2.size.x, a.size.y))
-				else:
-					a = Rect2(a.position, Vector2(a.size.x, a.size.y + b2.size.y))
-				used[best] = true
-				changed = true
-				cursor = best
-			used[i] = true
-			out.append(a)
-		rects = out
+		var a := _fuse_axis(rects, true)
+		if a.size() < rects.size():
+			changed = true
+		var b := _fuse_axis(a, false)
+		if b.size() < a.size():
+			changed = true
+		rects = b
 	return rects
+
+
+## 沿一根轴并极大行程：分组键是"**另一根轴**上的区间"（相同才能并），
+## 组内按主轴排序，首尾相接就并。
+##
+## ⚠️ 允许两个矩形**宽度不同**（只要 y 区间相同且 x 相邻）—— 这正是把"最后那个
+##    不满 64 的块"吸收进整条行程所需要的一步。并集不变，所以仍然精确。
+static func _fuse_axis(rects: Array, along_x: bool) -> Array:
+	var groups := {}
+	for r: Rect2 in rects:
+		var key := Vector2(r.position.y, r.size.y) if along_x else Vector2(r.position.x, r.size.x)
+		if groups.has(key):
+			groups[key].append(r)
+		else:
+			groups[key] = [r]
+	var out: Array = []
+	for key2: Vector2 in groups:
+		var g: Array = groups[key2]
+		if g.size() == 1:
+			out.append(g[0])
+			continue
+		if along_x:
+			g.sort_custom(func(p: Rect2, q: Rect2) -> bool: return p.position.x < q.position.x)
+		else:
+			g.sort_custom(func(p: Rect2, q: Rect2) -> bool: return p.position.y < q.position.y)
+		var cur: Rect2 = g[0]
+		for i in range(1, g.size()):
+			var nxt: Rect2 = g[i]
+			if along_x:
+				if absf(cur.end.x - nxt.position.x) < 0.001:
+					cur = Rect2(cur.position, Vector2(nxt.end.x - cur.position.x, cur.size.y))
+				else:
+					out.append(cur)
+					cur = nxt
+			else:
+				if absf(cur.end.y - nxt.position.y) < 0.001:
+					cur = Rect2(cur.position, Vector2(cur.size.x, nxt.end.y - cur.position.y))
+				else:
+					out.append(cur)
+					cur = nxt
+		out.append(cur)
+	return out
 
 
 ## 旧实现（`ea72019` 之前），**原样冻结**：非整数矩形要走 0.001 容差路径时用它兜底。

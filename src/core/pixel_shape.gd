@@ -78,6 +78,9 @@ var _grid_origin := Vector2i.ZERO
 var _grid_sigs: Dictionary = {}
 var _grid_keys: Array = []
 var _grid_ready := false
+## 块 key -> 该块的矩形列表（形状局部像素坐标）—— GreedyRects._block_rects 用。
+## 与 _grid_words 的区别：那个是"全形状的位网格"，这个是"每块的分解结果"。
+var _rect_blocks: Dictionary = {}
 
 
 ## 标记一个 chunk 为脏（chunk 坐标）。已经脏了就早退，热路径上只有一次查表。

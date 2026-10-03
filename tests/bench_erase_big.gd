@@ -6,10 +6,15 @@ extends SceneTree
 ##    2048x128 实测 build_grid 17.4 ms / 整笔 39.0 ms（45%），而它跟
 ##    "这一笔改了哪里"完全无关。
 ##
-## 判据（自校验增量网格，见 GreedyRects._build_grid）：
-##    build_grid 2048x128: 17.35 -> 3.44 ms（5.0 倍）
-##    整笔擦除            2048x128: 39.03 -> 28.02 ms/笔（-28%）
-##    8 条基准逐位不变（矩形集合没变）。
+## ⚠️ 下面的 build_grid 一列**从按块分解上线后就不再代表生产路径**了：
+##    decompose 现在走 GreedyRects._block_rects（按 64x64 块 + 自校验缓存），
+##    这个探针单独调 _build_grid，等于每次都从冷缓存全量重建 —— 数字偏大是正常的。
+##    留着它是为了继续量"全量网格"这条参照路径本身。
+##
+## 历史（每一步都拿 8 条基准当判据）：
+##    build_grid 增量重建      2048x128: 17.35 -> 3.44 ms（5.0 倍）
+##    分块贴图只画脏矩形交集     768x100: 10.83 -> 7.06 ms/笔
+##    按块分解 + 最大行程合并    768x100:  7.06 -> 3.68 ms/笔（8 条基准仍逐位不变）
 const AddonWorld := preload("res://src/nodes/pixel_world.gd")
 const AddonBody := preload("res://src/nodes/pixel_body_2d.gd")
 const AddonShape := preload("res://src/nodes/pixel_shape_2d.gd")

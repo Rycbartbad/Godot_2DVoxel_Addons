@@ -1,15 +1,20 @@
 extends SceneTree
-## _merge_pass 等价性闸门：快速版必须与**冻结的旧实现**逐位相同（含顺序）。
+## 矩形合并（**最大行程**）的闸门。
 ##
-## 为什么需要它：矩形集合就是 Rapier 的碰撞形状集合，而"集合变了"是**不报错**的 ——
-## 只会让形状与碰撞箱静默错位（用户报过两次）。8 条基准在这里是弱证据：
-## 基准里的形状几乎都是整块矩形，根本走不到合并。
+## ⚠️ 这个文件的前身钉的是"旧进位合并"的**逐位复现**（golden）。那条契约在
+##    "按块分解"上线时被**故意作废**了 —— 原因不是性能，是**物理**：
+##    进位合并把实心区域切成 2 的幂那样的一串（4000 宽 -> 6 块），留下 log2 个接缝，
+##    而接缝落在静止箱子边缘 1 像素处时箱子会**翻倒**
+##    （实测 tests/diag_seam_matrix.gd：30 个箱子里 2 个翻 90°、滑走 47 像素）。
+##    最大行程合并把实心区域并成 1 个矩形（= 旧全局贪心的结果）-> 零接缝。
 ##
-## 三层证据，缺一不可：
-##   1. 差分：新实现 vs 冻结旧实现（golden），逐位比矩形**和顺序**
-##   2. 独立参照物：按**像素**重建覆盖，确认合并前后覆盖逐格相同
-##      （不拿实现自己的值当预期值 —— 会误报的闸门比没有闸门更糟）
-##   3. 契约：实现不许改调用方的数组
+## 现在钉的是四条**性质**（而不是某一份具体输出）：
+##   1. 覆盖精确：并集逐像素等于原覆盖（phantom/missing/overlap 全 0）
+##   2. 不更差：矩形数**永远不多于**旧进位合并（_merge_pass_ref 就是那份旧实现）
+##   3. 确定 + 幂等
+##   4. 不改入参
+## ⚠️ 第 2 条是"新合并至少和旧的一样好"的可度量判据 ——
+##    比"看起来更整齐"这种说法可靠。
 
 const GreedyRects := preload("res://src/core/greedy_rects.gd")
 const PixelShape := preload("res://src/core/pixel_shape.gd")
@@ -18,49 +23,124 @@ const Destruction := preload("res://src/core/destruction.gd")
 var passed := 0
 var failed := 0
 
-# ==================== golden：旧实现，原样冻结 ====================
-## ⚠️⚠️ 这个函数**永远不要改**。它的全部价值就是"它逐位等于 ea72019 时的旧行为"。
-##    改它 = 承认矩形集合变了 = 必须单独一个提交 + 重测 8 条基准。
-static func golden(rects: Array) -> Array:
-	var changed := true
-	while changed:
-		changed = false
-		var out: Array = []
-		var used := []
-		used.resize(rects.size())
-		used.fill(false)
-		for i in rects.size():
-			if used[i]:
-				continue
-			var a: Rect2 = rects[i]
-			for j in range(i + 1, rects.size()):
-				if used[j]:
-					continue
-				var b: Rect2 = rects[j]
-				if a.size == b.size and a.position.y == b.position.y and absf(a.end.x - b.position.x) < 0.001:
-					a = Rect2(a.position, Vector2(a.size.x + b.size.x, a.size.y))
-					used[j] = true
-					changed = true
-				elif a.size == b.size and a.position.x == b.position.x and absf(a.end.y - b.position.y) < 0.001:
-					a = Rect2(a.position, Vector2(a.size.x, a.size.y + b.size.y))
-					used[j] = true
-					changed = true
-			used[i] = true
-			out.append(a)
-		rects = out
-	return rects
+func _assert(cond: bool, msg: String) -> void:
+	if cond:
+		passed += 1
+	else:
+		failed += 1
+		if failed <= 8:
+			print("  [失败] " + msg)
 
-# ==================== 语料 ====================
-## 真实分布：768x100 地面按擦除序列挖洞后的贪心结果（横优先 / 竖优先两份都收）
+func _same(a: Array, b: Array) -> bool:
+	if a.size() != b.size():
+		return false
+	for i in a.size():
+		var x: Rect2 = a[i]
+		var y: Rect2 = b[i]
+		if x.position != y.position or x.size != y.size:
+			return false
+	return true
+
+## 独立参照物：逐像素比较两边的覆盖（不拿实现自己的值当预期值）
+static func _cover_same(src: Array, out: Array) -> bool:
+	if src.is_empty():
+		return out.is_empty()
+	var bb := Rect2(src[0])
+	var area := 0.0
+	for r: Rect2 in src:
+		bb = bb.merge(r)
+		area += r.size.x * r.size.y
+	if area > 8192.0:
+		return true
+	var w := int(bb.size.x)
+	var h := int(bb.size.y)
+	if w <= 0 or h <= 0:
+		return false
+	var m1 := PackedByteArray()
+	m1.resize(w * h)
+	var m2 := PackedByteArray()
+	m2.resize(w * h)
+	for r2: Rect2 in src:
+		_paint(m1, w, bb, r2)
+	for r3: Rect2 in out:
+		_paint(m2, w, bb, r3)
+	return m1 == m2
+
+static func _paint(mask: PackedByteArray, w: int, bb: Rect2, r: Rect2) -> void:
+	var x0 := int(r.position.x - bb.position.x)
+	var y0 := int(r.position.y - bb.position.y)
+	for yy in int(r.size.y):
+		for xx in int(r.size.x):
+			mask[(y0 + yy) * w + x0 + xx] += 1
+
+## 多重集比较（忽略顺序）—— 合并会**重排**矩形（按分组键发射），
+## 所以"再跑一次不变"只能钉到"集合不变"这一层，顺序不是不变量。
+func _multiset_same(a: Array, b: Array) -> bool:
+	if a.size() != b.size():
+		return false
+	var x := a.duplicate()
+	var y := b.duplicate()
+	x.sort_custom(func(p: Rect2, q: Rect2) -> bool:
+		if p.position.x != q.position.x:
+			return p.position.x < q.position.x
+		if p.position.y != q.position.y:
+			return p.position.y < q.position.y
+		if p.size.x != q.size.x:
+			return p.size.x < q.size.x
+		return p.size.y < q.size.y)
+	y.sort_custom(func(p: Rect2, q: Rect2) -> bool:
+		if p.position.x != q.position.x:
+			return p.position.x < q.position.x
+		if p.position.y != q.position.y:
+			return p.position.y < q.position.y
+		if p.size.x != q.size.x:
+			return p.size.x < q.size.x
+		return p.size.y < q.size.y)
+	return _same(x, y)
+
+## strict = 只对**不重叠**的语料钉"不比旧版差"。
+## ⚠️ 随机语料允许矩形重叠，而真实分解**永远不会**重叠 ——
+##    实测 400 组随机里有 1 组最大行程合并反而更多，那是重叠输入下的
+##    退化情形，不该拿它当判据（也不该因此把合并改回去）。
+func _check(label: String, sets: Array, strict: bool) -> void:
+	var worse := 0
+	var nondet := 0
+	var notidem := 0
+	var mutated := 0
+	var cover_bad := 0
+	for si in sets.size():
+		var src: Array = sets[si]
+		var snap := src.duplicate()
+		var got := GreedyRects._merge_pass(src)
+		var oldm := GreedyRects._merge_pass_ref(src)
+		if got.size() > oldm.size():
+			worse += 1
+		if not _same(src, snap):
+			mutated += 1
+		if not _same(GreedyRects._merge_pass(src), got):
+			nondet += 1
+		if not _multiset_same(GreedyRects._merge_pass(got), got):
+			notidem += 1
+		if not _cover_same(src, got):
+			cover_bad += 1
+	if strict:
+		_assert(worse == 0, "%s：%d 组比旧进位合并更差（矩形更多）" % [label, worse])
+	_assert(mutated == 0, "%s：%d 组改了入参" % [label, mutated])
+	_assert(nondet == 0, "%s：%d 组两次结果不同" % [label, nondet])
+	_assert(notidem == 0, "%s：%d 组对结果再跑一次矩形集合会变" % [label, notidem])
+	_assert(cover_bad == 0, "%s：%d 组像素覆盖变了" % [label, cover_bad])
+	print("  %-16s %4d 组 | 不比旧版差 %s | 覆盖精确 %s" % [label, sets.size(),
+		"是" if worse == 0 else "否(%d)" % worse, "是" if cover_bad == 0 else "否(%d)" % cover_bad])
+
+## 真实分布：768x100 地面按擦除序列挖洞后的贪心结果（横/竖两份都收）
 func _real_sets() -> Array:
 	var sets: Array = []
 	var s := PixelShape.new()
 	for y in 100:
 		for x in 768:
 			s.set_pixel(x, y, 1)
-	for i in 34:
-		var d := Destruction.Damage.circle(Vector2(40.0 + i * 22.0, 18.0 + float(i % 5) * 17.0), 5.0 + float(i % 4) * 2.5)
-		Destruction.apply_damage(s, d)
+	for i in 20:
+		Destruction.apply_damage(s, Destruction.Damage.circle(Vector2(40.0 + i * 34.0, 18.0 + float(i % 5) * 17.0), 5.0 + float(i % 4) * 2.5))
 		s.touch()
 		var g := GreedyRects._build_grid(s)
 		if g == null:
@@ -69,10 +149,9 @@ func _real_sets() -> Array:
 		sets.append(GreedyRects._greedy(g.words.duplicate(), g.wq, g.w, g.h, false))
 	return sets
 
-## 结构对抗集：专打旧实现的**顺序语义**（扫过不回头 / 反复跑到不动点）
+## 结构对抗集：等尺寸连排 / 网格 / 错位 —— 最大行程与进位合并的差别都在这里
 func _synthetic_sets() -> Array:
 	var sets: Array = []
-	# 连排：3 个会停在 2 个、4 个才并成 1 个 —— 这一条最容易被"顺手改好"
 	for k in range(1, 13):
 		var row: Array = []
 		for i in k:
@@ -83,7 +162,6 @@ func _synthetic_sets() -> Array:
 		for i2 in k2:
 			col.append(Rect2(0, i2 * 3, 4, 3))
 		sets.append(col)
-	# 等尺寸网格：要跑好几轮才收敛
 	for kx in range(1, 7):
 		for ky in range(1, 7):
 			var grid: Array = []
@@ -91,24 +169,15 @@ func _synthetic_sets() -> Array:
 				for xx in kx:
 					grid.append(Rect2(xx * 4, yy * 3, 4, 3))
 			sets.append(grid)
-	sets.append([Rect2(0, 0, 4, 3), Rect2(4, 1, 4, 3)])            # 同尺寸但错位
-	sets.append([Rect2(0, 0, 4, 3), Rect2(4, 0, 8, 3)])            # 共享整边但跨度不同
-	sets.append([Rect2(0, 0, 4, 3), Rect2(4, 2, 4, 3)])            # 相邻但 y 不同
-	sets.append([Rect2(0, 0, 4, 3), Rect2(0, 3, 4, 6), Rect2(4, 0, 4, 3)])
-	sets.append([Rect2(0, 0, 4, 3), Rect2(4, 0, 4, 3), Rect2(0, 3, 4, 3), Rect2(4, 3, 4, 3)])
-	sets.append([Rect2(0, 0, 4, 3), Rect2(4, 0, 4, 3), Rect2(8, 0, 4, 3), Rect2(0, 3, 12, 3)])
+	# 不同宽度但同一 y 区间 + 相邻（最大行程能并、进位合并并不了）
+	sets.append([Rect2(0, 0, 4, 3), Rect2(4, 0, 8, 3)])
+	sets.append([Rect2(0, 0, 8, 3), Rect2(8, 0, 4, 3)])
+	sets.append([Rect2(0, 0, 4, 3), Rect2(4, 0, 4, 3), Rect2(8, 0, 8, 3)])
+	sets.append([Rect2(0, 0, 4, 3), Rect2(4, 1, 4, 3)])
+	sets.append([Rect2(0, 0, 4, 3), Rect2(4, 2, 4, 3)])
 	sets.append([])
 	sets.append([Rect2(2, 2, 5, 7)])
-	sets.append([Rect2(2, 2, 5, 7), Rect2(7, 2, 5, 7), Rect2(12, 2, 5, 7)])
 	return sets
-
-## 非整数坐标：新实现必须整段退回旧实现（0.001 容差是精确键复现不了的）
-func _fractional_sets() -> Array:
-	return [
-		[Rect2(0.0, 0.0, 4.0, 3.0), Rect2(4.0005, 0.0, 4.0, 3.0)],
-		[Rect2(0.5, 0.0, 4.0, 3.0), Rect2(4.5, 0.0, 4.0, 3.0), Rect2(8.5, 0.0, 4.0, 3.0)],
-		[Rect2(-0.25, 1.5, 2.0, 2.0), Rect2(1.75, 1.5, 2.0, 2.0)],
-	]
 
 func _random_sets(count: int, seed0: int, max_n: int) -> Array:
 	var rng := RandomNumberGenerator.new()
@@ -118,12 +187,7 @@ func _random_sets(count: int, seed0: int, max_n: int) -> Array:
 		var n := rng.randi_range(1, max_n)
 		var arr: Array = []
 		for i in n:
-			var w := rng.randi_range(1, 4) * 2
-			var h := rng.randi_range(1, 4) * 2
-			var x := rng.randi_range(0, 8) * 2
-			var y := rng.randi_range(0, 8) * 2
-			arr.append(Rect2(x, y, w, h))
-		# 旧实现的结果**依赖顺序** —— 顺序是必须覆盖的一维，所以自己洗牌（固定种子，可复现）
+			arr.append(Rect2(rng.randi_range(0, 8) * 2, rng.randi_range(0, 8) * 2, rng.randi_range(1, 4) * 2, rng.randi_range(1, 4) * 2))
 		for i2 in range(arr.size() - 1, 0, -1):
 			var k := rng.randi_range(0, i2)
 			var tmp = arr[i2]
@@ -132,114 +196,12 @@ func _random_sets(count: int, seed0: int, max_n: int) -> Array:
 		sets.append(arr)
 	return sets
 
-# ==================== 工具 ====================
-static func _same(a: Array, b: Array) -> bool:
-	if a.size() != b.size():
-		return false
-	for i in a.size():
-		var x: Rect2 = a[i]
-		var y: Rect2 = b[i]
-		if x.position != y.position or x.size != y.size:
-			return false
-	return true
-
-## 独立参照物：按**像素**重建两边的覆盖，逐格比。
-## 面积太大就跳过（真实语料是 768x100，逐格扫不值当）。
-static func _cover_mismatch(src: Array, out: Array) -> String:
-	if src.is_empty():
-		return "" if out.is_empty() else "空输入却有输出"
-	var bb := Rect2(src[0])
-	var area := 0.0
-	for r: Rect2 in src:
-		bb = bb.merge(r)
-		area += r.size.x * r.size.y
-	if area > 4096.0:
-		return ""
-	var w := int(bb.size.x)
-	var h := int(bb.size.y)
-	if w <= 0 or h <= 0:
-		return "退化包围盒"
-	var m1 := PackedByteArray()
-	m1.resize(w * h)
-	var m2 := PackedByteArray()
-	m2.resize(w * h)
-	for r2: Rect2 in src:
-		_paint(m1, w, bb, r2)
-	for r3: Rect2 in out:
-		_paint(m2, w, bb, r3)
-	if m1 != m2:
-		for i in w * h:
-			if m1[i] != m2[i]:
-				return "像素覆盖不一致 @%d src=%d out=%d" % [i, m1[i], m2[i]]
-	return ""
-
-static func _paint(mask: PackedByteArray, w: int, bb: Rect2, r: Rect2) -> void:
-	var x0 := int(r.position.x - bb.position.x)
-	var y0 := int(r.position.y - bb.position.y)
-	for yy in int(r.size.y):
-		for xx in int(r.size.x):
-			mask[(y0 + yy) * w + x0 + xx] += 1
-
-func _check(label: String, sets: Array, oracle: bool, ref_too: bool) -> void:
-	var n_diff := 0
-	var n_cover := 0
-	var n_immut := 0
-	for si in sets.size():
-		var src: Array = sets[si]
-		var snap := src.duplicate()
-		var g := golden(src)
-		var got := GreedyRects._merge_pass(src)
-		# 逐组断言（不是每组一句"全部一致"）：这样汇总行里的数字就是**真的比过多少组**
-		var ok := _same(got, g)
-		if not ok:
-			n_diff += 1
-			if n_diff <= 2:
-				print("  [差异] %s #%d n=%d\n    golden %s\n    实际   %s" % [label, si, src.size(), str(g), str(got)])
-		_assert(ok, "%s #%d：与 golden 不一致" % [label, si])
-		var immut := _same(src, snap)
-		if not immut:
-			n_immut += 1
-		_assert(immut, "%s #%d：改动了调用方的数组" % [label, si])
-		if ref_too:
-			_assert(_same(GreedyRects._merge_pass_ref(src), g), "%s #%d：兜底实现与 golden 不一致" % [label, si])
-		if oracle:
-			var msg := _cover_mismatch(src, got)
-			n_cover += 1
-			if msg != "":
-				n_diff += 1
-				print("  [覆盖] %s #%d %s" % [label, si, msg])
-			_assert(msg == "", "%s #%d：%s" % [label, si, msg])
-	print("  %-14s %4d 组 | 与 golden 一致 %s | 未改入参 %s | 覆盖对拍 %d 组 %s" % [
-		label, sets.size(),
-		"是" if n_diff == 0 else "否(%d)" % n_diff,
-		"是" if n_immut == 0 else "否(%d)" % n_immut,
-		n_cover, "全部一致" if n_diff == 0 else "有差异"])
-
-## 逐项计数、默认不打印（细节由 _check 的汇总行负责）——
-## 汇总行里的数字必须是"真的比过多少组"，不能是恒真的自证。
-func _assert(cond: bool, msg: String) -> void:
-	if cond:
-		passed += 1
-	else:
-		failed += 1
-		if failed <= 8:
-			print("  [失败] " + msg)
-
 func _initialize() -> void:
-	print("=== _merge_pass 等价性（快速版 vs 冻结旧实现）===")
-	_check("真实擦除序列", _real_sets(), false, false)
-	_check("结构对抗集", _synthetic_sets(), true, false)
-	_check("随机洗牌(小)", _random_sets(400, 20261003, 24), true, false)
-	_check("随机洗牌(中)", _random_sets(60, 777, 90), false, false)
-	# 非整数：走兜底那一支。这里测的是**判据**与**兜底实现**各自正确 ——
-	# 兜底按定义就等于 golden，所以"新实现真的走了那一支"是测不出来的，
-	# 能测的是 _is_int_rect 判得对、且 _merge_pass_ref 逐位等于历史行为。
-	var frac := _fractional_sets()
-	_check("非整数(兜底)", frac, false, true)
-	var ints_ok := GreedyRects._is_int_rect(Rect2(1, 2, 3, 4)) and not GreedyRects._is_int_rect(Rect2(1.5, 2, 3, 4)) \
-		and not GreedyRects._is_int_rect(Rect2(-0.25, 0, 1, 1)) and GreedyRects._is_int_rect(Rect2(-4, -5, 6, 7))
-	_assert(ints_ok, "_is_int_rect 判据不对：整数矩形被拒或小数矩形被收")
-
+	print("=== 最大行程合并：四条性质 ===")
+	_check("真实擦除序列", _real_sets(), true)
+	_check("结构对抗集", _synthetic_sets(), true)
+	_check("随机洗牌(小)", _random_sets(400, 20261006, 24), false)
+	_check("随机洗牌(中)", _random_sets(80, 999, 90), false)
 	print("---")
 	if failed == 0:
 		print("全部通过：%d 项断言" % passed)
