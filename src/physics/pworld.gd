@@ -1468,13 +1468,20 @@ func fracture(body: PBody, damage, burst_speed: float = 40.0) -> Array:
 		return []
 
 	# 最大的那块留在原 Body
+	#
+	# ⚠️ 只有**多块**时才需要挑最大。内部挖洞走的是"不 split"那条路，
+	#    parts 里只有一个元素 —— 而 pixel_count() 要遍历**全部 chunk**
+	#    （768x100 是 1238 个，实测 **0.371 ms/笔**），
+	#    每一笔擦除都在付，换来的却是"best 一定是 0"这个显然的事实。
+	#    split 那条路（多块）照旧挑，行为不变。
 	var best := 0
-	var best_n := -1
-	for i in parts.size():
-		var cnt: int = parts[i].pixel_count()
-		if cnt > best_n:
-			best_n = cnt
-			best = i
+	if parts.size() > 1:
+		var best_n := -1
+		for i in parts.size():
+			var cnt: int = parts[i].pixel_count()
+			if cnt > best_n:
+				best_n = cnt
+				best = i
 
 	var parent_vel := body.linear_velocity
 	var parent_ang := body.angular_velocity
