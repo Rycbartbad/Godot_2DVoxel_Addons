@@ -340,7 +340,104 @@ static func _clear_rect(words: PackedInt64Array, wq: int, x: int, y: int, rw: in
 
 
 ## 合并共享整条边且跨度相同的矩形（精确，不会引入幻影）。
+##
+## ⚠️⚠️ 旧版是 O(n^2) 的**顺序过程**，重写必须逐位复现它，不能顺手"改好"：
+##    · 它从 i 往后线性扫 j，**扫过的 j 永不回头**（a 变长之后也不会重看）。
+##    · 于是它只做到"等尺寸且相邻的两两配对、反复跑到不动点"，**不是**最大合并 ——
+##      3 个等尺寸矩形排成一行会停在 2 个（先并了前两个，第三个的尺寸已经对不上），
+##      4 个才会在第二轮并成 1 个。
+##    这个"不最大"是被 8 条基准钉住的行为（矩形集合就是 Rapier 的碰撞形状集合），
+##    所以这一版是**换数据结构、不换结果**，不是行为改进。
+##
+## 实测（tests/diag_decompose_scale.gd，374 个矩形）：6.61 -> 1.15 ms；
+## 矩形越多差距越大 —— 旧版是平方增长，新实现是线性。
+## 等价性证据：600 组语料（真实擦除序列 / 结构对抗集 / 随机洗牌）与旧实现逐位相同，
+## 其中 469 组另按**像素**重建覆盖做独立对拍 —— 见 tests/validation_merge_equiv.gd。
 static func _merge_pass(rects: Array) -> Array:
+	for r: Rect2 in rects:
+		if not _is_int_rect(r):
+			# 旧版比的是 absf(a.end.x - b.position.x) < 0.001 的**容差**，
+			# 而容差不是等价关系（不满足传递性），精确键索引复现不了它。
+			# 宁可整段退回旧实现，也不要静默给出另一个矩形集合 ——
+			# 矩形集合错了是不报错的，只会让形状与碰撞箱静默错位（用户报过两次）。
+			# 真实调用方只有 decompose()，喂进来的永远是整数像素矩形。
+			return _merge_pass_ref(rects)
+	var changed := true
+	while changed:
+		changed = false
+		var n := rects.size()
+		if n < 2:
+			break
+		# 键 = "能跟 a 拼上的那个 b 长什么样"。四个分量全部取自 b 自己：
+		#   横拼要 b.size == a.size、b.y == a.y、b.x == a.end.x
+		#   竖拼要 b.size == a.size、b.x == a.x、b.y == a.end.y
+		#
+		# ⚠️ 用 Vector4 而不是"把四个分量打包成一个 int"：打包要额外假设坐标范围与
+		#    整数性，一旦有人喂进小数或超大值就会**静默撞键** —— 缓存判错是不报错的，
+		#    这个项目在这上面栽过多次。Vector4 当字典键是**精确**比较
+		#    （已用 0.0005 偏差反证过它不会误命中）。
+		#
+		# 顺带：这两个键都是"尺寸 + 位置"的完整标识，所以正常情况下一个键只对应
+		# 一个矩形 —— 只有**完全重复**的矩形才会让候选表超过 1 项。
+		var hidx := {}
+		var vidx := {}
+		for j in n:
+			var b: Rect2 = rects[j]
+			var hk := Vector4(b.size.x, b.size.y, b.position.y, b.position.x)
+			var vk := Vector4(b.size.x, b.size.y, b.position.x, b.position.y)
+			if hidx.has(hk):
+				hidx[hk].append(j)
+			else:
+				hidx[hk] = [j]
+			if vidx.has(vk):
+				vidx[vk].append(j)
+			else:
+				vidx[vk] = [j]
+		var out: Array = []
+		var used := []
+		used.resize(n)
+		used.fill(false)
+		for i in n:
+			if used[i]:
+				continue
+			var a: Rect2 = rects[i]
+			# cursor 就是旧版内层循环的 j 位置。旧版**扫过的 j 不回头**，
+			# 所以候选必须 > cursor —— 这就是那条规则本身，不是近似。
+			#
+			# （试过再加一个"每个键记住上次扫到哪"的摊还指针：实测 0.793 vs
+			#   0.780 ms，落在噪声里，却多了一条"游标只会变大"的隐含不变量。不做。）
+			var cursor := i
+			while true:
+				var qh := _merge_candidate(hidx, used, Vector4(a.size.x, a.size.y, a.position.y, a.end.x), cursor)
+				var qv := _merge_candidate(vidx, used, Vector4(a.size.x, a.size.y, a.position.x, a.end.y), cursor)
+				# 旧版对同一个 j 先试横拼、再试竖拼；取两者里**下标更小**的那个，
+				# 等价于"线性扫到的第一个"。
+				var best := -1
+				var horiz := false
+				if qh >= 0 and (qv < 0 or qh <= qv):
+					best = qh
+					horiz = true
+				elif qv >= 0:
+					best = qv
+				if best < 0:
+					break
+				var b2: Rect2 = rects[best]
+				if horiz:
+					a = Rect2(a.position, Vector2(a.size.x + b2.size.x, a.size.y))
+				else:
+					a = Rect2(a.position, Vector2(a.size.x, a.size.y + b2.size.y))
+				used[best] = true
+				changed = true
+				cursor = best
+			used[i] = true
+			out.append(a)
+		rects = out
+	return rects
+
+
+## 旧实现（`ea72019` 之前），**原样冻结**：非整数矩形要走 0.001 容差路径时用它兜底。
+## 不要"顺手优化"它 —— 它的全部价值就在于它逐位等于旧行为。
+static func _merge_pass_ref(rects: Array) -> Array:
 	var changed := true
 	while changed:
 		changed = false
@@ -368,3 +465,21 @@ static func _merge_pass(rects: Array) -> Array:
 			out.append(a)
 		rects = out
 	return rects
+
+
+## 在候选表里找第一个"下标 > cursor 且还没被用掉"的 j。
+## 候选表正常情况下只有 1 项（键是尺寸 + 位置的完整标识），所以这基本就是一次字典查找。
+static func _merge_candidate(idx: Dictionary, used: Array, key: Vector4, cursor: int) -> int:
+	var list = idx.get(key)
+	if list == null:
+		return -1
+	for j: int in list:
+		if j > cursor and not used[j]:
+			return j
+	return -1
+
+
+## 像素空间的矩形应当整数值。判据是"转 int 再转回来"：小数（含负数、NaN）
+## 一定不相等，所以它只会**多**退回旧实现，不会漏判。
+static func _is_int_rect(r: Rect2) -> bool:
+	return r.position == Vector2(Vector2i(r.position)) and r.size == Vector2(Vector2i(r.size))
