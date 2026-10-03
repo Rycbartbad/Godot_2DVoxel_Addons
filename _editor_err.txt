@@ -1,0 +1,20 @@
+SCRIPT ERROR: Parse Error: Could not find script "res://src/physics/pworld.gd".
+   at: GDScript::reload (res://tests/validation_fall_feel.gd:3)
+SCRIPT ERROR: Parse Error: Cannot infer the type of "PWorld" constant because the value doesn't have a set type.
+   at: GDScript::reload (res://tests/validation_fall_feel.gd:3)
+SCRIPT ERROR: Parse Error: Cannot infer the type of "world" variable because the value doesn't have a set type.
+   at: GDScript::reload (res://tests/validation_fall_feel.gd:14)
+ERROR: Failed to load script "res://tests/validation_fall_feel.gd" with error "Parse error".
+   at: load (modules/gdscript/gdscript_resource_format.cpp:46)
+SCRIPT ERROR: Parse Error: Could not find script "res://src/physics/pworld.gd".
+   at: GDScript::reload (res://tests/validation_stroke_exact.gd:10)
+SCRIPT ERROR: Parse Error: Cannot infer the type of "PWorld" constant because the value doesn't have a set type.
+   at: GDScript::reload (res://tests/validation_stroke_exact.gd:10)
+SCRIPT ERROR: Parse Error: Cannot infer the type of "world" variable because the value doesn't have a set type.
+   at: GDScript::reload (res://tests/validation_stroke_exact.gd:50)
+ERROR: Failed to load script "res://tests/validation_stroke_exact.gd" with error "Parse error".
+   at: load (modules/gdscript/gdscript_resource_format.cpp:46)
+WARNING: 1618 ObjectDB instances were leaked at exit (run with `--verbose` for details).
+   at: cleanup (core/object/object.cpp:2536)
+ERROR: 5 resources still in use at exit (run with --verbose for details).
+   at: clear (core/io/resource.cpp:822)

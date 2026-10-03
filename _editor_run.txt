@@ -1,0 +1,7 @@
+[FastPhys] 入口被调用，接口全部拿到
+Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org
+Vulkan 1.4.351 - Forward+ - Using Device #0: NVIDIA - NVIDIA GeForce RTX 5060 Laptop GPU
+
+[RapierPhys] 类已注册
+[RapierPhys] 已注册方法 cmd
+[FastPhys] 反初始化
