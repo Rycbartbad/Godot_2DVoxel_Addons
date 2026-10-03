@@ -528,6 +528,8 @@ static void register_solve() {
 //  11  contact_count()                            -> i32
 //  12  contact_get(i32 idx)                       -> f64 id_a, id_b, nx, ny, px, py, dist
 //  13  body_count()                               -> i32
+//  14  body_add_force(u32 id, f64 fx, fy, torque)
+//  15  body_set_type(u32 id, i32 is_static)
 
 typedef void *RPWorld;
 
@@ -548,6 +550,8 @@ struct RapierApi {
 	int32_t (*contact_count)(RPWorld) = nullptr;
 	int32_t (*contact_get)(RPWorld, int32_t, double *) = nullptr;
 	int32_t (*body_count)(RPWorld) = nullptr;
+	void (*body_add_force)(RPWorld, uint32_t, double, double, double) = nullptr;
+	void (*body_set_type)(RPWorld, uint32_t, int32_t) = nullptr;
 	bool tried = false;
 	bool ok = false;
 };
@@ -597,6 +601,8 @@ static bool load_rapier() {
 	RP_GET(contact_count, "rb_contact_count")
 	RP_GET(contact_get, "rb_contact_get")
 	RP_GET(body_count, "rb_body_count")
+	RP_GET(body_add_force, "rb_body_add_force")
+	RP_GET(body_set_type, "rb_body_set_type")
 #undef RP_GET
 	g_rap.ok = true;
 	printf("[RapierPhys] rapier_bridge.dll 已加载: %s\n", local.c_str());
@@ -694,6 +700,10 @@ static void run_rapier_cmd(RapierInstance *inst, const uint8_t *in, size_t in_n,
 				break;
 			}
 			case 13: { w.i32(g_rap.body_count(W)); break; }
+			case 14: { uint32_t id = r.u32(); double fx = r.f64(), fy = r.f64(), tq = r.f64();
+				g_rap.body_add_force(W, id, fx, fy, tq); break; }
+			case 15: { uint32_t id = r.u32(); int32_t st = r.i32();
+				g_rap.body_set_type(W, id, st); break; }
 			default: break;   // 未知命令：跳过（长度未知，只能就此收尾）
 		}
 	}

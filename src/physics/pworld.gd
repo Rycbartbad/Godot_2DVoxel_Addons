@@ -363,6 +363,12 @@ func add_body(body: PBody, shape_list: Array, density_of: Callable = Callable())
 
 
 func remove_body(body: PBody) -> void:
+	if use_rapier and _rp != null and body.rapier_id > 0:
+		var cmds := PackedByteArray()
+		_rp_u8(cmds, 4)
+		_rp_u32(cmds, body.rapier_id)
+		_rp_send(cmds, 4)
+		body.rapier_id = 0
 	bodies.erase(body)
 
 
@@ -405,11 +411,209 @@ func bodies_in(bounds: Rect2) -> Array:
 	return out
 
 
+## ---------- Rapier 后端 ----------
+##
+## 打开后**整条管线**交给 Rapier（宽相 / 窄相 / 求解 / 休眠 / CCD 全是它的）。
+## 手写的 native 路径先保留着，直到测试套件判定通过（见开发日志「把物理交给 Rapier」）。
+##
+## 每个子步只有**一次** cmd() 调用：
+##     把"引擎侧改过的"推过去 -> Rapier 走一步 -> 把结果读回来
+## 推之前逐字段比对 PBody 上的镜像（_rp_*），没改过的一律不推 ——
+## 否则每子步把几百个刚体全推一遍纯属白烧。
+##
+## ⚠️ 新建刚体要**单独一趟**：Rapier 分配的 id 在结果流里，而同一趟里后面的命令
+##    就要用这个 id。新建是低频事件（破坏/分裂才发生），多一趟无所谓。
+var use_rapier := false
+var _rp: Object = null
+var _rp_gravity_pushed := Vector2(INF, INF)
+var _rp_cmd_us := 0
+
+# 命令流的写入辅助（PackedByteArray 必须自己 resize，encode_* 不会自动扩容）
+static func _rp_u8(b: PackedByteArray, v: int) -> void:
+	b.resize(b.size() + 1)
+	b.encode_u8(b.size() - 1, v)
+
+static func _rp_i32(b: PackedByteArray, v: int) -> void:
+	var n := b.size()
+	b.resize(n + 4)
+	b.encode_s32(n, v)
+
+static func _rp_u32(b: PackedByteArray, v: int) -> void:
+	var n := b.size()
+	b.resize(n + 4)
+	b.encode_u32(n, v)
+
+static func _rp_f64(b: PackedByteArray, v: float) -> void:
+	var n := b.size()
+	b.resize(n + 8)
+	b.encode_double(n, v)
+
+static func _rp_f32(b: PackedByteArray, v: float) -> void:
+	var n := b.size()
+	b.resize(n + 4)
+	b.encode_float(n, v)
+
+func _rp_send(cmds: PackedByteArray, out_cap: int) -> PackedByteArray:
+	var inp := PackedByteArray()
+	_rp_i32(inp, out_cap)
+	_rp_i32(inp, cmds.size())
+	inp.append_array(cmds)
+	var tmpl := PackedByteArray()
+	tmpl.resize(4 + out_cap)
+	var res: PackedByteArray = _rp.cmd(inp, tmpl)
+	return res
+
+## 把还没有 Rapier 身份的刚体建出来，并把分配到的 id 记回 PBody。
+func _rp_create_missing() -> void:
+	var cmds := PackedByteArray()
+	var n := 0
+	for b: PBody in bodies:
+		if b.rapier_id != 0:
+			continue
+		_rp_u8(cmds, 3)
+		_rp_i32(cmds, 1 if b.is_static else 0)
+		_rp_f64(cmds, b.position.x)
+		_rp_f64(cmds, b.position.y)
+		_rp_f64(cmds, b.rotation)
+		n += 1
+	if n == 0:
+		return
+	var res := _rp_send(cmds, n * 4)
+	var off := 4
+	for b: PBody in bodies:
+		if b.rapier_id != 0:
+			continue
+		b.rapier_id = res.decode_s32(off)
+		off += 4
+		# 新刚体一律先推一次矩形与全部状态
+		b._rp_rects_rev = -1
+		b._rp_x = b.position.x
+		b._rp_y = b.position.y
+		b._rp_rot = b.rotation
+		b._rp_static = b.is_static
+		b._rp_vx = b.linear_velocity.x
+		b._rp_vy = b.linear_velocity.y
+		b._rp_w = b.angular_velocity
+
+
+## Rapier 版子步：推 -> step -> 读回。
+##
+## 休眠完全交给 Rapier（它的岛管理器），所以这里**不**调 _update_sleep / _wake_pass。
+## 接触事件走单独的通道（见 _collect_contacts），这里不碰。
+func _substep_rapier(dt: float) -> void:
+	if _rp == null:
+		_rp = ClassDB.instantiate("RapierPhys")
+	_rp_create_missing()
+	var t0 := Time.get_ticks_usec()
+	var cmds := PackedByteArray()
+	# 重力变了才推
+	if gravity != _rp_gravity_pushed:
+		_rp_u8(cmds, 1)
+		_rp_f64(cmds, gravity.x)
+		_rp_f64(cmds, gravity.y)
+		_rp_gravity_pushed = gravity
+	var n_state := 0
+	var n_sleep := 0
+	for b: PBody in bodies:
+		if b.rapier_id <= 0:
+			continue
+		if b.is_static != b._rp_static:
+			_rp_u8(cmds, 15)
+			_rp_u32(cmds, b.rapier_id)
+			_rp_i32(cmds, 1 if b.is_static else 0)
+			b._rp_static = b.is_static
+		if b._rp_rects_rev != b.rects_rev:
+			_rp_u8(cmds, 5)
+			_rp_u32(cmds, b.rapier_id)
+			_rp_i32(cmds, b.rects.size())
+			for r: Rect2 in b.rects:
+				_rp_f32(cmds, r.position.x)
+				_rp_f32(cmds, r.position.y)
+				_rp_f32(cmds, r.size.x)
+				_rp_f32(cmds, r.size.y)
+			_rp_f64(cmds, solver.global_friction)
+			b._rp_rects_rev = b.rects_rev
+		if b.position.x != b._rp_x or b.position.y != b._rp_y or b.rotation != b._rp_rot:
+			_rp_u8(cmds, 6)
+			_rp_u32(cmds, b.rapier_id)
+			_rp_f64(cmds, b.position.x)
+			_rp_f64(cmds, b.position.y)
+			_rp_f64(cmds, b.rotation)
+			b._rp_x = b.position.x
+			b._rp_y = b.position.y
+			b._rp_rot = b.rotation
+		if b.linear_velocity.x != b._rp_vx or b.linear_velocity.y != b._rp_vy \
+				or b.angular_velocity != b._rp_w:
+			_rp_u8(cmds, 7)
+			_rp_u32(cmds, b.rapier_id)
+			_rp_f64(cmds, b.linear_velocity.x)
+			_rp_f64(cmds, b.linear_velocity.y)
+			_rp_f64(cmds, b.angular_velocity)
+			b._rp_vx = b.linear_velocity.x
+			b._rp_vy = b.linear_velocity.y
+			b._rp_w = b.angular_velocity
+		if b.accum_force != Vector2.ZERO or b.accum_torque != 0.0:
+			_rp_u8(cmds, 14)
+			_rp_u32(cmds, b.rapier_id)
+			_rp_f64(cmds, b.accum_force.x)
+			_rp_f64(cmds, b.accum_force.y)
+			_rp_f64(cmds, b.accum_torque)
+	# ---- 走一步 ----
+	_rp_u8(cmds, 2)
+	_rp_f64(cmds, dt)
+	# ---- 读回：先状态，后睡眠（顺序决定了结果段的布局）----
+	for b2: PBody in bodies:
+		if b2.rapier_id <= 0 or b2.is_static:
+			continue
+		_rp_u8(cmds, 8)
+		_rp_u32(cmds, b2.rapier_id)
+		n_state += 1
+	for b3: PBody in bodies:
+		if b3.rapier_id <= 0 or b3.is_static:
+			continue
+		_rp_u8(cmds, 9)
+		_rp_u32(cmds, b3.rapier_id)
+		n_sleep += 1
+	var res := _rp_send(cmds, n_state * 48 + n_sleep * 4)
+	var off := 4
+	for b4: PBody in bodies:
+		if b4.rapier_id <= 0 or b4.is_static:
+			continue
+		b4.position = Vector2(res.decode_double(off), res.decode_double(off + 8))
+		b4.rotation = res.decode_double(off + 16)
+		b4.linear_velocity = Vector2(res.decode_double(off + 24), res.decode_double(off + 32))
+		b4.angular_velocity = res.decode_double(off + 40)
+		b4._rp_x = b4.position.x
+		b4._rp_y = b4.position.y
+		b4._rp_rot = b4.rotation
+		b4._rp_vx = b4.linear_velocity.x
+		b4._rp_vy = b4.linear_velocity.y
+		b4._rp_w = b4.angular_velocity
+		off += 48
+	for b5: PBody in bodies:
+		if b5.rapier_id <= 0 or b5.is_static:
+			continue
+		b5.awake = (res.decode_s32(off) == 0)
+		off += 4
+	for b6: PBody in bodies:
+		if b6.is_static:
+			continue
+		b6.refresh_com()
+		b6.update_aabb()
+	_rp_cmd_us = Time.get_ticks_usec() - t0
+
+
 func step(dt: float) -> void:
 	if contact_events_enabled:
 		contacts.clear()          # 按**步**清空；子步会往同一个列表里追加
 	for b in bodies:
 		b.refresh_com()
+	if use_rapier:
+		# Rapier 自带 CCD（非线性 CCD + 它自己的子步），所以**不再**自己切子步。
+		# 切了反而会让重力/力被重复施加 —— 子步是引擎级的乘数，Rapier 内部另有机制。
+		last_substeps = 1
+		_substep_rapier(dt)
+		return
 	# 自适应子步：把"一步跨过薄物体"从根上消掉
 	var n := _compute_substeps(dt)
 	last_substeps = n

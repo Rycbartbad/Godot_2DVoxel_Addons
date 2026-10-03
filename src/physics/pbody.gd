@@ -39,6 +39,24 @@ var tint := Color(1, 1, 1)
 
 var _com_cache := Vector2.ZERO
 
+## ---- Rapier 后端的状态镜像（PWorld.use_rapier 时才有意义）----
+##
+## Rapier 是**权威状态源**：每个子步结束后 position / rotation / 速度都从它读回来。
+## 这些镜像只有一个用途 —— 判断"引擎侧是否改过"，改过才推给 Rapier。
+## 少了这道判断，每子步把几百个刚体全推一遍纯属白烧。
+var rapier_id := 0
+var _rp_x := 0.0
+var _rp_y := 0.0
+var _rp_rot := 0.0
+var _rp_vx := 0.0
+var _rp_vy := 0.0
+var _rp_w := 0.0
+var _rp_static := false
+## 上次推给 Rapier 的矩形版本号（-1 = 还没推过）
+var _rp_rects_rev := -1
+## 矩形分解的版本号：rebuild() 每次 +1。用来判断"要不要把矩形推给 Rapier"。
+var rects_rev := 0
+
 ## 位置修正专用的"伪速度"（split impulse）。
 ## 它只参与下一次位置积分，不进入真实速度 —— 所以
 ##   1. 深穿透被推开时不会凭空获得动能；
@@ -239,6 +257,9 @@ func make_static() -> void:
 ## 用像素 Shape 重建质量属性与碰撞矩形。
 ## 组合律：并行的组合形状用平行轴定理逐块累加。
 func rebuild(shape_list: Array, density_of: Callable = Callable(), max_rects: int = 64) -> void:
+	# 几何变了 —— Rapier 后端据此决定要不要重建碰撞体（见 _rp_rects_rev）。
+	# 放在 rebuild() 里是**源头修**：破坏 / 擦除 / 绘制 / 分裂全都走这里。
+	rects_rev += 1
 	shapes = shape_list
 	for s0 in shape_list:
 		if s0 != null:

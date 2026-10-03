@@ -168,6 +168,28 @@ pub extern "C" fn rb_body_get_state(w: *mut World, id: u32, out: *mut f64) -> i3
     1
 }
 
+/// 施加**持久**力与力矩（Rapier 每步之后会自己清掉，所以每子步加一次 = 持久）。
+/// 项目的 accum_force 是 Box2D 那种"显式 clear_forces 才清"的模型 ——
+/// 两者语义在"每子步加一次"下等价。
+#[no_mangle]
+pub extern "C" fn rb_body_add_force(w: *mut World, id: u32, fx: f64, fy: f64, torque: f64) {
+    let Some(w) = (unsafe { wref(w) }) else { return };
+    if let Some(&h) = w.map.get(&id) {
+        w.bodies[h].add_force(Vector::new(fx as f32, fy as f32), true);
+        if torque != 0.0 { w.bodies[h].add_torque(torque as f32, true); }
+    }
+}
+
+/// 静态 <-> 动态切换（对应 PBody.make_static / make_dynamic）。
+#[no_mangle]
+pub extern "C" fn rb_body_set_type(w: *mut World, id: u32, is_static: i32) {
+    let Some(w) = (unsafe { wref(w) }) else { return };
+    if let Some(&h) = w.map.get(&id) {
+        let t = if is_static != 0 { RigidBodyType::Fixed } else { RigidBodyType::Dynamic };
+        w.bodies[h].set_body_type(t, true);
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn rb_body_is_sleeping(w: *mut World, id: u32) -> i32 {
     let Some(w) = (unsafe { wref(w) }) else { return 0 };
