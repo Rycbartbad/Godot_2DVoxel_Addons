@@ -203,6 +203,38 @@ pub extern "C" fn rb_world_set_length_unit(w: *mut World, unit: f64) {
     w.params.length_unit = unit as f32;
 }
 
+/// 单独设置**最大线速度**（归一化值）。
+///
+/// 为什么不直接用 length_unit 一刀切：length_unit 会同时缩放
+/// allowed_linear_error / max_corrective_velocity / prediction_distance /
+/// contact_recycle_distance，实测设成 100 会让 validation_dynamics 的
+/// "持续力矩 60 步"变成 ω 恒为 0。像素尺度要**逐参数**处理。
+///
+/// Rapier 默认 normalized_max_linear_velocity = 400.0（按米调的），
+/// 在像素世界里表现为"速度无论重力多大都停在 397.68 px/s"。
+#[no_mangle]
+pub extern "C" fn rb_world_set_max_linear_velocity(w: *mut World, v: f64) {
+    let Some(w) = (unsafe { wref(w) }) else { return };
+    w.params.normalized_max_linear_velocity = v as f32;
+}
+
+/// 一次性设置三个**长度相关**的归一化参数（像素尺度需要逐参数调）。
+///
+///   pred_dist   normalized_prediction_distance   默认 0.02 —— **推测接触距离**
+///   corr_vel    normalized_max_corrective_velocity 默认 3.0 —— 穿透挤出的速度上限
+///   allowed_err normalized_allowed_linear_error  默认 0.005 —— 允许的线性误差
+///
+/// ⚠️ 默认值全是按"米"调的。在像素世界里 prediction_distance = 0.02 px
+///    等于**没有推测接触** —— 快物体直接穿过薄几何（穿模）。
+///    本引擎原本的 max_speculative_margin 是 1.5 px，就是同一个机制。
+#[no_mangle]
+pub extern "C" fn rb_world_set_pixel_params(w: *mut World, pred_dist: f64, corr_vel: f64, allowed_err: f64) {
+    let Some(w) = (unsafe { wref(w) }) else { return };
+    w.params.normalized_prediction_distance = pred_dist as f32;
+    w.params.normalized_max_corrective_velocity = corr_vel as f32;
+    w.params.normalized_allowed_linear_error = allowed_err as f32;
+}
+
 /// 开关 CCD（对应 PWorld.ccd_enabled）。
 /// ⚠️ Rapier 的 CCD **默认是关的**（逐刚体），不设的话这个开关等于被静默忽略。
 #[no_mangle]

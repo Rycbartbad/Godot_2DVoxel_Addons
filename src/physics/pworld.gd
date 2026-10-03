@@ -398,6 +398,39 @@ var rp_debug := false
 var rp_length_unit := 1.0
 var _rp_length_unit_pushed := 0.0
 
+## Rapier 的最大线速度（**归一化值**，实际上限 = 它 × length_unit）。
+##
+## ⚠️ Rapier 默认 400.0，是按"米"调的 —— 在像素世界里表现为
+##    "速度无论重力多大都停在 397.68 px/s"（g=900 和 g=600 给出同一个终速，
+##    看起来像阻尼，但阻尼的终速是 g/d，会随重力变）。
+##
+## 为什么不干脆设 length_unit = 100：那会同时缩放 allowed_linear_error /
+## max_corrective_velocity / prediction_distance / contact_recycle_distance，
+## 实测会让 validation_dynamics 的"持续力矩 60 步"变成 ω 恒为 0。
+## 像素尺度要**逐参数**处理。
+## 40000 = 400 × 100，与 length_unit=100 时的等效上限一致。
+var rp_max_linear_velocity := 40000.0
+var _rp_max_linvel_pushed := 0.0
+
+## 三个"像素尺度"参数（**归一化值**，实际值 = 它 × length_unit）。
+##
+## ⚠️ Rapier 的默认值全按"米"调，在像素世界里会**穿模**：
+##    · prediction_distance 默认 0.02 → 0.02 px，等于**没有推测接触**。
+##      快物体一步跨过薄几何就直接穿过去了 —— 这正是 demo 的穿模来源。
+##      本引擎原本的 max_speculative_margin(1.5 px) 就是同一个机制。
+##    · max_corrective_velocity 默认 3.0 → 3 px/s，穿透挤出慢得离谱
+##      （卡进墙里要好几秒才挤出来）。
+##    · allowed_linear_error 默认 0.005 → 0.005 px，紧到几乎没有容差。
+##
+## 取值按引擎原有的像素尺度换算（×100，与 length_unit=100 等效）：
+##    推测接触 2.0 px（略大于原来的 1.5，留一点余量）
+##    挤出速度 300 px/s
+##    允许误差 0.5 px
+var rp_prediction_distance := 2.0
+var rp_max_corrective_velocity := 300.0
+var rp_allowed_linear_error := 0.5
+var _rp_pixel_params_pushed := false
+
 var rp_linear_damping := 0.35
 var rp_angular_damping := 0.6
 
@@ -534,14 +567,23 @@ func _substep_rapier(dt: float) -> void:
 		g.apply(dt)
 		if g.body != null:
 			_rp_grabbed[g.body] = true
-	_rp_ccd_pushed = ccd_enabled
 	var t0 := Time.get_ticks_usec()
 	var cmds := PackedByteArray()
-	# 长度单位：只在第一次（或改了之后）推一次
+	# 长度单位 / 最大线速度：只在第一次（或改了之后）推一次
 	if rp_length_unit != _rp_length_unit_pushed:
 		_rp_u8(cmds, 20)
 		_rp_f64(cmds, rp_length_unit)
 		_rp_length_unit_pushed = rp_length_unit
+	if rp_max_linear_velocity != _rp_max_linvel_pushed:
+		_rp_u8(cmds, 21)
+		_rp_f64(cmds, rp_max_linear_velocity)
+		_rp_max_linvel_pushed = rp_max_linear_velocity
+	if not _rp_pixel_params_pushed:
+		_rp_u8(cmds, 22)
+		_rp_f64(cmds, rp_prediction_distance)
+		_rp_f64(cmds, rp_max_corrective_velocity)
+		_rp_f64(cmds, rp_allowed_linear_error)
+		_rp_pixel_params_pushed = true
 	# 重力变了才推
 	if gravity != _rp_gravity_pushed:
 		_rp_u8(cmds, 1)
@@ -692,6 +734,7 @@ func _substep_rapier(dt: float) -> void:
 			continue
 		b6.refresh_com()
 		b6.update_aabb()
+	_rp_ccd_pushed = ccd_enabled
 	_rp_cmd_us = Time.get_ticks_usec() - t0
 	_collect_contacts_rapier()
 
@@ -767,17 +810,47 @@ func _contact_add_rapier(a: PBody, b: PBody, point: Vector2, normal: Vector2, im
 	contacts.append(c)
 
 
+## 本步需要切成几个子步。判据是"最快的物体一步能走多远"：
+## 只要每个子步的位移都小于最薄障碍物的厚度，就不可能穿过去。
+##
+## 这是引擎原本的机制，Rapier 迁移时被我删掉过（理由是"Rapier 自带 CCD"）——
+## 结果 demo 穿模。Rapier 的 CCD 默认 max_ccd_substeps = 1，撑不住大步长
+## （低帧率、帧卡顿、爆炸初速）。
+func _compute_substeps(dt: float) -> int:
+	if not ccd_enabled or dt <= 0.0:
+		return 1
+	var fastest := 0.0
+	for b: PBody in bodies:
+		if b.is_static or not b.awake:
+			continue
+		var v := b.linear_velocity.length() + absf(b.angular_velocity) * b.bounding_radius()
+		fastest = maxf(fastest, v)
+	if fastest <= 0.0:
+		return 1
+	var motion := fastest * dt
+	if motion <= ccd_max_motion:
+		return 1
+	return clampi(int(ceil(motion / ccd_max_motion)), 1, ccd_max_substeps)
+
+
 func step(dt: float) -> void:
 	if contact_events_enabled:
 		contacts.clear()          # 按**步**清空；子步会往同一个列表里追加
 	for b in bodies:
 		b.refresh_com()
-	# 物理全部交给 Rapier：宽相 / 窄相 / 求解 / 休眠 / CCD 都是它的。
-	# ⚠️ 不再自己切子步 —— Rapier 内部另有机制，外层再切会让重力/力被重复施加。
-	#    last_substeps 保留着（debug_overlay 与 demo 在读它），恒为 1。
-	last_substeps = 1
-	_substep_rapier(dt)
-
+	# 物理交给 Rapier（宽相 / 窄相 / 求解 / 休眠都是它的），但**子步要自己切**。
+	#
+	# ⚠️ 这里曾经不切，理由是"Rapier 自带 CCD" —— 那是错的，代价是 demo 穿模。
+	#    Rapier 的 CCD 默认 max_ccd_substeps = 1，撑不住大步长（低帧率、帧卡顿、
+	#    爆炸初速）。而引擎原本的判据（最快物体每步位移 < 最薄障碍厚度）朴素但极稳。
+	#
+	# 切子步在物理上是**正确**的：每个子步 dt/N，力/重力/抓取都按 dt/N 积分，
+	#    一帧的总冲量不变（早期担心的"力被重复施加"不成立 —— 那要每子步都用完整 dt）。
+	var n := _compute_substeps(dt)
+	last_substeps = n
+	var sub := dt / float(n)
+	for i in n:
+		_substep_rapier(sub)
 
 ## ---------- 动量统计 ----------
 ##

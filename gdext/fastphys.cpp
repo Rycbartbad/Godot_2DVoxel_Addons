@@ -112,6 +112,8 @@ alignas(16) static unsigned char g_str_empty_hint[64];
 //  18  body_reset_forces(u32 id)
 //  19  body_set_ccd(u32 id, i32 enabled)
 //  20  world_set_length_unit(f64 unit)
+//  21  world_set_max_linear_velocity(f64 normalized)
+//  22  world_set_pixel_params(f64 pred_dist, f64 corr_vel, f64 allowed_err)
 
 typedef void *RPWorld;
 
@@ -139,6 +141,8 @@ struct RapierApi {
 	void (*body_reset_forces)(RPWorld, uint32_t) = nullptr;
 	void (*body_set_ccd)(RPWorld, uint32_t, int32_t) = nullptr;
 	void (*world_set_length_unit)(RPWorld, double) = nullptr;
+	void (*world_set_max_linear_velocity)(RPWorld, double) = nullptr;
+	void (*world_set_pixel_params)(RPWorld, double, double, double) = nullptr;
 	bool tried = false;
 	bool ok = false;
 };
@@ -195,6 +199,8 @@ static bool load_rapier() {
 	RP_GET(body_reset_forces, "rb_body_reset_forces")
 	RP_GET(body_set_ccd, "rb_body_set_ccd")
 	RP_GET(world_set_length_unit, "rb_world_set_length_unit")
+	RP_GET(world_set_max_linear_velocity, "rb_world_set_max_linear_velocity")
+	RP_GET(world_set_pixel_params, "rb_world_set_pixel_params")
 #undef RP_GET
 	g_rap.ok = true;
 	printf("[RapierPhys] rapier_bridge.dll 已加载: %s\n", local.c_str());
@@ -303,6 +309,9 @@ static void run_rapier_cmd(RapierInstance *inst, const uint8_t *in, size_t in_n,
 			case 18: { uint32_t id = r.u32(); g_rap.body_reset_forces(W, id); break; }
 			case 19: { uint32_t id = r.u32(); int32_t en = r.i32(); g_rap.body_set_ccd(W, id, en); break; }
 			case 20: { double u = r.f64(); g_rap.world_set_length_unit(W, u); break; }
+			case 21: { double v = r.f64(); g_rap.world_set_max_linear_velocity(W, v); break; }
+			case 22: { double pd = r.f64(), cv = r.f64(), ae = r.f64();
+				g_rap.world_set_pixel_params(W, pd, cv, ae); break; }
 			default:
 				// ⚠️ 未知操作码**必须立刻停**：它的载荷长度未知，继续读下去会把
 				//    后面的字节当成操作码，整条流错位 —— 而错位往往表现为"写出了
