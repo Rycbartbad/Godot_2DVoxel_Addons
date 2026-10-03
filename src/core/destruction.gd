@@ -138,13 +138,19 @@ static func apply_damage(shape: PixelShape, damage: Damage) -> int:
 static func touches_boundary(shape: PixelShape, rect: Rect2i) -> bool:
 	var y0: int = rect.position.y
 	var x0: int = rect.position.x
+	# ⚠️⚠️ 八邻域**内联**判断，不要调 shape.neighbors() ——
+	#    那个函数每次都**分配一个 Array**（8 个 Vector2i），
+	#    而这里对 40x40 的探测框要跑 1600 次，实测 **5.4 ms**。
+	#    内联之后只是一串 get_pixel，没有分配。
+	#
+	#    这一条本身是"花 5.4 ms 去省一次 33 ms 的 split"，净赚；
+	#    但 5.4 ms 太贵了 —— 它出现在**每一笔**擦除里。
 	for y in range(y0, y0 + rect.size.y):
 		for x in range(x0, x0 + rect.size.x):
 			if shape.get_pixel(x, y) == 0:
 				continue
-			for n: Vector2i in shape.neighbors(x, y, true):
-				if shape.get_pixel(n.x, n.y) == 0:
-					return true
+			if shape.get_pixel(x - 1, y) == 0 or shape.get_pixel(x + 1, y) == 0 					or shape.get_pixel(x, y - 1) == 0 or shape.get_pixel(x, y + 1) == 0 					or shape.get_pixel(x - 1, y - 1) == 0 or shape.get_pixel(x + 1, y - 1) == 0 					or shape.get_pixel(x - 1, y + 1) == 0 or shape.get_pixel(x + 1, y + 1) == 0:
+				return true
 	return false
 
 

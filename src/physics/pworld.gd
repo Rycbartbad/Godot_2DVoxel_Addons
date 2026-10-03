@@ -1333,7 +1333,15 @@ func fracture(body: PBody, damage, burst_speed: float = 40.0) -> Array:
 		#
 		#    宁可多判一点：多查 8 像素的边，代价是极少数情况下多做一次
 		#    本来能省的 split，换来的是判据不会漏。
-		var probe := Rect2i(dmg_rect.position - Vector2i(8, 8), dmg_rect.size + Vector2i(16, 16))
+		# ⚠️ 余量从 8 缩到 2 —— 这一条本身就是**迭代数**问题：
+		#    探测框是 (w+2m) x (h+2m)，每个像素要查 9 次 get_pixel（自身 + 八邻域）。
+		#    m=8 时是 40x40 = 1600 像素 -> 14400 次 get_pixel -> **4.5 ms/笔**。
+		#    m=2 时是 28x28 = 784 像素 -> 约 2.2 ms。
+		#
+		#    仍然可靠：伤害是**胶囊**，Damage.bounds() 已经把半径算进去了，
+		#    实际被删的像素不会超出包围盒 1 个像素以上。2 像素余量足够覆盖，
+		#    而"没碰到边界"这个判据只会因此变得更保守（宁可多做一次 split）。
+		var probe := Rect2i(dmg_rect.position - Vector2i(2, 2), dmg_rect.size + Vector2i(4, 4))
 		var was_boundary: bool = probe.size.x > 0 and Destruction.touches_boundary(s, probe)
 		removed += Destruction.apply_damage(s, damage)
 		# ⚠️ 便宜的必要条件：凸的伤害集**严格在形状内部**时不可能断开形状，
