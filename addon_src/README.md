@@ -301,7 +301,7 @@ Destruction.split(shape, min_pixels) -> Array        # 按连通性切块
 ```bash
 cd addons/pixel_destruction/native
 g++ -O2 -std=c++17 -ffp-contract=off -shared -static-libgcc -static-libstdc++ \
-    -o fastphys.dll fastphys.cpp
+    -I<gdextension_interface.h 所在目录> -o fastphys.dll fastphys.cpp
 ```
 
 ⚠️ **`-ffp-contract=off` 不能省** —— 少了它编译器会把浮点乘加融合成 FMA，

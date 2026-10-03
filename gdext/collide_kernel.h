@@ -128,41 +128,18 @@ static inline int clip_segment(V2 p1, V2 p2, V2 n, double offset, V2 out[2]) {
 	return 2;
 }
 
-// 推测接触（sep > 0）的接触点。**必须与 collide.gd 的 speculative_point 逐位等价**。
-// ⚠️ 这里刻意用"两个支撑点的中点"这个不精确公式，理由写在 collide.gd 那一侧：
-// 更正确的点会让推测接触真正起作用，而引擎的全部调参建立在"它是死的"之上
-// （实测改正确后 sleep_box 0/12 → 10/12、test_parallel 陷地 5250 px）。
-// 曾经因为 GDScript 改了而这里没改，两条路径的接触点差出 3.88 个单位。
+// 推测接触（sep > 0）的接触点 —— **旧的合成公式已经删掉了**。
 //
-// ⚠️ 不要写成两个支撑点的中点：obb_support() 返回的是**角点**，两盒切向跨度差很多时
-// （小箱子 vs 半宽 2000 的地面）中点会被拉到远离真实接触区的地方（实测上千单位），
-// 力臂错成那样 → 接触法向质量趋近 0 —— **推测接触实际上是失效的**。
+// 这里曾经有一个 speculative_point()：切向取"两盒切向重叠区间的中心"、
+// 法向取两支撑点中点。它的致命退化是：**一个形状比另一个宽得多时，重叠区间
+// 就等于窄的那个自己的区间，中心 = 窄物体的形心** —— 角接触的力臂因此恒为 0，
+// 方块被"托在自己的重心上"，40° 永远不倒。
 //
-// 正确做法：取 A 朝 B 的支撑点，再把它的切向坐标夹进 B 的切向范围。
-// 这个修复会激活长期休眠的机制，必须连同边际一起调参（见开发日志坑 34）。
-static inline V2 speculative_point(const OBB &a, const OBB &b, V2 n) {
-	V2 pa = obb_support(a, n);
-	V2 pb = obb_support(b, vneg(n));
-	// 与 collide.gd 的 speculative_point 逐位等价：切向取两盒重叠区间中心 + 法向取中点
-	V2 t = v2(-n.y, n.x);
-	double au = (double)vdot(a.u, t);
-	if (au < 0.0) au = -au;
-	double av = (double)vdot(a.v, t);
-	if (av < 0.0) av = -av;
-	double ha = au * (double)a.h.x + av * (double)a.h.y;
-	double bu = (double)vdot(b.u, t);
-	if (bu < 0.0) bu = -bu;
-	double bv = (double)vdot(b.v, t);
-	if (bv < 0.0) bv = -bv;
-	double hb = bu * (double)b.h.x + bv * (double)b.h.y;
-	double ca = (double)vdot(a.center, t);
-	double cb = (double)vdot(b.center, t);
-	double lo = ca - ha; if (cb - hb > lo) lo = cb - hb;
-	double hi = ca + ha; if (cb + hb < hi) hi = cb + hb;
-	double ta = (lo + hi) * 0.5;
-	double nm = ((double)vdot(pa, n) + (double)vdot(pb, n)) * 0.5;
-	return vadd(vmul(n, (float)nm), vmul(t, (float)ta));
-}
+// 完整的墓碑注释（含实测数据与对照实验）写在 collide.gd 里，**只写一份** ——
+// 这个文件历史上就因为"同一规则写在两个地方"分叉过：GDScript 改了、C++ 没改，
+// 3610 个流形里 115 个点位不同（法向/深度/分离度全对，只有点位错）。
+//
+// 现在两侧都走 collide() 里那套参考面/入射面裁剪，不再合成点。
 
 struct Pt { double px, py, depth, sep, feature; };
 struct Result { V2 normal; int count; Pt pts[2]; };
@@ -173,20 +150,12 @@ static inline void collide(const OBB &a, const OBB &b, double margin, Sat &s, Re
 	// _NO_CONTACT 的 normal 是 Vector2.RIGHT
 	if (sep > margin) { out.normal = v2(1.0f, 0.0f); out.count = 0; return; }
 	V2 normal = s.normal;
-	if (sep > 0.0) {
-		// ⚠️ 这里曾经内联着**旧公式**（两个支撑点的中点），而上面刚写好的
-		// speculative_point 没人调用 —— 结果 GDScript 侧改了、C++ 侧没改，
-		// 两条路径的推测接触点差出 3.88 个单位（实测 3610 个流形里 115 个不同，
-		// 法向/深度/分离度全对，只有点位错）。
-		// **同一规则写在两个地方就一定会分叉**，所以这里只留一次调用。
-		V2 pos = speculative_point(a, b, normal);
-		out.normal = normal;
-		out.count = 1;
-		out.pts[0] = Pt{ (double)pos.x, (double)pos.y, 0.0, sep, -1.0 };
-		return;
-	}
+	// 分离（0 < sep <= margin）与穿透（sep < 0）走**同一套**参考面/入射面裁剪。
+	// 旧写法在这里合成一个推测接触点，见上面那段墓碑注释。
+	//
 	// 边界：sep 恰好为 0（面贴面）时旧代码会提前返回 hit=false，**必须原样保留**
-	if (sep >= 0.0) { out.normal = v2(1.0f, 0.0f); out.count = 0; return; }
+	// （-0.0 == 0.0 也为真，与 GDScript 侧一致）。
+	if (sep == 0.0) { out.normal = v2(1.0f, 0.0f); out.count = 0; return; }
 
 	bool from_a = s.from_a;
 	const OBB &ref = from_a ? a : b;
@@ -227,8 +196,9 @@ static inline void collide(const OBB &a, const OBB &b, double margin, Sat &s, Re
 	for (int i = 0; i < 2; ++i) {
 		V2 p = seg2[i];
 		double separation = (double)vdot(vsub(p, rp1), ref_normal);
-		if (separation <= 0.0) {
-			out.pts[out.count] = Pt{ (double)p.x, (double)p.y, -separation, separation, (double)(base + i) };
+		if (separation <= margin) {
+			double depth = -separation; if (depth < 0.0) depth = 0.0;
+			out.pts[out.count] = Pt{ (double)p.x, (double)p.y, depth, separation, (double)(base + i) };
 			out.count++;
 		}
 	}

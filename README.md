@@ -48,7 +48,7 @@ godot --headless --editor --quit --path .     # 扫描一次，注册扩展
 
 ```bash
 cd gdext
-g++ -O2 -std=c++17 -ffp-contract=off -shared -static-libgcc -static-libstdc++ -o fastphys.dll fastphys.cpp
+g++ -O2 -std=c++17 -ffp-contract=off -shared -static-libgcc -static-libstdc++ -I.. -o fastphys.dll fastphys.cpp
 ```
 
 `-ffp-contract=off` 不能省：少了它编译器会把浮点乘加融合成 FMA，与 GDScript 路径立刻分叉。
