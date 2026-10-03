@@ -482,6 +482,50 @@ func has_grab() -> bool:
 	return world.is_grabbing()
 
 
+# ============================================================ 关节
+
+## 铰链：两个刚体绕一个世界坐标点相对转动（门、轮子、摆）。
+## b 传 null = 接静态世界（比如把吊桥挂在"墙"上）。anchor 省略取两端质心中点。
+func add_hinge(a, b, world_anchor := Vector2.INF):
+	return world.add_hinge(a, b, world_anchor)
+
+
+## 滑轨：沿 axis（**世界方向**）相对平移（活塞、抽屉）。
+func add_slider(a, b, world_anchor := Vector2.INF, axis := Vector2.RIGHT):
+	return world.add_slider(a, b, world_anchor, axis)
+
+
+## 焊接：完全锁死（把两块拼成一块）。
+func add_weld(a, b, world_anchor := Vector2.INF):
+	return world.add_weld(a, b, world_anchor)
+
+
+## 绳：两点距离不超过 max_length（不可伸长）。
+func add_rope(a, b, world_anchor_a: Vector2, world_anchor_b: Vector2, max_length: float):
+	return world.add_rope(a, b, world_anchor_a, world_anchor_b, max_length)
+
+
+## 弹簧：拉向 rest_length（力 = 刚度 × 误差 + 阻尼 × 速度误差，绝对力语义）。
+func add_spring(a, b, world_anchor_a: Vector2, world_anchor_b: Vector2,
+		rest_length: float, stiffness := 100.0, damping := 10.0):
+	return world.add_spring(a, b, world_anchor_a, world_anchor_b, rest_length, stiffness, damping)
+
+
+## 断开一个关节。
+func remove_joint(j) -> void:
+	world.remove_joint(j)
+
+
+## 连在这个刚体上的所有关节。
+func joints_of(body) -> Array:
+	return world.joints_of(body)
+
+
+## 这个刚体是否（直接或间接）被关节连到静态世界。
+func is_jointed_to_static(body) -> bool:
+	return world.is_jointed_to_static(body)
+
+
 # ============================================================ 查询
 
 ## 像素级精确的射线检测 —— 直接走体素网格，所以能穿过像素画的空洞。

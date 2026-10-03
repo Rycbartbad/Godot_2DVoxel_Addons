@@ -25,12 +25,35 @@ pub struct World {
     gravity: Vector,
     map: HashMap<u32, RigidBodyHandle>,
     next_id: u32,
+    /// 世界锚：给"一端接静态世界"的关节当第二个刚体（见 new() 里的说明）。
+    anchor: RigidBodyHandle,
+    /// 外部关节 id -> 记录。见 rb_joint_new。
+    joints: HashMap<u32, JointRec>,
+    next_joint_id: u32,
+}
+
+/// 一个关节在我们这边的记录（Rapier 侧只有句柄，类型得自己记 —— 限位/马达
+/// 作用在哪根自由度轴上取决于它）。
+struct JointRec {
+    handle: ImpulseJointHandle,
+    kind: i32,
 }
 
 impl World {
     fn new() -> Self {
+        let mut bodies = RigidBodySet::new();
+        // 世界锚。
+        //
+        // Rapier 的关节**必须**有两个刚体句柄 —— 没有"这一端接世界"的半边形式。
+        // 所以整个世界共用一个位于原点、没有碰撞体的固定刚体：它位姿恒等，
+        // 于是"世界坐标锚点"就等于它的局部锚点，调用方不用做任何换算。
+        //
+        // ⚠️ 它**不进 map**：map 是"外部 id -> 刚体"的表，而 rb_body_count /
+        //    rb_body_remove / 状态读回全都按 map 遍历 —— 放进去等于凭空多出一个
+        //    调用方没建过的刚体，而且 id 还会和真正的刚体撞号。
+        let anchor = bodies.insert(RigidBodyBuilder::fixed());
         World {
-            bodies: RigidBodySet::new(),
+            bodies,
             colliders: ColliderSet::new(),
             ij: ImpulseJointSet::new(),
             mj: MultibodyJointSet::new(),
@@ -44,7 +67,21 @@ impl World {
             gravity: Vector::new(0.0, 600.0),
             map: HashMap::new(),
             next_id: 1,
+            anchor,
+            joints: HashMap::new(),
+            next_joint_id: 1,
         }
+    }
+
+    /// 丢掉 Rapier 侧已经不存在的关节句柄。
+    ///
+    /// ⚠️ 必须有这一步：rb_body_remove 走的是 RigidBodySet::remove(..., &mut ij, ...)，
+    ///    Rapier 会把挂在该刚体上的关节**一起删掉**，而我们的 id 表不知道。
+    ///    留着失效句柄的后果不是报错而是 **ABA** —— 句柄槽位会被下一个关节复用，
+    ///    于是"删掉旧关节"删掉的是新关节，而且看起来毫无理由。
+    fn purge_joints(&mut self) {
+        let ij = &self.ij;
+        self.joints.retain(|_, rec| ij.contains(rec.handle));
     }
 }
 
@@ -103,6 +140,8 @@ pub extern "C" fn rb_body_remove(w: *mut World, id: u32) {
     let Some(w) = (unsafe { wref(w) }) else { return };
     if let Some(h) = w.map.remove(&id) {
         w.bodies.remove(h, &mut w.islands, &mut w.colliders, &mut w.ij, &mut w.mj, &mut w.soft, true);
+        // 挂在它上面的关节被 Rapier 一起删了 —— 我们的 id 表要跟着清（见 purge_joints）。
+        w.purge_joints();
     }
 }
 
@@ -385,4 +424,220 @@ pub extern "C" fn rb_contact_get(w: *mut World, i: i32, out: *mut f64) -> i32 {
 pub extern "C" fn rb_body_count(w: *mut World) -> i32 {
     let Some(w) = (unsafe { wref(w) }) else { return 0 };
     w.map.len() as i32
+}
+
+// ================= 关节（约束） =================
+//
+// 五种类型，都用 Rapier 的**冲量关节**（ImpulseJoint）：
+//   0 hinge   铰链（RevoluteJoint）    只剩一个转动自由度，可限位、可上马达
+//   1 slider  滑轨（PrismaticJoint）   只剩沿轴平移
+//   2 weld    焊接（FixedJoint）       完全锁死
+//   3 rope    绳（RopeJoint）          只限制**最大**距离（不可伸长）
+//   4 spring  弹簧（SpringJoint）      拉向静止长度
+//
+// 为什么不用 MultibodyJoint（多体关节）：那是**树形**结构（父子刚体、刚度更高、
+// 同样迭代次数下更硬），但插入/删除要维护整棵树，而且同一个刚体不能同时属于
+// 两棵树 —— 破坏类玩法随时会切开刚体、随时建/删关节。冲量关节是**图**结构，
+// 任意两个刚体都能连，正合这种用法。
+const JK_HINGE: i32 = 0;
+const JK_SLIDER: i32 = 1;
+const JK_WELD: i32 = 2;
+const JK_ROPE: i32 = 3;
+const JK_SPRING: i32 = 4;
+
+/// 关节的自由度轴：铰链是角度（AngX），其余都是"沿轴的距离"（LinX）。
+fn joint_axis(kind: i32) -> JointAxis {
+    if kind == JK_HINGE { JointAxis::AngX } else { JointAxis::LinX }
+}
+
+/// 外部 id -> 刚体句柄。**id = 0 表示静态世界**（世界锚刚体）。
+fn body_handle(w: &World, id: u32) -> Option<RigidBodyHandle> {
+    if id == 0 { Some(w.anchor) } else { w.map.get(&id).copied() }
+}
+
+/// 建关节。返回外部关节 id（>0）；0 = 失败。
+///
+///   kind           上面的 0..4
+///   id_a / id_b    两个刚体的外部 id；**0 = 静态世界**
+///   a1x,a1y        锚点 A，**刚体 A 的局部坐标**（世界锚时就是世界坐标）
+///   a2x,a2y        锚点 B，刚体 B 的局部坐标
+///   axis_x,axis_y  滑轨的轴，**世界坐标**
+///   p1,p2,p3       绳：最大长度；弹簧：静止长度 / 刚度 / 阻尼
+#[no_mangle]
+pub extern "C" fn rb_joint_new(
+    w: *mut World, kind: i32, id_a: u32, id_b: u32,
+    a1x: f64, a1y: f64, a2x: f64, a2y: f64,
+    axis_x: f64, axis_y: f64,
+    p1: f64, p2: f64, p3: f64,
+) -> u32 {
+    let Some(w) = (unsafe { wref(w) }) else { return 0 };
+    let Some(ha) = body_handle(w, id_a) else { return 0 };
+    let Some(hb) = body_handle(w, id_b) else { return 0 };
+    // 自己连自己：相对位姿恒为 0，约束退化，Rapier 的求解会直接给出 NaN。
+    if ha == hb { return 0; }
+    let a1 = Vector::new(a1x as f32, a1y as f32);
+    let a2 = Vector::new(a2x as f32, a2y as f32);
+    // ⚠️ rotation() 返回的是**引用**；下面要做乘法/求逆，所以这里拷一份（Rot2 是 Copy）。
+    let r1: Rotation = *w.bodies[ha].rotation();
+    let r2: Rotation = *w.bodies[hb].rotation();
+
+    // 关节帧的旋转必须是"创建时的相对朝向"。
+    //
+    // ⚠️ Rapier 的 builder 默认把两个关节帧的旋转都设成**单位旋转**，于是：
+    //    · 铰链的 angle() 从"两个刚体当前朝向之差"起算 —— 两个各自转了 90° 的
+    //      刚体一连上，限位 [0, 0.5] 当场就是满的（角度根本不是从 0 开始的）；
+    //    · 焊接会把两个刚体硬拧到**同一个朝向**（创建瞬间就有一个巨大的初始误差，
+    //      表现为"焊完自己转一下才停"）。
+    //    把 frame2 的旋转设成 R2⁻¹·R1 之后，创建时刻的约束误差恒为 0，
+    //    角度/相对位姿都从 0 起算 —— 这才是"关节"该有的语义。
+    let rel = (r2.inverse() * r1).angle();
+
+    let mut j: GenericJoint = match kind {
+        JK_HINGE => RevoluteJointBuilder::new().build().into(),
+        JK_SLIDER => PrismaticJointBuilder::new(Vector::X).build().into(),
+        JK_WELD => FixedJointBuilder::new().build().into(),
+        JK_ROPE => {
+            // Rapier 要求 max_dist > 0：0 会让约束退化成"两点必须重合"，
+            // 求解时除零。这里直接拒绝，而不是让它变成一个隐形的焊接。
+            if !(p1 > 0.0) { return 0; }
+            RopeJointBuilder::new(p1 as f32).build().into()
+        }
+        JK_SPRING => SpringJointBuilder::new(p1 as f32, p2 as f32, p3 as f32).build().into(),
+        _ => return 0,
+    };
+    match kind {
+        JK_HINGE | JK_WELD => {
+            j.set_local_frame1(Pose::new(a1, 0.0));
+            j.set_local_frame2(Pose::new(a2, rel));
+        }
+        JK_SLIDER => {
+            // 轴按**世界系**传进来，两端各自转到自己的局部系。
+            // ⚠️ 不能照抄 PrismaticJoint::new(axis)：它给两个刚体设**同一个局部轴**，
+            //    两个刚体朝向不同时这两根轴在世界系里根本不平行 —— 求解器会在
+            //    创建瞬间把它们拧到平行（表现为"啪"地转一下）。
+            let wa = Vector::new(axis_x as f32, axis_y as f32);
+            j.set_local_anchor1(a1);
+            j.set_local_anchor2(a2);
+            j.set_local_axis1(r1.inverse() * wa);
+            j.set_local_axis2(r2.inverse() * wa);
+        }
+        _ => {
+            j.set_local_anchor1(a1);
+            j.set_local_anchor2(a2);
+        }
+    }
+    let handle = w.ij.insert(ha, hb, j, true);
+    let id = w.next_joint_id;
+    w.next_joint_id += 1;
+    w.joints.insert(id, JointRec { handle, kind });
+    id
+}
+
+/// 删关节。对**已经不存在**的 id 是安全的空操作 —— 刚体被删时 Rapier 已经把
+/// 挂在它上面的关节一起删了，GDScript 侧的清理还会拿着旧 id 再来一次。
+#[no_mangle]
+pub extern "C" fn rb_joint_remove(w: *mut World, id: u32) {
+    let Some(w) = (unsafe { wref(w) }) else { return };
+    if let Some(rec) = w.joints.remove(&id) {
+        w.ij.remove(rec.handle, true);
+    }
+}
+
+/// 限位。铰链是角度（弧度），滑轨是距离。**min > max 表示不限制**。
+#[no_mangle]
+pub extern "C" fn rb_joint_set_limits(w: *mut World, id: u32, min: f64, max: f64) {
+    let Some(w) = (unsafe { wref(w) }) else { return };
+    let Some(rec) = w.joints.get(&id) else { return };
+    let axis = joint_axis(rec.kind);
+    let handle = rec.handle;
+    let (lo, hi) = if min > max { (-Real::MAX, Real::MAX) } else { (min as f32, max as f32) };
+    if let Some(j) = w.ij.get_mut(handle, true) {
+        j.data.set_limits(axis, [lo, hi]);
+    }
+}
+
+/// 速度马达：让关节以 target_vel 运动（铰链是角速度 rad/s，滑轨是线速度 px/s）。
+///
+///   damping    速度误差的修正速率（Rapier 的 AccelerationBased 模型：
+///              a = damping × (target_vel − v)）—— 与质量无关，所以轻重物手感一致。
+///   max_force  **冲量上限 = max_force × dt**。0 = 禁用（对应参考 API 里
+///              "strength 0 关闭马达"的语义）。
+#[no_mangle]
+pub extern "C" fn rb_joint_motor_velocity(w: *mut World, id: u32, target_vel: f64, damping: f64, max_force: f64) {
+    let Some(w) = (unsafe { wref(w) }) else { return };
+    let Some(rec) = w.joints.get(&id) else { return };
+    let axis = joint_axis(rec.kind);
+    let handle = rec.handle;
+    if let Some(j) = w.ij.get_mut(handle, true) {
+        if max_force <= 0.0 {
+            j.data.set_motor_max_force(axis, 0.0);
+        } else if damping > 0.0 {
+            j.data.set_motor_velocity(axis, target_vel as f32, damping as f32);
+            j.data.set_motor_max_force(axis, max_force as f32);
+        }
+        // damping <= 0 直接不发：Rapier 的 AccelerationBased 马达在
+        // stiffness = damping = 0 时算出的系数是 0 × ∞ = NaN，会把整个求解污染掉。
+        // （调用方那边已经 push_error 了，这里只是不让坏参数进求解器。）
+    }
+}
+
+/// 位置/角度伺服：走到 target（铰链是角度，滑轨是距离）。
+/// stiffness / damping 同样是 AccelerationBased 语义；max_force = 0 表示关掉。
+#[no_mangle]
+pub extern "C" fn rb_joint_motor_position(
+    w: *mut World, id: u32, target: f64, stiffness: f64, damping: f64, max_force: f64,
+) {
+    let Some(w) = (unsafe { wref(w) }) else { return };
+    let Some(rec) = w.joints.get(&id) else { return };
+    let axis = joint_axis(rec.kind);
+    let handle = rec.handle;
+    if let Some(j) = w.ij.get_mut(handle, true) {
+        if max_force <= 0.0 {
+            j.data.set_motor_max_force(axis, 0.0);
+        } else if stiffness > 0.0 || damping > 0.0 {
+            j.data.set_motor_position(axis, target as f32, stiffness as f32, damping as f32);
+            j.data.set_motor_max_force(axis, max_force as f32);
+        }
+        // 同上：两个系数都为 0 时不发（NaN 防线）。
+    }
+}
+
+/// 关掉马达（保留限位）。注意不是"删掉马达参数"，而是把冲量上限设成 0。
+#[no_mangle]
+pub extern "C" fn rb_joint_motor_off(w: *mut World, id: u32) {
+    let Some(w) = (unsafe { wref(w) }) else { return };
+    let Some(rec) = w.joints.get(&id) else { return };
+    let axis = joint_axis(rec.kind);
+    let handle = rec.handle;
+    if let Some(j) = w.ij.get_mut(handle, true) {
+        j.data.set_motor_max_force(axis, 0.0);
+    }
+}
+
+/// 读关节**上一步**的约束冲量：out 至少 2 个 f64 —— [线性冲量模长, 角冲量]。
+/// 返回 1 表示成功。断裂判定用它（Rapier 没有"关节断裂"这个概念，得自己判）。
+///
+/// ⚠️ Rapier 存的冲量是**关节局部系**的分量（按自由度），所以这里只输出**模长**：
+///    拿它做阈值判据是稳的，但别指望它是一个世界系矢量。
+#[no_mangle]
+pub extern "C" fn rb_joint_impulse(w: *mut World, id: u32, out: *mut f64) -> i32 {
+    let Some(w) = (unsafe { wref(w) }) else { return 0 };
+    if out.is_null() { return 0; }
+    let Some(rec) = w.joints.get(&id) else { return 0 };
+    let Some(j) = w.ij.get(rec.handle) else { return 0 };
+    let imp = j.impulses; // SpatialVector = Vec3（2D：x, y, 角）
+    unsafe {
+        *out = (imp.x * imp.x + imp.y * imp.y).sqrt() as f64;
+        *out.add(1) = imp.z as f64;
+    }
+    1
+}
+
+/// 当前关节数（诊断用：测试靠它确认"删刚体时关节没有泄漏"）。
+#[no_mangle]
+pub extern "C" fn rb_joint_count(w: *mut World) -> i32 {
+    let Some(w) = (unsafe { wref(w) }) else { return 0 };
+    // ⚠️ 报的是 **Rapier 侧**的数量（ij.len()），不是我们那张 id 表 ——
+    //    后者永远和我们自己一致，"泄漏"这类问题只有前者看得见。
+    w.ij.len() as i32
 }

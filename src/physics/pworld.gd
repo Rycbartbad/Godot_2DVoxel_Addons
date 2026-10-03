@@ -12,6 +12,7 @@ const Solver := preload("res://src/physics/solver.gd")
 const Destruction := preload("res://src/core/destruction.gd")
 const PixelShape := preload("res://src/core/pixel_shape.gd")
 const Grab := preload("res://src/physics/grab.gd")
+const PJoint := preload("res://src/physics/joint.gd")
 const Sweep := preload("res://src/physics/sweep.gd")
 
 const Query := preload("res://src/physics/query.gd")
@@ -192,6 +193,10 @@ var _packed_manifolds := false
 
 
 var grabs: Array = []
+## 关节（约束）。见 src/physics/joint.gd。
+var joints: Array = []
+## 断掉/移除掉的关节（诊断用：游戏层可以轮询它做音效/特效，然后自己 clear）。
+var broken_joints: Array = []
 var max_dynamic_bodies := 400
 
 ## 上一子步的接触点数（只读统计，给 debug_overlay / demo 用）。
@@ -322,6 +327,13 @@ func remove_body(body: PBody) -> void:
 		_rp_send(cmds, 4)
 		_rp_by_id.erase(body.rapier_id)
 		body.rapier_id = 0
+	# 挂在这个刚体上的关节必须一起清。
+	# ⚠️ Rapier 侧其实已经随刚体一起删了（rb_body_remove 会调 purge_joints），
+	#    但 GDScript 这边的 PJoint 对象还在 joints 里 —— 留着就是悬空引用：
+	#    游戏层再调 j.movement() 会去读一个已经被删掉的刚体的位姿。
+	if not joints.is_empty():
+		for j in joints_of(body).duplicate():
+			_joint_drop_silent(j)
 	bodies.erase(body)
 
 
@@ -371,6 +383,8 @@ var _rp_cmd_us := 0
 var _rp_by_id := {}
 ## 本子步被抓住的刚体（每子步重建）。
 var _rp_grabbed := {}
+## 还没在 Rapier 里建出来的关节（等两端的刚体先拿到 rapier_id）。
+var _rp_joints_pending: Array = []
 
 ## 阻尼与引擎 _integrate_forces 里那两行**同值**。Rapier 的公式也是 v *= 1/(1+d*dt)，
 ## 所以直接设进去就等价，不需要自己再乘一遍。
@@ -582,6 +596,7 @@ func _substep_rapier(dt: float) -> void:
 			assert(false, "RapierPhys 扩展不可用")
 			return
 	_rp_create_missing()
+	_rp_create_joints()
 	# ---- 抓取约束：必须在**推送之前**解 ----
 	#
 	# 这样它改出来的速度能在**同一子步**里被 Rapier 的接触求解看到（否则会慢一帧）。
@@ -622,6 +637,8 @@ func _substep_rapier(dt: float) -> void:
 		_rp_f64(cmds, gravity.x)
 		_rp_f64(cmds, gravity.y)
 		_rp_gravity_pushed = gravity
+	# 关节的限位/马达：变了才推
+	_rp_push_joints(cmds)
 	var n_state := 0
 	var n_sleep := 0
 	for b: PBody in bodies:
@@ -714,7 +731,16 @@ func _substep_rapier(dt: float) -> void:
 		_rp_u8(cmds, 9)
 		_rp_u32(cmds, b3.rapier_id)
 		n_sleep += 1
-	var res := _rp_send(cmds, n_state * 48 + n_sleep * 4)
+	# ---- 断裂判定要读的关节冲量 ----
+	# 只对**设了阈值**的关节读：每个关节一条命令 + 16 字节结果。
+	# 绝大多数关节不需要断裂，别为它们每子步付代价。
+	var breakables: Array = []
+	for j in joints:
+		if j.rapier_id > 0 and is_finite(j.break_impulse):
+			_rp_u8(cmds, 30)
+			_rp_u32(cmds, j.rapier_id)
+			breakables.append(j)
+	var res := _rp_send(cmds, n_state * 48 + n_sleep * 4 + breakables.size() * 16)
 	var off := 4
 	for b4: PBody in bodies:
 		if b4.rapier_id <= 0 or b4.is_static:
@@ -748,6 +774,19 @@ func _substep_rapier(dt: float) -> void:
 			continue
 		b5.awake = (res.decode_s32(off) == 0)
 		off += 4
+	# ---- 关节冲量 -> 断裂 ----
+	if not breakables.is_empty():
+		for j in breakables:
+			j.last_linear_impulse = res.decode_double(off)
+			j.last_angular_impulse = res.decode_double(off + 8)
+			off += 16
+			# ⚠️ 判据取**线性**冲量，不取角冲量。
+			#    实测：一个挂着 256 质量方块的铰链，约束载荷几乎全在"锁住锚点"的
+			#    那两根线性自由度上（实测 400~640），而自由转动的 AngX 那一行是 **0** ——
+			#    第一版按角冲量判断裂，于是"永远不断"（阈值 1.0 都不动）。
+			#    角冲量只有在马达/限位顶着它时才非零，所以它只作诊断量。
+			j.last_impulse = j.last_linear_impulse
+		_break_joints_over_threshold(breakables)
 	# sleeping_enabled = false 时必须**每子步把物体叫醒**：
 	# Rapier 的岛管理器会自己判睡，不叫醒就等于这个开关被静默忽略 ——
 	# dump_state 的非休眠场景全是靠它测"纯求解器行为"的。
@@ -1433,6 +1472,305 @@ func release_grab() -> void:
 
 func is_grabbing() -> bool:
 	return not grabs.is_empty()
+
+
+## ---------- 关节 ----------
+##
+## 五种关节都返回一个 PJoint（见 src/physics/joint.gd）；**b 传 null 表示接静态世界**。
+## 求解在 Rapier 里（ImpulseJoint），这一层只负责"把参数翻译成命令流"，
+## 以及把断裂判定所需的冲量读回来。
+
+## 铰链：两个刚体绕一个世界坐标点相对转动（门、轮子、摆）。
+## world_anchor 省略时取两端质心的中点。
+func add_hinge(a: PBody, b: PBody, world_anchor := Vector2.INF) -> PJoint:
+	return _add_joint(PJoint.HINGE, a, b, world_anchor, world_anchor, Vector2.RIGHT, 0.0, 0.0, 0.0)
+
+
+## 滑轨：沿 axis（**世界方向**）相对平移（活塞、抽屉）。两端朝向不同也能对上 ——
+## 轴在 Rapier 侧各自转到自己的局部系（见 rb_joint_new 里那条说明）。
+func add_slider(a: PBody, b: PBody, world_anchor := Vector2.INF, axis := Vector2.RIGHT) -> PJoint:
+	return _add_joint(PJoint.SLIDER, a, b, world_anchor, world_anchor, axis, 0.0, 0.0, 0.0)
+
+
+## 焊接：完全锁死。**创建时刻的相对位姿就是"零位"** —— 两个各自转过的刚体
+## 焊在一起不会自己转正（Rapier 的关节帧按创建时的相对朝向设零）。
+func add_weld(a: PBody, b: PBody, world_anchor := Vector2.INF) -> PJoint:
+	return _add_joint(PJoint.WELD, a, b, world_anchor, world_anchor, Vector2.RIGHT, 0.0, 0.0, 0.0)
+
+
+## 绳：两点距离**不超过** max_length（不可伸长，但可以松）。
+func add_rope(a: PBody, b: PBody, world_anchor_a: Vector2, world_anchor_b: Vector2,
+		max_length: float) -> PJoint:
+	return _add_joint(PJoint.ROPE, a, b, world_anchor_a, world_anchor_b, Vector2.RIGHT,
+		max_length, 0.0, 0.0)
+
+
+## 弹簧：拉向 rest_length。
+## 刚度/阻尼是 Rapier 的 ForceBased 语义：**力 = 刚度 × 误差 + 阻尼 × 速度误差**
+## （注意是绝对力，和质量的相对关系与马达相反 —— 重物会明显更"软"）。
+func add_spring(a: PBody, b: PBody, world_anchor_a: Vector2, world_anchor_b: Vector2,
+		rest_length: float, stiffness := 100.0, damping := 10.0) -> PJoint:
+	return _add_joint(PJoint.SPRING, a, b, world_anchor_a, world_anchor_b, Vector2.RIGHT,
+		rest_length, stiffness, damping)
+
+
+func _add_joint(kind: int, a: PBody, b: PBody, anchor_a: Vector2, anchor_b: Vector2,
+		axis: Vector2, rest: float, stiff: float, damp: float) -> PJoint:
+	if a == null and b == null:
+		push_error("add_joint：两端不能都是 null（null = 静态世界，至少要有一端是刚体）")
+		return null
+	if a != null and b != null and a == b:
+		# Rapier 侧直接拒绝同体自连（相对位姿恒为 0，求解会出 NaN），这里早点报错。
+		push_error("add_joint：不能把刚体连到它自己")
+		return null
+	for body: PBody in [a, b]:
+		if body != null and not bodies.has(body):
+			push_error("add_joint：刚体还没加进这个世界（先 world.add_body(...)）")
+			return null
+	# 世界锚一律放在 **A 侧**：这样 movement()/speed() 的符号就是"刚体相对世界" ——
+	# 刚体沿 +axis 走读数为正、往 +方向转角度为正，和直觉一致。
+	#
+	# ⚠️ 反过来（刚体在 A、世界在 B）的话，Rapier 的自由度是"B 相对 A"，
+	#    于是"沿 +axis 走"读出来是**负数**，限位的 min/max 也跟着镜像。
+	#    实测：滑块给 +X 冲量，movement 报 -19.8；而限位确实按这个负数生效
+	#    （所以不是符号显示问题，是真的反了）。
+	#    两个真刚体之间**不换**：movement = B 相对 A，谁当参考系由调用方决定。
+	if b == null and a != null:
+		var tmp_body: PBody = a
+		a = b
+		b = tmp_body
+		var tmp_anchor: Vector2 = anchor_a
+		anchor_a = anchor_b
+		anchor_b = tmp_anchor
+	if anchor_a == Vector2.INF:
+		anchor_a = _joint_default_anchor(a, b)
+	if anchor_b == Vector2.INF:
+		anchor_b = anchor_a
+	var j := PJoint.new()
+	j.world = self
+	j.kind = kind
+	j.body_a = a
+	j.body_b = b
+	j.local_anchor_a = a.to_local(anchor_a) if a != null else anchor_a
+	j.local_anchor_b = b.to_local(anchor_b) if b != null else anchor_b
+	j.axis = axis.normalized() if axis.length() > 0.0 else Vector2.RIGHT
+	j.rest_length = rest
+	j.stiffness = stiff
+	j.damping = damp
+	j._rot_a0 = 0.0 if a == null else a.rotation
+	j._rot_b0 = 0.0 if b == null else b.rotation
+	joints.append(j)
+	_rp_joints_pending.append(j)
+	return j
+
+
+func _joint_default_anchor(a: PBody, b: PBody) -> Vector2:
+	if a != null and b != null:
+		return (a.com_world() + b.com_world()) * 0.5
+	if a != null:
+		return a.com_world()
+	return b.com_world()
+
+
+## 主动断开一个关节（刚体照旧，只是不再连在一起）。
+func remove_joint(j) -> void:
+	if j == null:
+		return
+	_rp_joints_pending.erase(j)
+	if not joints.has(j):
+		return
+	joints.erase(j)
+	if _rp != null and j.rapier_id > 0:
+		var cmds := PackedByteArray()
+		_rp_u8(cmds, 25)
+		_rp_u32(cmds, j.rapier_id)
+		_rp_send(cmds, 4)
+	j.rapier_id = 0
+	j.active = false
+	j.world = null
+
+
+## 静默丢掉一个关节：Rapier 侧已经不在了（刚体被删时 Rapier 把挂它的关节一起删了），
+## 只需要清 GDScript 侧的表 —— 这时候再发 joint_remove 是多余的。
+func _joint_drop_silent(j) -> void:
+	joints.erase(j)
+	_rp_joints_pending.erase(j)
+	j.rapier_id = 0
+	j.active = false
+	j.world = null
+
+
+## 连在这个刚体上的所有关节。
+func joints_of(body: PBody) -> Array:
+	var out: Array = []
+	for j in joints:
+		if j.body_a == body or j.body_b == body:
+			out.append(j)
+	return out
+
+
+## 这个刚体是否**直接或间接**被关节连到静态世界（世界锚或静态刚体）。
+##
+## 这是"一堆碎块还锚在墙上，不必各自模拟"的判据（对应参考 API 的锚定检测）。
+## 注意它只走关节图，**不含接触**：落在静态地面上的刚体不算"jointed to static"。
+func is_jointed_to_static(body: PBody) -> bool:
+	if body == null:
+		return false
+	var seen := {body: true}
+	var stack: Array = [body]
+	while not stack.is_empty():
+		var cur: PBody = stack.pop_back()
+		for j in joints:
+			if not j.active:
+				continue
+			var other = null
+			if j.body_a == cur:
+				other = j.body_b
+			elif j.body_b == cur:
+				other = j.body_a
+			else:
+				continue
+			if other == null or other.is_static:
+				return true
+			if not seen.has(other):
+				seen[other] = true
+				stack.append(other)
+	return false
+
+
+## 把还没有 Rapier 身份的关节建出来。
+##
+## ⚠️ 必须在 _rp_create_missing() **之后**调：关节两端要的是刚体的 rapier_id，
+##    而那个 id 是 Rapier 分配的（第一趟发命令时还不知道）。两端只要有一个
+##    还没拿到 id，这个关节就留在 _rp_joints_pending 里等下一子步。
+func _rp_create_joints() -> void:
+	if _rp_joints_pending.is_empty():
+		return
+	var cmds := PackedByteArray()
+	var todo: Array = []
+	for j in _rp_joints_pending:
+		if j.body_a != null and j.body_a.rapier_id <= 0:
+			continue
+		if j.body_b != null and j.body_b.rapier_id <= 0:
+			continue
+		_rp_u8(cmds, 24)
+		_rp_i32(cmds, j.kind)
+		_rp_u32(cmds, 0 if j.body_a == null else j.body_a.rapier_id)
+		_rp_u32(cmds, 0 if j.body_b == null else j.body_b.rapier_id)
+		_rp_f64(cmds, j.local_anchor_a.x)
+		_rp_f64(cmds, j.local_anchor_a.y)
+		_rp_f64(cmds, j.local_anchor_b.x)
+		_rp_f64(cmds, j.local_anchor_b.y)
+		_rp_f64(cmds, j.axis.x)
+		_rp_f64(cmds, j.axis.y)
+		_rp_f64(cmds, j.rest_length)
+		_rp_f64(cmds, j.stiffness)
+		_rp_f64(cmds, j.damping)
+		todo.append(j)
+	if todo.is_empty():
+		return
+	var res := _rp_send(cmds, todo.size() * 4)
+	var off := 4
+	for j in todo:
+		j.rapier_id = res.decode_s32(off)
+		off += 4
+		_rp_joints_pending.erase(j)
+		if j.rapier_id <= 0:
+			# Rapier 拒绝了参数（同体自连 / 绳长 <= 0 / 刚体不存在）。
+			# ⚠️ 这里必须**吵闹**：留着它的话后面的"变了才推"会对着 id 0 发命令，
+			#    表现为"关节静默不存在"，非常难查。
+			push_error("关节创建失败（kind=%d）：Rapier 拒绝了参数。" % j.kind)
+			_joint_drop_silent(j)
+
+
+## Rapier 侧的关节数（诊断用：确认删刚体时关节没有泄漏）。
+func rp_joint_count() -> int:
+	if _rp == null:
+		return 0
+	var cmds := PackedByteArray()
+	_rp_u8(cmds, 31)
+	var res := _rp_send(cmds, 4)
+	return res.decode_s32(4)
+
+
+## 关节的限位/马达：变了才推。
+##
+## ⚠️ 增量推送是**必须**的：每个关节每子步都发一遍，一屏 100 个关节就是 100 条
+##    命令/子步 —— 而绝大多数关节的参数一辈子不变。
+func _rp_push_joints(cmds: PackedByteArray) -> void:
+	for j in joints:
+		if j.rapier_id <= 0:
+			continue
+		if j.limits_enabled != j._rp_limits_on or j.min_limit != j._rp_min or j.max_limit != j._rp_max:
+			_rp_u8(cmds, 26)
+			_rp_u32(cmds, j.rapier_id)
+			if j.limits_enabled:
+				_rp_f64(cmds, j.min_limit)
+				_rp_f64(cmds, j.max_limit)
+			else:
+				# min > max = "不限制"（Rust 侧按这个约定还原成 ±Real::MAX）
+				_rp_f64(cmds, INF)
+				_rp_f64(cmds, -INF)
+			j._rp_limits_on = j.limits_enabled
+			j._rp_min = j.min_limit
+			j._rp_max = j.max_limit
+		if j.motor_mode == j._rp_motor_mode and j.motor_target == j._rp_motor_target \
+				and j.motor_max_force == j._rp_motor_force \
+				and j.motor_stiffness == j._rp_motor_stiffness \
+				and j.motor_damping == j._rp_motor_damping:
+			continue
+		match j.motor_mode:
+			PJoint.MOTOR_VELOCITY:
+				_rp_u8(cmds, 27)
+				_rp_u32(cmds, j.rapier_id)
+				_rp_f64(cmds, j.motor_target)
+				_rp_f64(cmds, j.motor_damping)
+				_rp_f64(cmds, j.motor_max_force)
+			PJoint.MOTOR_POSITION:
+				_rp_u8(cmds, 28)
+				_rp_u32(cmds, j.rapier_id)
+				_rp_f64(cmds, j.motor_target)
+				_rp_f64(cmds, j.motor_stiffness)
+				_rp_f64(cmds, j.motor_damping)
+				_rp_f64(cmds, j.motor_max_force)
+			_:
+				_rp_u8(cmds, 29)
+				_rp_u32(cmds, j.rapier_id)
+		j._rp_motor_mode = j.motor_mode
+		j._rp_motor_target = j.motor_target
+		j._rp_motor_force = j.motor_max_force
+		j._rp_motor_stiffness = j.motor_stiffness
+		j._rp_motor_damping = j.motor_damping
+
+
+## 断裂：约束冲量超过阈值就断开。
+##
+## Rapier 没有"关节断裂"这个概念，所以这是**我们的判据**：读回来的冲量
+## （力 × 时间步）超过 break_impulse 就删掉关节，并把它记进 broken_joints。
+##
+## ⚠️ 冲量随 dt 变（子步越小，同样载荷下冲量越小），所以阈值是"每步冲量"而不是力：
+##    要跨帧率稳定，用 break_impulse ≈ 目标力 × 你的固定 dt。
+func _break_joints_over_threshold(cands: Array) -> void:
+	var broken_now: Array = []
+	for j in cands:
+		if j.broken or not j.active or j.rapier_id <= 0:
+			continue
+		if j.last_impulse > j.break_impulse:
+			broken_now.append(j)
+	if broken_now.is_empty():
+		return
+	var cmds := PackedByteArray()
+	for j in broken_now:
+		_rp_u8(cmds, 25)
+		_rp_u32(cmds, j.rapier_id)
+	_rp_send(cmds, 4)
+	for j in broken_now:
+		j.broken = true
+		j.active = false
+		j.rapier_id = 0
+		j.world = null
+		joints.erase(j)
+		broken_joints.append(j)
 
 
 ## 碎块数量上限：超出时淘汰最小、且已休眠、且没被抓的碎片。

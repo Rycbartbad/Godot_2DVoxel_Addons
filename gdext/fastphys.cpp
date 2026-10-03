@@ -115,6 +115,17 @@ alignas(16) static unsigned char g_str_empty_hint[64];
 //  21  world_set_max_linear_velocity(f64 normalized)
 //  22  world_set_pixel_params(f64 pred_dist, f64 corr_vel, f64 allowed_err)
 //  23  world_set_ccd_substeps(u32 n)
+//
+// ---- 关节（见 rapier_bridge/src/lib.rs 的"关节"一节）----
+//  24  joint_new(i32 kind, u32 id_a, u32 id_b, f64 a1x,a1y,a2x,a2y,
+//                f64 axis_x,axis_y, f64 p1,p2,p3)     -> i32 joint_id
+//  25  joint_remove(u32 jid)
+//  26  joint_set_limits(u32 jid, f64 min, f64 max)     （min > max = 不限制）
+//  27  joint_motor_velocity(u32 jid, f64 target_vel, f64 damping, f64 max_force)
+//  28  joint_motor_position(u32 jid, f64 target, f64 stiffness, f64 damping, f64 max_force)
+//  29  joint_motor_off(u32 jid)
+//  30  joint_impulse(u32 jid)                          -> f64 线性模长, 角冲量
+//  31  joint_count()                                   -> i32
 
 typedef void *RPWorld;
 
@@ -145,6 +156,16 @@ struct RapierApi {
 	void (*world_set_length_unit)(RPWorld, double) = nullptr;
 	void (*world_set_max_linear_velocity)(RPWorld, double) = nullptr;
 	void (*world_set_pixel_params)(RPWorld, double, double, double) = nullptr;
+	// 关节：签名与 rapier_bridge/src/lib.rs 里的 rb_joint_* 一一对应
+	uint32_t (*joint_new)(RPWorld, int32_t, uint32_t, uint32_t, double, double, double, double,
+		double, double, double, double, double) = nullptr;
+	void (*joint_remove)(RPWorld, uint32_t) = nullptr;
+	void (*joint_set_limits)(RPWorld, uint32_t, double, double) = nullptr;
+	void (*joint_motor_velocity)(RPWorld, uint32_t, double, double, double) = nullptr;
+	void (*joint_motor_position)(RPWorld, uint32_t, double, double, double, double) = nullptr;
+	void (*joint_motor_off)(RPWorld, uint32_t) = nullptr;
+	int32_t (*joint_impulse)(RPWorld, uint32_t, double *) = nullptr;
+	int32_t (*joint_count)(RPWorld) = nullptr;
 	bool tried = false;
 	bool ok = false;
 };
@@ -204,6 +225,14 @@ static bool load_rapier() {
 	RP_GET(world_set_length_unit, "rb_world_set_length_unit")
 	RP_GET(world_set_max_linear_velocity, "rb_world_set_max_linear_velocity")
 	RP_GET(world_set_pixel_params, "rb_world_set_pixel_params")
+	RP_GET(joint_new, "rb_joint_new")
+	RP_GET(joint_remove, "rb_joint_remove")
+	RP_GET(joint_set_limits, "rb_joint_set_limits")
+	RP_GET(joint_motor_velocity, "rb_joint_motor_velocity")
+	RP_GET(joint_motor_position, "rb_joint_motor_position")
+	RP_GET(joint_motor_off, "rb_joint_motor_off")
+	RP_GET(joint_impulse, "rb_joint_impulse")
+	RP_GET(joint_count, "rb_joint_count")
 #undef RP_GET
 	g_rap.ok = true;
 	printf("[RapierPhys] rapier_bridge.dll 已加载: %s\n", local.c_str());
@@ -317,6 +346,32 @@ static void run_rapier_cmd(RapierInstance *inst, const uint8_t *in, size_t in_n,
 			case 22: { double pd = r.f64(), cv = r.f64(), ae = r.f64();
 				g_rap.world_set_pixel_params(W, pd, cv, ae); break; }
 			case 23: { uint32_t n = r.u32(); g_rap.world_set_ccd_substeps(W, n); break; }
+			case 24: {
+				int32_t kind = r.i32();
+				uint32_t ia = r.u32(), ib = r.u32();
+				double a1x = r.f64(), a1y = r.f64(), a2x = r.f64(), a2y = r.f64();
+				double ax = r.f64(), ay = r.f64();
+				double p1 = r.f64(), p2 = r.f64(), p3 = r.f64();
+				w.i32((int32_t)g_rap.joint_new(W, kind, ia, ib, a1x, a1y, a2x, a2y, ax, ay, p1, p2, p3));
+				break;
+			}
+			case 25: { uint32_t jid = r.u32(); g_rap.joint_remove(W, jid); break; }
+			case 26: { uint32_t jid = r.u32(); double lo = r.f64(), hi = r.f64();
+				g_rap.joint_set_limits(W, jid, lo, hi); break; }
+			case 27: { uint32_t jid = r.u32(); double tv = r.f64(), dp = r.f64(), mf = r.f64();
+				g_rap.joint_motor_velocity(W, jid, tv, dp, mf); break; }
+			case 28: { uint32_t jid = r.u32(); double tg = r.f64(), st = r.f64(), dp = r.f64(), mf = r.f64();
+				g_rap.joint_motor_position(W, jid, tg, st, dp, mf); break; }
+			case 29: { uint32_t jid = r.u32(); g_rap.joint_motor_off(W, jid); break; }
+			case 30: {
+				uint32_t jid = r.u32();
+				buf[0] = 0.0; buf[1] = 0.0;
+				g_rap.joint_impulse(W, jid, buf);
+				w.f64(buf[0]);
+				w.f64(buf[1]);
+				break;
+			}
+			case 31: { w.i32(g_rap.joint_count(W)); break; }
 			default:
 				// ⚠️ 未知操作码**必须立刻停**：它的载荷长度未知，继续读下去会把
 				//    后面的字节当成操作码，整条流错位 —— 而错位往往表现为"写出了
