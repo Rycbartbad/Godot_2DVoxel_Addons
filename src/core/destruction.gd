@@ -145,12 +145,54 @@ static func touches_boundary(shape: PixelShape, rect: Rect2i) -> bool:
 	#
 	#    这一条本身是"花 5.4 ms 去省一次 33 ms 的 split"，净赚；
 	#    但 5.4 ms 太贵了 —— 它出现在**每一笔**擦除里。
-	for y in range(y0, y0 + rect.size.y):
-		for x in range(x0, x0 + rect.size.x):
-			if shape.get_pixel(x, y) == 0:
-				continue
-			if shape.get_pixel(x - 1, y) == 0 or shape.get_pixel(x + 1, y) == 0 					or shape.get_pixel(x, y - 1) == 0 or shape.get_pixel(x, y + 1) == 0 					or shape.get_pixel(x - 1, y - 1) == 0 or shape.get_pixel(x + 1, y - 1) == 0 					or shape.get_pixel(x - 1, y + 1) == 0 or shape.get_pixel(x + 1, y + 1) == 0:
-				return true
+	# ⚠️⚠️ **整块跳过**：一个 occ 全满、且八邻域也全满的 chunk，
+	#    它里面的任何像素都不可能邻接空像素 -> 不可能是边界像素 -> 整块跳过。
+	#
+	#    为什么需要：上面那个逐像素版本对 28x28 的探测框要跑 784 x 9 次
+	#    get_pixel，实测 **4.7 ms**，而且**每一笔擦除都要付**。
+	#    实心地面的大多数 chunk 都是全满的，跳过它们之后只剩边缘那一圈。
+	#
+	#    判据是**可靠**的（不是启发式）：全满块 + 八邻域全满 =>
+	#    块内每个像素的八邻域都在占用集合内 => 没有边界像素。
+	#    反过来，任何一块不满（或邻域有缺口）就退回逐像素查 —— 宁可多查，不能漏。
+	#
+	#    形状最外圈的 chunk 一定不满足（邻域缺失），所以外边界照常能查到。
+	var FULL := -1
+	var cx0 := x0 >> 3
+	var cy0 := y0 >> 3
+	var cx1 := (x0 + rect.size.x - 1) >> 3
+	var cy1 := (y0 + rect.size.y - 1) >> 3
+	for cy in range(cy0, cy1 + 1):
+		for cx in range(cx0, cx1 + 1):
+			var c: PixelChunk = shape.chunks.get(PixelShape.make_key(cx, cy))
+			if c == null or c.occ == 0:
+				continue                       # 整块空，本块内没有占用像素
+			if c.occ == FULL:
+				var solid := true
+				for dy in range(-1, 2):
+					for dx in range(-1, 2):
+						if dx == 0 and dy == 0:
+							continue
+						var n: PixelChunk = shape.chunks.get(
+							PixelShape.make_key(cx + dx, cy + dy))
+						if n == null or n.occ != FULL:
+							solid = false
+							break
+					if not solid:
+						break
+				if solid:
+					continue                   # 全满且邻域全满 -> 不可能有边界像素
+			# 本块内逐像素查（只查这一块，不是整个探测框）
+			var px0 := maxi(x0, cx << 3)
+			var py0 := maxi(y0, cy << 3)
+			var px1 := mini(x0 + rect.size.x, (cx << 3) + 8)
+			var py1 := mini(y0 + rect.size.y, (cy << 3) + 8)
+			for y in range(py0, py1):
+				for x in range(px0, px1):
+					if shape.get_pixel(x, y) == 0:
+						continue
+					if shape.get_pixel(x - 1, y) == 0 or shape.get_pixel(x + 1, y) == 0 							or shape.get_pixel(x, y - 1) == 0 or shape.get_pixel(x, y + 1) == 0 							or shape.get_pixel(x - 1, y - 1) == 0 or shape.get_pixel(x + 1, y - 1) == 0 							or shape.get_pixel(x - 1, y + 1) == 0 or shape.get_pixel(x + 1, y + 1) == 0:
+						return true
 	return false
 
 
