@@ -8,6 +8,7 @@ const PixelWorld := preload("res://src/nodes/pixel_world.gd")
 const PixelShape2D := preload("res://src/nodes/pixel_shape_2d.gd")
 const PixelJoint2D := preload("res://src/nodes/pixel_joint_2d.gd")
 const DebugOverlay := preload("res://src/render/debug_overlay.gd")
+const PixelScale := preload("res://src/core/pixel_scale.gd")
 
 var _pass := 0
 var _fail := 0
@@ -226,6 +227,26 @@ func _initialize() -> void:
 		str(jdrag.anchor_a_world()))
 	_c("关节数不变（旧的摘掉、新的建上）", pw.world.joints.size() == n_joints,
 		"%d vs %d" % [pw.world.joints.size(), n_joints])
+
+	# ---- 体素尺寸：节点上的调节接口（甲方要的"给出调节接口"）----
+	#
+	# ⚠️ 以前只能调 PixelScale 这个**静态**类（编辑器里看不见、没法在 Inspector 里摆），
+	#    而 Demo 里又自己写了一份"改 PixelScale + 改 camera.zoom + sync 全部刚体" ——
+	#    两份逻辑一旦不一致就是"编辑器里调了、进游戏又跳回去"。
+	#    现在唯一真相源是 PixelWorld.voxel_size（@export），相机取景与贴图都在节点里做。
+	print("=== 体素尺寸接口 ===")
+	var vw := PixelWorld.new()
+	root.add_child(vw)
+	_c("默认 3.0", is_equal_approx(vw.voxel_size, 3.0), str(vw.voxel_size))
+	vw.voxel_size = 6.0
+	_c("设置后播到 PixelScale", is_equal_approx(PixelScale.get_scale(), 6.0),
+		str(PixelScale.get_scale()))
+	vw.voxel_size = 999.0
+	_c("上限被夹住（32）", is_equal_approx(vw.voxel_size, 32.0), str(vw.voxel_size))
+	vw.voxel_size = 0.0
+	_c("下限被夹住（1）", is_equal_approx(vw.voxel_size, 1.0), str(vw.voxel_size))
+	vw.voxel_size = 3.0                       # 还原全局静态值，别影响后面的用例
+	_c("还原成 3.0", is_equal_approx(PixelScale.get_scale(), 3.0), str(PixelScale.get_scale()))
 
 	print("=== %d passed, %d failed ===" % [_pass, _fail])
 	quit(0 if _fail == 0 else 1)

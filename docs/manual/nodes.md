@@ -165,13 +165,26 @@ renderer.forget_blueprint(id)
 蓝图**不在 `world.bodies` 里** —— 宽相扫不到、不受重力、不被破坏。
 所以画 100 笔不固化的成本 = 100 次形状编辑；固化才建刚体。
 
+## 体素尺寸（`PixelWorld.voxel_size`）
+
+**编辑器里就能调**（Inspector 的"观感"组，1~32，默认 3）—— 运行时改也立刻生效
+（Demo 里 `-` / `=` / `0`）。它**只影响"一个体素画多大"**：物理、破坏、笔刷、质量
+全部以**体素**为单位，改它不会牵动重力、速度、质量。
+
+节点是**唯一真相源**：改它会同时播到相机取景和渲染贴图（[`pixel_world.gd`](../../src/nodes/pixel_world.gd)）。
+
 ## 相机与 UI
 
 **引擎不封装这两者**，直接用内置的：
 
 ```gdscript
-camera.zoom = Vector2.ONE * PixelScale.get_scale() * PixelScale.render_scale()
+# 相机取景 = 体素尺寸 x 分辨率补偿（相机所在视口高度 / 540）
+camera.zoom = Vector2.ONE * PixelScale.get_scale() * PixelScale.render_scale(camera)
 ```
+
+> ⚠️ `render_scale()` 取的是**相机所在视口**的高度，不是窗口高度。
+> 像素风常见做法是"小视口渲染 -> 放大贴屏"（相机挂在 SubViewport 里）——
+> 那时窗口 1080p、相机视口 540p，拿窗口算会让取景差一倍。
 
 UI 用原生 `Control` + `Theme`。引擎只暴露**数据**
 （`px.momentum(body)`、`px.total_kinetic_energy()` 等），UI 去读。

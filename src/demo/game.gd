@@ -96,7 +96,7 @@ func _ready() -> void:
 	# ⚠️ 编辑器里视口尺寸/缩放可能拿不到有效值，zoom 为 0 会让 Godot 报
 	#    "Zoom level must be different from 0" 并且相机失效。
 	#    这里兜一下底，编辑器预览用 1.0 就够（预览不需要精确取景）。
-	var s0 := PixelScale.get_scale() * PixelScale.render_scale()
+	var s0 := PixelScale.get_scale() * PixelScale.render_scale(camera)
 	if s0 <= 0.0 or not is_finite(s0):
 		s0 = 1.0
 	camera.zoom = Vector2(s0, s0)
@@ -436,17 +436,11 @@ func _paint(from: Vector2, to: Vector2) -> void:
 ## 改"大块像素"的尺寸：逻辑世界不动，只改渲染缩放与相机视野。
 ## 所有体素数据保持原样，所以物理、质量、破坏结果完全不受影响。
 func _set_voxel_scale(v: float) -> void:
-	var old := PixelScale.get_scale()
-	PixelScale.set_scale(v)
-	var newv := PixelScale.get_scale()
-	if is_equal_approx(old, newv):
-		return
-	# 方块大小 = 相机缩放（唯一的一处缩放，不会叠乘）。
-	# ⚠️ 必须乘上分辨率补偿，否则运行时改体素尺寸会把 1080p 的补偿丢掉、
-	#    画面突然跳到另一种取景（这个补偿是"显示分辨率"的事，和体素尺寸无关）。
-	camera.zoom = Vector2(newv, newv) * PixelScale.render_scale()
-	for b in world.bodies:
-		renderer.sync(b)
+	# ⚠️ **唯一真相源是 PixelWorld.voxel_size**（它是 @export，编辑器里也能调）。
+	#    相机取景 + 贴图重建都在节点里做 —— 这里以前自己写了一遍（改 PixelScale、
+	#    改 camera.zoom、sync 全部刚体），和节点里那份重复：两边一旦不一致，
+	#    就会出现"编辑器里调了、进游戏又跳回去"这种分叉。
+	_world_node.voxel_size = v
 
 
 # ---------------------------------------------------------------- 擦除

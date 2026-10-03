@@ -30,6 +30,7 @@ const PixelBody2D := preload("res://src/nodes/pixel_body_2d.gd")
 const PixelMaterial := preload("res://src/nodes/pixel_material.gd")
 const PixelSprite2D := preload("res://src/nodes/pixel_sprite_2d.gd")
 const PixelJoint2D := preload("res://src/nodes/pixel_joint_2d.gd")
+const PixelScale := preload("res://src/core/pixel_scale.gd")
 
 @export_group("物理")
 @export var gravity := Vector2(0, 600)
@@ -58,6 +59,40 @@ const PixelJoint2D := preload("res://src/nodes/pixel_joint_2d.gd")
 ## 兜底密度表（下标即 id，缺省 1.0）
 @export var densities_fallback: Array[float] = [0.0, 2.5, 0.6, 7.8, 2.0]
 
+@export_group("观感")
+## 体素在屏幕上的大小：1 = 细腻，3 = 大块像素（默认），8+ = Teardown 那种粗块。
+##
+## ⚠️ 它**只影响"一个体素画多大"**：物理、破坏、笔刷、质量全部以**体素**为单位，
+##    改它不会牵动重力、速度、质量 —— 这是本框架的核心约定（见 pixel_scale.gd）。
+##
+## 编辑器里改完立刻生效（@tool）；运行时改也立刻生效（Demo 里 - / = / 0 三个键）。
+@export_range(1.0, 32.0, 0.5) var voxel_size := 3.0:
+	set(v):
+		var nv := clampf(v, PixelScale.MIN_SCALE, PixelScale.MAX_SCALE)
+		if is_equal_approx(nv, voxel_size) and is_equal_approx(PixelScale.get_scale(), nv):
+			return
+		voxel_size = nv
+		PixelScale.set_scale(nv)
+		_apply_voxel_size()
+
+
+## 把体素尺寸播到"相机取景 + 渲染贴图"。
+##
+## ⚠️ 相机 zoom 必须**同时**乘上 `render_scale(cam)`（相机所在视口高度 / 540）：
+##    只乘 voxel_size 的话，换个尺寸的视口取景就会变。
+##    注意 render_scale 取的是**相机自己的视口**，不是窗口 —— 相机挂在 SubViewport 里时
+##    两者不一样（见 pixel_scale.gd 的说明）。
+func _apply_voxel_size() -> void:
+	if not is_inside_tree():
+		return                                  # 场景加载时 setter 先于入树，交给 _ready
+	var cam := get_viewport().get_camera_2d()
+	if cam != null:
+		cam.zoom = Vector2.ONE * PixelScale.get_scale() * PixelScale.render_scale(cam)
+	if renderer != null and world != null:
+		for b in world.bodies:
+			renderer.sync(b)
+
+
 @export_group("运行")
 @export var auto_step := true
 @export var auto_render := true
@@ -81,7 +116,9 @@ var _joint_nodes: Array = []
 
 
 func _ready() -> void:
+	PixelScale.set_scale(voxel_size)
 	rebuild()
+	_apply_voxel_size()
 	if Engine.is_editor_hint():
 		return
 	set_physics_process(true)
