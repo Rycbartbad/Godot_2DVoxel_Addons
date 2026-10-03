@@ -49,8 +49,22 @@ python tools/check_docs.py -v
 ## 当前状态（交接时）
 
 - `main = stable` 附近，最后一次提交是 `e463164` 之后。
-- **常规 16 个测试脚本 290 项** + `validation_facade_api` **25 项**，全绿。
-- **基准（不许动）**：`sleep_box -4.414969665068 (0/12)`、`sleep_frag -40.915225196828 (0/120)`。
+- **常规 16 个测试脚本 295 项** + `validation_facade_api` **25 项**，全绿。
+- **基准（不许动）** —— 8 条，`tests/dump_state.gd` 的输出：
+
+  ```
+  stack:6:5    -8.229974685154
+  pile:8:6     -18.035456929289
+  frags:240    -214.289296929908
+  mixed         3.513143394944
+  stack:2:3    -2.583700827053
+  pile:4:4     -4.965469342498
+  sleep_box    -4.465181229425   (0/12)
+  sleep_frag   -39.158215979656  (0/120)
+  ```
+
+  （角接触修复 + `sleep_surface` 12.0→6.0 之后重设。非休眠的 6 条不受
+  `sleep_surface` 影响 —— 那些场景 `sleeping_enabled = false`。）
 - Tag：`v0.1.0 v0.2.0 v0.2.1 v0.2.2`；发布说明在 `docs/release_notes/`。
 - **项目树里不能有 `addons/`** —— 住在树里会让编辑器报
   `Class X hides a global script class` 并**级联到编译失败**（`.gdignore` 挡不住，
@@ -60,7 +74,11 @@ python tools/check_docs.py -v
 
 # 未完成的事
 
-## ★★★ 一、角接触不产生倾倒力矩（最重，未动）
+## ✅ 一、角接触不产生倾倒力矩 —— **已修**（`1c89b9f`，开发日志坑 38）
+
+> 下面这一段保留为**诊断记录**。注意其中"最怀疑 `_contact_width()`"是**错的** ——
+> 真凶是 `speculative_point()` 合成的那个接触点（力臂恒为 0）。
+> 修法与实测数据见 `docs/development_log.md` 坑 38 与 `src/physics/collide.gd` 的墓碑注释。
 
 **现象**：把一个 24×24 的方块转 **40°** 放在地上，**只有一个角接触** ——
 它**不倒** ✗，速度恒为 0，1.1 秒后**睡着**。
@@ -93,23 +111,33 @@ python tools/check_docs.py -v
 `Contact.point` / `Contact.contact_width` / 每个接触的 `impulse` 与**作用点 x 坐标**。
 如果冲量分布在**几像素宽**的区间上（而不是集中在角上），就确认了上面的判断。
 
-**⚠️ 改这里会动基准** ✗ —— 必须**先问**。而且 `sleep_surface = 12.0` 是**配着当前接触点公式**
-调的，**改接触公式就必须重新调它**（`pworld.gd:41-49` 的注释写明了）。
+**⚠️ 改这里会动基准** —— **已经改了**（8 条里 6 条变），基准随之重设。
+`sleep_surface` 也按"改接触公式就必须重新调它"这条从 12.0 改回 6.0。
 
 ## 二、睡眠阈值（优先级已降低）
 
-`pworld.gd:32-50`：
+`pworld.gd`（`var sleep_surface` 那一带）：
 
 ```gdscript
 var sleeping_enabled := true
 var sleep_linear  := 6.0      # 线速度阈值（px/s）
-var sleep_surface := 12.0     # **表面速度**阈值 = |ω| * bounding_radius()
+var sleep_surface := 6.0      # **表面速度**阈值 = |ω| * bounding_radius()
 var sleep_delay   := 0.4
 ```
 
 判据 `PBody.is_slow()`：线速度 + **最快点表面速度**（和尺寸无关）。
 岛屿级：岛内 awake 成员 `sleep_timer` 的**最小值** ≥ 0.4 就整岛入睡；
 被抓着/有外力的岛**永不睡**；入睡时**速度清零**。
+
+**✅ 已处理**：`sleep_surface` 从 12.0 **改回 6.0** —— 12.0 当年是为了盖住
+"合成接触点导致堆叠残留角速度"这个症状才提上去的（坑 38）。接触点修好之后重扫：
+
+- 单场景扫描 4/6/8/10/12：`4.0` 不够（sleep_box 12/12 清醒），`>= 6.0` 全部入睡
+- 当初促成 12.0 的那条诊断（`tests/diag_sleep_surface.gd`，gap=4/8 的三层堆叠）
+  在 6.0 下**全部入睡**（vmax / wmax 都是 0）
+
+⚠️ 它和 `_wake_pair` 耦合：那里用 `sleep_surface * 2.0` 判"邻居算不算在动"，
+所以这个值一变，"睡着的物体被谁唤醒"也跟着变（6.0 → 12.0，原来是 24.0）。
 
 **待定**：曾怀疑"没稳定就睡" ✗ —— 但**实测单个方块落地是睡在完全静止状态的**
 （叫醒也不动）✗ —— 所以**暂不需要改** ✓。若之后仍遇到，考虑加一条
