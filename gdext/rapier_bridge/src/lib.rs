@@ -237,12 +237,33 @@ pub extern "C" fn rb_world_set_pixel_params(w: *mut World, pred_dist: f64, corr_
 
 /// 开关 CCD（对应 PWorld.ccd_enabled）。
 /// ⚠️ Rapier 的 CCD **默认是关的**（逐刚体），不设的话这个开关等于被静默忽略。
+/// 开关 CCD 并设置**软 CCD 预测距离**（对应 PWorld.ccd_enabled / rp_soft_ccd_prediction）。
+///
+/// ⚠️ Rapier 的 CCD 有四个旋钮，enable_ccd 只是其中最弱的一个：
+///   · enable_ccd(bool)                逐刚体，默认 **false**
+///   · set_soft_ccd_prediction(距离)   逐刚体，默认 **0.0 —— 等于关着**
+///   · IntegrationParameters::max_ccd_substeps  默认 **1**（同时是全局开关，0 = 全关）
+///   · IntegrationParameters::min_ccd_dt        默认 1/6000
+///
+/// soft_ccd_prediction 是**推测 CCD**：把碰撞体按这个距离外扩去做连续检测。
+/// 它就是本引擎原本 max_speculative_margin(1.5 px) 的对应物 ——
+/// 默认 0.0 意味着快物体没有任何提前量，这正是穿模的来源。
 #[no_mangle]
-pub extern "C" fn rb_body_set_ccd(w: *mut World, id: u32, enabled: i32) {
+pub extern "C" fn rb_body_set_ccd(w: *mut World, id: u32, enabled: i32, soft_pred: f64) {
     let Some(w) = (unsafe { wref(w) }) else { return };
     if let Some(&h) = w.map.get(&id) {
         w.bodies[h].enable_ccd(enabled != 0);
+        w.bodies[h].set_soft_ccd_prediction(soft_pred as f32);
     }
+}
+
+/// CCD 子步上限。**它同时是全局 CCD 开关**（0 = 整个世界关掉 CCD，
+/// 包括"快动态体 vs 固定碰撞体"的自动 CCD）。默认 1 太小 ——
+/// 大步长（低帧率 / 帧卡顿 / 爆炸初速）下一次子步撑不住。
+#[no_mangle]
+pub extern "C" fn rb_world_set_ccd_substeps(w: *mut World, n: u32) {
+    let Some(w) = (unsafe { wref(w) }) else { return };
+    w.params.max_ccd_substeps = n as usize;
 }
 
 /// 清空累积的力与力矩。

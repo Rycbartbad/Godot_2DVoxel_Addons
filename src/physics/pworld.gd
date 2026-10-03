@@ -426,6 +426,19 @@ var _rp_max_linvel_pushed := 0.0
 ##    推测接触 2.0 px（略大于原来的 1.5，留一点余量）
 ##    挤出速度 300 px/s
 ##    允许误差 0.5 px
+## **软 CCD 预测距离**（逐刚体，Rapier 默认 **0.0 —— 等于关着**）。
+##
+## 这是推测 CCD：把碰撞体按这个距离外扩去做连续检测。它就是本引擎原本
+## max_speculative_margin(1.5 px) 的对应物。默认 0.0 意味着快物体没有任何
+## 提前量 —— 这正是穿模的来源之一。
+var rp_soft_ccd_prediction := 0.0
+
+## CCD 子步上限（世界级，Rapier 默认 **1**）。
+## ⚠️ 它同时是**全局 CCD 开关**：0 = 整个世界关掉 CCD（含"快动态体 vs 固定碰撞体"
+##    的自动 CCD）。默认 1 太小 —— 大步长下一次子步撑不住。
+var rp_ccd_substeps := 1
+var _rp_ccd_substeps_pushed := 0
+
 var rp_prediction_distance := 2.0
 var rp_max_corrective_velocity := 300.0
 var rp_allowed_linear_error := 0.5
@@ -524,6 +537,7 @@ func _rp_create_missing() -> void:
 		_rp_u8(props, 19)
 		_rp_u32(props, b.rapier_id)
 		_rp_i32(props, 1 if ccd_enabled else 0)
+		_rp_f64(props, rp_soft_ccd_prediction)
 		# 新刚体一律先推一次矩形与全部状态
 		b._rp_rects_rev = -1
 		b._rp_x = b.position.x
@@ -578,6 +592,10 @@ func _substep_rapier(dt: float) -> void:
 		_rp_u8(cmds, 21)
 		_rp_f64(cmds, rp_max_linear_velocity)
 		_rp_max_linvel_pushed = rp_max_linear_velocity
+	if rp_ccd_substeps != _rp_ccd_substeps_pushed:
+		_rp_u8(cmds, 23)
+		_rp_u32(cmds, rp_ccd_substeps)
+		_rp_ccd_substeps_pushed = rp_ccd_substeps
 	if not _rp_pixel_params_pushed:
 		_rp_u8(cmds, 22)
 		_rp_f64(cmds, rp_prediction_distance)
@@ -608,6 +626,7 @@ func _substep_rapier(dt: float) -> void:
 			_rp_u8(cmds, 19)
 			_rp_u32(cmds, b.rapier_id)
 			_rp_i32(cmds, 1 if ccd_enabled else 0)
+			_rp_f64(cmds, rp_soft_ccd_prediction)
 		if b._rp_gravity_scale != b.gravity_scale:
 			_rp_u8(cmds, 17)
 			_rp_u32(cmds, b.rapier_id)
