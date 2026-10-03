@@ -28,6 +28,7 @@ const ShapeOps := preload("res://src/core/shape_ops.gd")
 ## 顶点的坐标就是**局部像素坐标**（和形状的原点同一套）。
 ## 因为是像素画，"坡度"最终会量化成阶梯 —— 这是对的，物理用的就是那些像素。
 
+@export_group("多边形")
 ## 多边形顶点（局部像素坐标，按顺序，自动闭合）
 @export var points := PackedVector2Array([
 	Vector2(0, 32), Vector2(32, 0), Vector2(64, 32), Vector2(64, 64), Vector2(0, 64),
@@ -35,7 +36,7 @@ const ShapeOps := preload("res://src/core/shape_ops.gd")
 ## 顶点按这个倍数缩放（做"整体拉伸"用；改 points 也行，这个更方便）
 @export var point_scale := Vector2(1, 1)
 ## 轮廓向内收缩的像素数。>0 给形状留一圈边（避免斜坡顶端只有 1 像素宽而抖）
-@export var inset := 0
+@export_range(0, 64) var inset := 0
 
 
 func build_shape() -> PixelShape:

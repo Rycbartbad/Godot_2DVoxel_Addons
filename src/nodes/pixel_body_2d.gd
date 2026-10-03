@@ -214,11 +214,17 @@ func invalidate_gizmo() -> void:
 		alpha_threshold = v
 		invalidate_gizmo()
 
-@export_group("物理")
+@export_group("材质")
 ## 材质 id（决定颜色和密度）。0 是"空"，不能用作实体材质。
+##
+## ⚠️ 这个数字是**内在数据** —— 像素位图里存的就是它。
+##    想知道 1/2/3/4 分别是什么，看 PixelWorld 的 materials 数组。
+##    （③ 的 Inspector 插件会把它做成一个下拉选择器。）
 @export_range(1, 254) var material_id := 1
+
+@export_group("物理")
 @export var is_static := false
-@export var gravity_scale := 1.0
+@export_range(0.0, 8.0) var gravity_scale := 1.0
 @export var initial_velocity := Vector2.ZERO
 @export var initial_angular_velocity := 0.0
 ## 是否参与休眠。静态体无所谓；动态体一般保持 true。

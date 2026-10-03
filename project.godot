@@ -26,3 +26,6 @@ textures/canvas_textures/default_texture_filter=0
 anti_aliasing/quality/msaa_2d=2
 environment/defaults/default_clear_color=Color(0.09, 0.1, 0.13, 1)
 "#Forward+(Vulkan)æ¯RenderingDeviceè®¡ç®çè²å¨çåæï¼#æ¢ægl_compatibilityä¹è½è·ï¼åªæ¯ç ´ååæ ¸ä¼èªå¨éåCPUãrenderer/rendering_method"="forward_plus"
+
+[editor_plugins]
+enabled=PackedStringArray("res://src/editor/plugin.cfg")

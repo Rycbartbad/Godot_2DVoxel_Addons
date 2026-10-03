@@ -27,12 +27,15 @@ const PixelShading := preload("res://src/render/pixel_shading.gd")
 const PixelChunk := preload("res://src/core/pixel_chunk.gd")
 const PixelShape := preload("res://src/core/pixel_shape.gd")
 
+@export_group("形状来源")
+## 是否包含自己的形状？勾上则把本节点也算进形状来源（本节点一般没有形状，默认 false）
+@export var include_self := false
+
+@export_group("外观")
 ## 颜色表。留空则用 PixelWorld 的那张（保证和物理层同源）。
 @export var palette: Array[Color] = []
 ## 覆盖透明度（<1 时半透明，做"虚影/未固化"之类效果）
 @export_range(0.0, 1.0) var alpha := 1.0
-## 是否包含自己的形状？勾上则把本节点也算进形状来源（本节点一般没有形状，默认 false）
-@export var include_self := false
 ## 逐像素着色（边沿压暗 + 顶面提亮 + 色调扰动）。见 PixelShading 的说明。
 ##
 ## ⚠️ **默认关闭** —— 见 PixelRenderer.shading 的说明（试过一版，读起来是噪点）。
