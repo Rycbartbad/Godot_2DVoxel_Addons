@@ -43,6 +43,9 @@ var _bounds := {}         # body.id -> Rect2i
 ## 位置/旋转变化不在此列 —— 那些只改 node.transform，不需要重做贴图。
 var _rev := {}           # body.id -> 上次建贴图时的内容版本
 var _warned_material := false
+## body.id -> Image（**持久**，供分块增量重绘）。
+## 以前每次重建都是新建一张 Image，所以"只重画脏块"无处落脚。
+var _images := {}
 
 ## 逐像素着色（边沿压暗 + 顶面提亮 + 色调扰动）。见 PixelShading 的说明。
 ##
@@ -103,6 +106,7 @@ func forget(body_id: int) -> void:
 	_textures.erase(body_id)
 	_bounds.erase(body_id)
 	_rev.erase(body_id)
+	_images.erase(body_id)
 
 ## 改一种材质的颜色（会自动扩容；id 0 忽略）。
 func set_material_color(material: int, color: Color) -> void:
@@ -154,12 +158,38 @@ func sync(body) -> void:
 	#
 	#    现在比较的是形状自带的 revision（见 PixelShape.revision）——
 	#    谁改了内容谁 +1，不依赖任何调用方记得调 mark_dirty()。
+	#
+	# 🔥 分块增量重绘（"物理一个刚体、渲染按区块"）：
+	#    AABB 没变、只是**内容**变了的话，不再整张重建 —— 只重画
+	#    mark_dirty_range 标出来的那一小块，blit 进持久 Image，再 tex.update。
+	#
+	#    擦除地面时：整张重建 ~44 ms，而伤害只碰到 2.4% 的块。
 	var rev := _content_revision(body)
-	if _bounds[body.id] != aabb or _rev.get(body.id, -1) != rev:
+	var size_changed: bool = _bounds.get(body.id, Rect2i()) != aabb
+	var content_changed: bool = _rev.get(body.id, -1) != rev
+	if size_changed:
+		# 外接盒变了 -> 贴图尺寸跟着变，只能整张重建（碎片分裂走这条）
 		_bounds[body.id] = aabb
 		_rev[body.id] = rev
 		_textures.erase(body.id)
+		_clear_all_dirty(body)
 		node.texture = _build_texture(body, aabb)
+	elif content_changed:
+		_rev[body.id] = rev
+		var reg := _take_dirty_rect(body, aabb)
+		var img: Image = _images.get(body.id)
+		var tex: ImageTexture = _textures.get(body.id)
+		if reg.size.x <= 0 or img == null or tex == null:
+			# ⚠️ 保守回退：没有块级脏信息（例如 touch() 走的原生路径），
+			#    或者贴图还没建过。宁可多画，不能少画 ——
+			#    少画的症状是"右键擦掉了像素，画面上却还在"。
+			_textures.erase(body.id)
+			node.texture = _build_texture(body, aabb)
+		else:
+			img.blit_rect(_build_region_image(body.shapes, aabb, reg),
+				Rect2i(Vector2i.ZERO, reg.size), reg.position)
+			tex.update(img)
+			node.texture = tex
 	else:
 		var t: ImageTexture = _textures.get(body.id)
 		if t != null:
@@ -248,6 +278,89 @@ func _build_texture(body, aabb: Rect2i):
 	return _build_texture_impl(body.shapes, aabb, body.id)
 
 
+## 只把 region（相对 aabb 的像素矩形）那一块画成一张小 Image。
+##
+## ⚠️ 存在的理由：擦除地面时重建**整个** 768x100 贴图要 ~44 ms，
+##    而伤害其实只碰到 2.4% 的块（mark_dirty_range 标的）。
+##    有了这个小图就能 blit 进持久 Image，只上传脏的那一块的像素。
+func _build_region_image(shapes: Array, aabb: Rect2i, region: Rect2i) -> Image:
+	var w: int = region.size.x
+	var h: int = region.size.y
+	var data := PackedByteArray()
+	data.resize(w * h * 4)
+	var ox: int = aabb.position.x
+	var oy: int = aabb.position.y
+	var rx: int = region.position.x
+	var ry: int = region.position.y
+	for s: PixelShape in shapes:
+		for k: int in s.chunks:
+			var c: PixelChunk = s.chunks[k]
+			var bx := (PixelShape.key_x(k) << 3) - ox
+			var by := (PixelShape.key_y(k) << 3) - oy
+			var bits := c.occ
+			while bits != 0:
+				var i := Bits.first_bit_index(bits)
+				bits &= bits - 1
+				var gx := bx + (i & 7)
+				var gy := by + (i >> 3)
+				var lx := gx - rx
+				var ly := gy - ry
+				if lx < 0 or lx >= w or ly < 0 or ly >= h:
+					continue
+				var mi: int = c.mat[i]
+				if mi >= palette.size():
+					mi = palette.size() - 1
+				var col: Color = palette[mi]
+				if shading:
+					col = PixelShading.shade(s, gx + ox, gy + oy, col)
+				var o := (ly * w + lx) << 2
+				data.encode_u32(o,
+					(int(col.r * 255.0)) | (int(col.g * 255.0) << 8)
+					| (int(col.b * 255.0) << 16) | (255 << 24))
+	return Image.create_from_data(w, h, false, Image.FORMAT_RGBA8, data)
+
+
+## 全量重建之后把脏集合清掉 —— 那些块已经画过了。
+func _clear_all_dirty(body) -> void:
+	for s: PixelShape in body.shapes:
+		if s.has_dirty():
+			s.clear_dirty()
+
+
+## 取走各形状的脏块，合并成一个**相对 aabb 的像素矩形**，并清空脏集合。
+##
+## 返回 Rect2i() 表示"**没有块级信息**"（例如走 touch() 的原生路径）——
+## 调用方此时只能全量重建。这是有意的保守：宁可多画，不能少画。
+func _take_dirty_rect(body, aabb: Rect2i) -> Rect2i:
+	var lo_x := 1 << 30
+	var lo_y := 1 << 30
+	var hi_x := -(1 << 30)
+	var hi_y := -(1 << 30)
+	var any := false
+	for s: PixelShape in body.shapes:
+		if not s.has_dirty():
+			continue
+		any = true
+		for k: int in s.dirty_chunks():
+			var bx := (PixelShape.key_x(k) << 3) - aabb.position.x
+			var by := (PixelShape.key_y(k) << 3) - aabb.position.y
+			lo_x = mini(lo_x, bx)
+			lo_y = mini(lo_y, by)
+			hi_x = maxi(hi_x, bx + 8)
+			hi_y = maxi(hi_y, by + 8)
+		s.clear_dirty()
+	if not any or hi_x <= lo_x or hi_y <= lo_y:
+		return Rect2i()
+	# 夹进 aabb（脏块可能落在外面，比如形状被裁过）
+	lo_x = maxi(lo_x, 0)
+	lo_y = maxi(lo_y, 0)
+	hi_x = mini(hi_x, aabb.size.x)
+	hi_y = mini(hi_y, aabb.size.y)
+	if hi_x <= lo_x or hi_y <= lo_y:
+		return Rect2i()
+	return Rect2i(lo_x, lo_y, hi_x - lo_x, hi_y - lo_y)
+
+
 func _build_texture_impl(shapes: Array, aabb: Rect2i, cache_key: int):
 	var w: int = aabb.size.x
 	var h: int = aabb.size.y
@@ -292,6 +405,7 @@ func _build_texture_impl(shapes: Array, aabb: Rect2i, cache_key: int):
 					(int(col.r * 255.0)) | (int(col.g * 255.0) << 8)
 					| (int(col.b * 255.0) << 16) | (255 << 24))
 	var img := Image.create_from_data(w, h, false, Image.FORMAT_RGBA8, data)
+	_images[cache_key] = img
 	var tex: ImageTexture = _textures.get(cache_key)
 	if tex == null:
 		tex = ImageTexture.create_from_image(img)
