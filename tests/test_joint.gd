@@ -183,12 +183,11 @@ func _overlap_jump(contacts: bool) -> Array:
 
 ## 拖**焊接组件**：力控 + 正确的支点/惯量。
 ##
-## ⚠️⚠️ 这条测试**曾经断言"组件不转"** —— 那是"按质心分配冲量、力矩为 0"的错误实现。
-##    甲方明确指出「转动的支点/惯量不太对」：抓一个点，物体本来就该**绕那个点**转。
-##    现在断言三件事：
-##      1. 焊接不被拉变形（中心距恒定）；
-##      2. 抓点跟得上（力控允许滞后，但必须有界 —— 不能"抓丢了"）；
-##      3. **重力力矩生效**：抓点偏在一侧时，组件必须转下去（钟摆）。
+## ⚠️⚠️ 这条测试的断言换过三次，每次对应一个错实现：
+##      1. "组件不转" —— 那是按质心分配冲量（力矩 0）的版本，甲方说"不受重力的力矩"；
+##      2. "必须转下去（钟摆）" —— 那是允许抓取驱动旋转的版本，代价是抓取会泵能量，
+##         摆动停不下来（甲方："焊接体的摆动似乎无法停下来"）；
+##      3. 现在：**焊接不被拉变形 + 抓点跟得上 + 摆动停得住**（力矩只许刹车）。
 func _grab_welded(grab_b: bool, offset: Vector2, steps: int) -> Array:
 	var world := _make_world()
 	var a := PBody.new()
@@ -210,7 +209,9 @@ func _grab_welded(grab_b: bool, offset: Vector2, steps: int) -> Array:
 	var ang := 0.0
 	var pa: Vector2 = a.position
 	var pb: Vector2 = b.position
-	var drag := offset == Vector2.ZERO      # offset=0 时才是"拖动"，否则是"挂着看它垂"
+	var drag := offset == Vector2.ZERO      # offset=0 时才是"拖动"，否则是"挂着看它停不停"
+	var wsum := 0.0
+	var wn := 0
 	for i in steps:
 		if drag:
 			world.set_grab_target(start + Vector2(2.0 * i, 0))     # 120 px/s
@@ -223,9 +224,12 @@ func _grab_welded(grab_b: bool, offset: Vector2, steps: int) -> Array:
 		var g0 = world.grabs[0]
 		max_err = maxf(max_err, g0.target.distance_to(g0.anchor_world()))
 		ang = rad_to_deg(absf(angle_difference(a.position.angle_to_point(b.position), ang0)))
+		if i >= steps - 120:
+			wsum += absf(a.angular_velocity)
+			wn += 1
 		pa = a.position
 		pb = b.position
-	return [ja, jb, max_d - min_d, max_err, ang]
+	return [ja, jb, max_d - min_d, max_err, ang, wsum / maxf(1.0, float(wn))]
 func _test_grab_welded() -> void:
 	print("[拖动焊接组件：力控 / 支点 / 重力力矩]")
 	for grab_b in [false, true]:
@@ -234,18 +238,19 @@ func _test_grab_welded() -> void:
 		_check("%s：焊接处没被拉开" % who, r[2] < 0.01, "中心距波动 %.4f" % r[2])
 		# 力控允许滞后（这正是"重物要滞后"的手感），但不能抓丢。
 		_check("%s：抓点跟得上（滞后有界）" % who, r[3] < 60.0, "最大滞后 %.1f px" % r[3])
-	# 钟摆：抓点在组件左上方 40px -> 组件质心必须转下去（重力力矩生效）。
-	var p: Array = _grab_welded(false, Vector2(-40, -20), 480)
-	_check("重力力矩生效（挂起来会垂下去）", p[4] > 20.0, "转角 %.1f 度" % p[4])
+	# 抓偏 40px 挂着：**摆动必须停得住**（抓取的力矩只许刹车，不许驱动旋转）。
+	# ⚠️ 这条断言换过两次：曾经断言"组件不转"（错实现），后来断言"必须转下去"
+	#    （那是允许抓取驱动旋转的版本）—— 而允许驱动旋转 = 抓取会**泵能量**，
+	#    实测摆幅恒在 140~180 度停不下来（甲方："焊接体的摆动似乎无法停下来"）。
+	var p: Array = _grab_welded(false, Vector2(-40, -20), 600)
+	_check("挂着时摆动会停下来", p[5] < 0.5, "最后 2 秒的平均角速度 %.3f rad/s" % p[5])
 
 
 ## 抓取的**角阻尼必须真的作用到物理**。
 ##
-## ⚠️ 桥接函数 `rb_body_add_force(id, fx, fy, torque)` 曾经**把 torque 参数丢掉**
-## （函数体里只有 add_force）—— 整个项目的力矩静默失效：抓取的角阻尼、`accum_torque`、
-## 任何靠力矩转起来的玩法全都不动。表现是"摆动怎么调都不衰减"
-## （实测摆幅 12 秒恒在 150~180 度，阻尼 0 -> 20 毫无变化）。
-## 这条断言把它钉死：转起来的焊接组件被抓着，角速度必须明显衰减。
+## ⚠️ 角阻尼能不能压住，取决于抓取**允不允许驱动旋转**（见 grab.gd 的 spin_limit）：
+## 老行为允许驱动 -> 抓取会泵能量，实测摆幅恒在 140~180 度，角速度不降反升（涨到 15+）；
+## 现在默认只许刹车 -> 角速度直接停死。这条断言把它钉住。
 func _test_grab_angular_damping() -> void:
 	print("[抓取角阻尼：力矩真的生效]")
 	var world := _make_world()

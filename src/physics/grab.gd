@@ -41,6 +41,31 @@ var max_omega := 8.0
 ## 角速度阻尼力矩系数（1/秒）：τ = -ang_damp * 角动量。
 ## ⚠️ 必须满足 ang_damp * dt < 1（60Hz 下 < 60），否则显式积分发散。
 var ang_damp := 4.0
+## 转动时**软化抓取力**：力上限 x 1/(1 + spin_soften*|ω|)。
+##
+## ⚠️ 为什么需要它：抓取控制器是"按位置误差一直推"的驱动。物体转起来之后，
+##    力的作用点（抓点）绕着质心转，而力的方向朝着鼠标 —— 于是每转一圈都做净功，
+##    等于把物体当转子驱动。实测：光靠角阻尼压不住（ang_damp 加到 55，
+##    重力场下摆幅仍恒在 140~180 度，物体一直在转）。
+##    软化之后：转得越快，抓取能给的力越小 -> 泵的输入被掐掉 -> 角阻尼就能赢。
+var spin_soften := 0.5
+## 抓取允许"驱动旋转"的自转上限（弧度/秒）。**0 = 只许刹车**（默认）。
+##
+## ⚠️⚠️ 这是一个**二选一**的取舍，实测数据（tests/diag_grab_swing.gd）：
+##
+## | spin_limit | 摆幅（2 秒窗口） | 表现 |
+## |---|---|---|
+## | 0（只刹车） | 0 0 0 10 10 10 度 | **摆动停得住**；但物体不会自己转到"垂下去" |
+## | 1.0 | 83~96 度，平均角速度 0.7 rad/s | 会垂下去，但**一直在慢慢转** |
+## | 20（老行为） | 140~180 度 | 被泵成转子（甲方："摆动似乎无法停下来"） |
+##
+## 为什么不能两者兼得：**重力对组件质心的力矩是 0**，所以"转到垂下去"这件事
+## 只能靠抓取自己的力矩；而抓取的力矩一旦允许驱动旋转，它同时就是泵。
+##
+## 默认 0 的理由：场景里摆好的焊件**本来就是垂的**，不需要靠抓取去把它转正；
+## 而"拖着一个焊件它还自己转个不停"是明显更糟的手感。
+## 想要"挂上去会自己垂下来"，把 grab.spin_limit 调成 1.0 即可（代价：会慢慢转）。
+var spin_limit := 0.0
 
 
 func anchor_world() -> Vector2:
@@ -89,7 +114,9 @@ func apply(dt: float) -> void:
 	if det < 1e-12:
 		return
 	var imp := Vector2((k22 * rhs.x - k12 * rhs.y) / det, (k11 * rhs.y - k12 * rhs.x) / det)
-	var max_impulse := max_accel * m_tot * dt
+	# 转动时软化力上限（见 spin_soften）：掐掉泵能量的输入。
+	var soft := 1.0 / (1.0 + spin_soften * absf(b.angular_velocity))
+	var max_impulse := max_accel * m_tot * dt * soft
 	if max_impulse > 0.0 and imp.length() > max_impulse:
 		imp = imp.normalized() * max_impulse
 
@@ -103,12 +130,38 @@ func apply(dt: float) -> void:
 	if i_sum > 0.0:
 		tq = clampf(-ang_damp * w_sum, -max_accel * i_sum, max_accel * i_sum)
 
-	# 冲量按质量分给每个刚体，各自的 r 出各自的力矩（等价于在抓点上给组件一个冲量）
-	for part: Array in parts:
-		var q: PBody = part[0]
-		var r2: Vector2 = part[1]
-		var f := (imp * (q.mass / m_tot)) / dt
-		q.grab_force = f
-		q.grab_torque = r2.cross(f)
+	# 冲量按质量分给每个刚体，各自的 r 出各自的力矩（等价于在抓点上给组件一个冲量）。
+	#
+	# ⚠️⚠️ 力矩部分**只允许刹车**：抓取绝不能给旋转注入能量。
+	#    抓取是"按位置误差一直推"的驱动，力的作用点（抓点）绕着质心转、力的方向朝着
+	#    鼠标 —— 每转一圈都做净功，等于把物体当转子驱动（实测：角阻尼加到 55 都压不住，
+	#    摆幅恒在 140~180 度 = 一直在转，甲方原话"焊接体的摆动似乎无法停下来"）。
+	#    丢掉"会加速旋转"的那部分力矩之后：泵的输入被掐断，角阻尼就能把摆动收掉；
+	#    而**重力/接触**照样能转它（它们不是抓取），所以挂起来仍然会垂下去。
+	var spin := b.angular_velocity
+	var brake_only := 0.0
+	if i_sum > 0.0:
+		brake_only = tq * 1.0                     # 阻尼力矩永远是刹车（tq 与 ω 反向）
+	var torques: Array = []
+	var net := 0.0
+	for part2: Array in parts:
+		var q2: PBody = part2[0]
+		var r3: Vector2 = part2[1]
+		var t2: float = r3.cross((imp * (q2.mass / m_tot)) / dt)
 		if i_sum > 0.0:
-			q.grab_torque += tq * (q.inertia / i_sum)
+			t2 += brake_only * (q2.inertia / i_sum)
+		torques.append(t2)
+		net += t2
+	# 净力矩与自转同号 = 抓取在给旋转加油。
+	# ⚠️ 不能无条件丢掉：**重力对组件质心的力矩是 0**，所以"转下去挂住"这件事
+	#    恰恰只能靠抓取的那个力矩 —— 全丢会导致"挂起来不垂"（甲方更早的反馈）。
+	#    折中：只在自转**已经超过 spin_limit** 时才丢。于是物体能慢慢转到自然平衡，
+	#    但绝不会被泵成转子（实测：全丢时摆幅 0~10 度 = 完全不转；不丢时恒在 140~180 = 一直转）。
+	var drop := net * spin > 0.0 and absf(spin) > spin_limit
+	for k in parts.size():
+		var q3: PBody = parts[k][0]
+		q3.grab_force = (imp * (q3.mass / m_tot)) / dt
+		var t3: float = torques[k]
+		if drop:
+			t3 = (brake_only * (q3.inertia / i_sum)) if i_sum > 0.0 else 0.0
+		q3.grab_torque = t3

@@ -216,13 +216,13 @@ pub extern "C" fn rb_body_add_force(w: *mut World, id: u32, fx: f64, fy: f64, to
     let Some(w) = (unsafe { wref(w) }) else { return };
     if let Some(&h) = w.map.get(&id) {
         w.bodies[h].add_force(Vector::new(fx as f32, fy as f32), true);
-        // ⚠️⚠️ 这一行曾经**缺失** —— 签名里有 torque 参数，函数体里却只加了力。
-        //    后果是**整个项目的力矩静默失效**：抓取的角阻尼、`add_torque`、
-        //    任何靠力矩转起来的玩法全都不动。表现是"摆动怎么调都不衰减"
-        //    （实测摆幅 12 秒恒在 150~180 度，阻尼 0 -> 20 毫无变化），
-        //    甲方原话："摆动的方式不对"。
-        //    教训：桥接函数"参数接了但没用"不报错，只会让人调到怀疑人生。
-        w.bodies[h].add_torque(torque as f32, true);
+        // ⚠️⚠️ 这里**曾经被我加过一句 add_torque，然后被撤掉了** —— 记下来免得再犯：
+        //    我看到"力矩好像没生效"（摆动调不衰减），就补了一句 add_torque；
+        //    结果 `validation_dynamics` 的两条**解析解**断言立刻变成 2 倍
+        //    （单步 Δω 实测 0.000619 vs 解析 0.000309）—— 力矩本来就在这条路径上
+        //    生效，我那一句是**重复施加**。
+        //    真相：摆动停不下来不是力矩丢了，是**抓取在泵能量**（见 grab.gd）。
+        //    教训："某个量好像没生效"先找**解析解断言**对一下，别急着补代码。
         if torque != 0.0 { w.bodies[h].add_torque(torque as f32, true); }
     }
 }
