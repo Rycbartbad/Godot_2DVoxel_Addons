@@ -43,6 +43,28 @@ cargo run --release --bin smoke  # 冒烟：拼接地面滑行 + 角接触 + 睡
 而 GDScript 侧的胶水（同步位姿、接触事件、破坏重建碰撞体）仍然存在，
 换过去之后这部分不会消失。
 
+## ⚠️ 两个实测踩到的坑
+
+1. **`rb_body_set_rects` 是替换语义** —— 它先清空该刚体的**全部**碰撞体，再加新的。
+   一个 body 有 N 个矩形时必须**一次调用发完**；分 N 次调用只会留下最后一段。
+   （第一版就这么错的：60 段地面变成 1 段，方块直接掉出世界 3822 px。）
+2. `rb_body_get_state` 的 `out` 需要 **6 个 f64**：`x, y, rot, vx, vy, angvel`；
+   `rb_contact_get` 需要 **7 个 f64**：`id_a, id_b, nx, ny, px, py, dist`。
+
+## Godot 侧怎么调
+
+`fastphys.dll` 里注册了一个 `RapierPhys` 类（**一个方法** `cmd`）：
+
+```gdscript
+var inst = ClassDB.instantiate("RapierPhys")
+var out: PackedByteArray = inst.cmd(input, out_template)   # 命令流 in / 结果流 out
+```
+
+- `fastphys.dll` 用 **LoadLibrary 动态加载**本 DLL（运行时取函数指针）——
+  不做链接期耦合，避开 MinGW g++ ↔ MSVC Rust 的导入库问题。
+- 命令流格式见 `gdext/fastphys.cpp` 里 `RapierPhys` 那一节的注释；
+  `tests/diag_rapier.gd` 是可直接运行的样例（含编码器）。
+
 ## 下一步
 
 1. **GDExtension 包装**：`fastphys.cpp` 用 `LoadLibrary` 动态加载本 DLL

@@ -15,6 +15,16 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
+#include <string>
+#include <vector>
+// windows.h 只用来做运行时动态加载；宏要收窄，否则 min/max 会污染其它头
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 
 using namespace phys;
 
@@ -491,6 +501,299 @@ static void register_solve() {
 }
 
 
+// ================= RapierPhys：把物理交给 Rapier =================
+//
+// 只做**薄包装**，两个理由：
+//   · 桥接层 rapier_bridge.dll 是 MSVC Rust 编的，本 DLL 是 MinGW g++ 编的 ——
+//     链接期混用导入库容易出问题，所以用 LoadLibrary **运行时**取函数指针。
+//   · GDScript 侧只有**一个**方法 cmd(in, out)：in 是命令流，out 是结果流。
+//     手写 GDExtension 的注册样板很重，注册面越小越好；而且这层胶水迟早会被
+//     真正的 PWorld 集成取代（那时命令流会变成批量位姿/矩形同步）。
+//
+// 命令流（小端；全部 memcpy 读写，不要求对齐）：
+//   in  = [i32 out_cap][命令...]
+//   out = [i32 written][结果...]        written 是结果段的字节数
+//
+//   0  reset()                                    -> i32 ok(0 成功)
+//   1  set_gravity(f64 x, f64 y)
+//   2  step(f64 dt)
+//   3  body_new(i32 is_static, f64 x, y, rot)     -> i32 id
+//   4  body_remove(u32 id)
+//   5  body_set_rects(u32 id, i32 count, f32[count*4], f64 friction)
+//   6  body_set_pose(u32 id, f64 x, y, rot)
+//   7  body_set_vel(u32 id, f64 vx, vy, w)
+//   8  body_get_state(u32 id)                     -> f64 x, y, rot, vx, vy, w
+//   9  body_is_sleeping(u32 id)                   -> i32
+//  10  body_wake(u32 id)
+//  11  contact_count()                            -> i32
+//  12  contact_get(i32 idx)                       -> f64 id_a, id_b, nx, ny, px, py, dist
+//  13  body_count()                               -> i32
+
+typedef void *RPWorld;
+
+struct RapierApi {
+	HMODULE dll = nullptr;
+	RPWorld (*world_new)() = nullptr;
+	void (*world_free)(RPWorld) = nullptr;
+	void (*world_set_gravity)(RPWorld, double, double) = nullptr;
+	void (*world_step)(RPWorld, double) = nullptr;
+	uint32_t (*body_new)(RPWorld, int32_t, double, double, double) = nullptr;
+	void (*body_remove)(RPWorld, uint32_t) = nullptr;
+	void (*body_set_rects)(RPWorld, uint32_t, const float *, int32_t, double) = nullptr;
+	void (*body_set_pose)(RPWorld, uint32_t, double, double, double) = nullptr;
+	void (*body_set_vel)(RPWorld, uint32_t, double, double, double) = nullptr;
+	int32_t (*body_get_state)(RPWorld, uint32_t, double *) = nullptr;
+	int32_t (*body_is_sleeping)(RPWorld, uint32_t) = nullptr;
+	void (*body_wake)(RPWorld, uint32_t) = nullptr;
+	int32_t (*contact_count)(RPWorld) = nullptr;
+	int32_t (*contact_get)(RPWorld, int32_t, double *) = nullptr;
+	int32_t (*body_count)(RPWorld) = nullptr;
+	bool tried = false;
+	bool ok = false;
+};
+
+static RapierApi g_rap;
+static SN g_sn_rp_class, g_sn_rp_cmd, g_sn_rp_a0, g_sn_rp_a1, g_sn_rp_ret;
+
+// 只用来取"本 DLL 自己的模块句柄"——静态函数的地址一定落在本模块里
+static void rapier_anchor() {}
+
+static bool load_rapier() {
+	if (g_rap.tried) return g_rap.ok;
+	g_rap.tried = true;
+	// 先找本 DLL 所在目录，再退回默认搜索路径（exe 目录 / cwd / PATH）
+	char self[MAX_PATH] = { 0 };
+	HMODULE mod = nullptr;
+	if (::GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			(LPCSTR)&rapier_anchor, &mod) && mod != nullptr) {
+		::GetModuleFileNameA(mod, self, MAX_PATH);
+	}
+	std::string dir;
+	for (int i = (int)std::strlen(self) - 1; i >= 0; --i) {
+		if (self[i] == '\\' || self[i] == '/') { dir.assign(self, (size_t)i + 1); break; }
+	}
+	std::string local = dir + "rapier_bridge.dll";
+	g_rap.dll = ::LoadLibraryA(local.c_str());
+	if (g_rap.dll == nullptr) g_rap.dll = ::LoadLibraryA("rapier_bridge.dll");
+	if (g_rap.dll == nullptr) {
+		printf("[RapierPhys] 加载 rapier_bridge.dll 失败（GetLastError=%lu）\n", (unsigned long)::GetLastError());
+		return false;
+	}
+#define RP_GET(field, name) \
+	g_rap.field = (decltype(g_rap.field))::GetProcAddress(g_rap.dll, name); \
+	if (g_rap.field == nullptr) { printf("[RapierPhys] 缺少符号 %s\n", name); return false; }
+	RP_GET(world_new, "rb_world_new")
+	RP_GET(world_free, "rb_world_free")
+	RP_GET(world_set_gravity, "rb_world_set_gravity")
+	RP_GET(world_step, "rb_world_step")
+	RP_GET(body_new, "rb_body_new")
+	RP_GET(body_remove, "rb_body_remove")
+	RP_GET(body_set_rects, "rb_body_set_rects")
+	RP_GET(body_set_pose, "rb_body_set_pose")
+	RP_GET(body_set_vel, "rb_body_set_vel")
+	RP_GET(body_get_state, "rb_body_get_state")
+	RP_GET(body_is_sleeping, "rb_body_is_sleeping")
+	RP_GET(body_wake, "rb_body_wake")
+	RP_GET(contact_count, "rb_contact_count")
+	RP_GET(contact_get, "rb_contact_get")
+	RP_GET(body_count, "rb_body_count")
+#undef RP_GET
+	g_rap.ok = true;
+	printf("[RapierPhys] rapier_bridge.dll 已加载: %s\n", local.c_str());
+	return true;
+}
+
+struct RapierInstance {
+	RPWorld world = nullptr;
+	RapierInstance() { if (load_rapier()) world = g_rap.world_new(); }
+	~RapierInstance() { if (world != nullptr && g_rap.world_free != nullptr) g_rap.world_free(world); }
+};
+
+// ---- 命令流的读写（不要求对齐，全部 memcpy）----
+struct CmdRd {
+	const uint8_t *p = nullptr;
+	size_t n = 0;
+	size_t i = 0;
+	bool ok = true;
+	uint8_t u8() { if (i + 1 > n) { ok = false; return 0; } return p[i++]; }
+	int32_t i32() { int32_t v = 0; if (i + 4 > n) { ok = false; return 0; } std::memcpy(&v, p + i, 4); i += 4; return v; }
+	uint32_t u32() { return (uint32_t)i32(); }
+	double f64() { double v = 0; if (i + 8 > n) { ok = false; return 0; } std::memcpy(&v, p + i, 8); i += 8; return v; }
+	bool f32s(size_t count, std::vector<float> &dst) {
+		dst.resize(count);
+		if (i + count * 4 > n) { ok = false; return false; }
+		if (count > 0) std::memcpy(dst.data(), p + i, count * 4);
+		i += count * 4;
+		return true;
+	}
+};
+
+struct CmdWr {
+	uint8_t *p = nullptr;
+	size_t cap = 0;
+	size_t i = 0;
+	void i32(int32_t v) { if (i + 4 <= cap) std::memcpy(p + i, &v, 4); i += 4; }
+	void f64(double v) { if (i + 8 <= cap) std::memcpy(p + i, &v, 8); i += 8; }
+};
+
+static void run_rapier_cmd(RapierInstance *inst, const uint8_t *in, size_t in_n,
+		uint8_t *out, size_t out_cap, size_t &written) {
+	CmdWr w; w.p = out; w.cap = out_cap; w.i = 0;
+	if (inst == nullptr || inst->world == nullptr) { w.i32(-1); written = w.i; return; }
+	RPWorld W = inst->world;
+	CmdRd r; r.p = in; r.n = in_n; r.i = 0;
+	static std::vector<float> rect_scratch;
+	double buf[8];
+	while (r.ok && r.i < r.n) {
+		uint8_t op = r.u8();
+		if (!r.ok) break;
+		switch (op) {
+			case 0: {
+				g_rap.world_free(W);
+				inst->world = g_rap.world_new();
+				W = inst->world;
+				w.i32(W != nullptr ? 0 : -1);
+				break;
+			}
+			case 1: { double x = r.f64(), y = r.f64(); g_rap.world_set_gravity(W, x, y); break; }
+			case 2: { double dt = r.f64(); g_rap.world_step(W, dt); break; }
+			case 3: {
+				int32_t st = r.i32(); double x = r.f64(), y = r.f64(), rot = r.f64();
+				w.i32((int32_t)g_rap.body_new(W, st, x, y, rot));
+				break;
+			}
+			case 4: { uint32_t id = r.u32(); g_rap.body_remove(W, id); break; }
+			case 5: {
+				uint32_t id = r.u32(); int32_t cnt = r.i32();
+				if (cnt < 0) cnt = 0;
+				bool got = r.f32s((size_t)cnt * 4, rect_scratch);
+				double fr = r.f64();
+				if (got) g_rap.body_set_rects(W, id, rect_scratch.data(), cnt, fr);
+				break;
+			}
+			case 6: { uint32_t id = r.u32(); double x = r.f64(), y = r.f64(), rot = r.f64();
+				g_rap.body_set_pose(W, id, x, y, rot); break; }
+			case 7: { uint32_t id = r.u32(); double vx = r.f64(), vy = r.f64(), av = r.f64();
+				g_rap.body_set_vel(W, id, vx, vy, av); break; }
+			case 8: {
+				uint32_t id = r.u32();
+				for (int k = 0; k < 6; ++k) buf[k] = 0.0;
+				int32_t rc = g_rap.body_get_state(W, id, buf);
+				if (rc == 0) for (int k = 0; k < 6; ++k) buf[k] = 0.0;
+				for (int k = 0; k < 6; ++k) w.f64(buf[k]);
+				break;
+			}
+			case 9: { uint32_t id = r.u32(); w.i32(g_rap.body_is_sleeping(W, id)); break; }
+			case 10: { uint32_t id = r.u32(); g_rap.body_wake(W, id); break; }
+			case 11: { w.i32(g_rap.contact_count(W)); break; }
+			case 12: {
+				int32_t idx = r.i32();
+				for (int k = 0; k < 7; ++k) buf[k] = 0.0;
+				g_rap.contact_get(W, idx, buf);
+				for (int k = 0; k < 7; ++k) w.f64(buf[k]);
+				break;
+			}
+			case 13: { w.i32(g_rap.body_count(W)); break; }
+			default: break;   // 未知命令：跳过（长度未知，只能就此收尾）
+		}
+	}
+	written = w.i;
+}
+
+static GDExtensionObjectPtr create_rapier_instance(void *p_userdata, GDExtensionBool p_notify_postinitialize) {
+	GDExtensionObjectPtr obj = g_construct_object((GDExtensionConstStringNamePtr)g_sn_parent.buf);
+	if (obj == nullptr) return nullptr;
+	RapierInstance *d = new RapierInstance();
+	g_object_set_instance(obj, (GDExtensionConstStringNamePtr)g_sn_rp_class.buf, (GDExtensionClassInstancePtr)d);
+	return obj;
+}
+
+static void free_rapier_instance(void *p_userdata, GDExtensionClassInstancePtr p_instance) {
+	if (p_instance != nullptr) delete (RapierInstance *)p_instance;
+}
+
+static void call_rapier_cmd(void *method_userdata, GDExtensionClassInstancePtr p_instance,
+		const GDExtensionConstVariantPtr *p_args, GDExtensionInt p_argument_count,
+		GDExtensionVariantPtr r_return, GDExtensionCallError *r_error) {
+	if (r_error) r_error->error = GDEXTENSION_CALL_OK;
+	if (p_argument_count < 2) {
+		if (r_error) r_error->error = GDEXTENSION_CALL_ERROR_TOO_FEW_ARGUMENTS;
+		return;
+	}
+	TypeStorage in_s, tmpl_s, out_s;
+	g_pba_from_variant(in_s.buf, (GDExtensionVariantPtr)p_args[0]);
+	g_pba_from_variant(tmpl_s.buf, (GDExtensionVariantPtr)p_args[1]);
+	const uint8_t *in = g_pba_index_const(in_s.buf, 0);
+	// 输出走"按模板拷贝"这条已验证过的路（C++ 侧 resize PackedByteArray 会段错误）
+	GDExtensionConstTypePtr ctor_args[1] = { tmpl_s.buf };
+	g_pba_copy_ctor(out_s.buf, ctor_args);
+	uint8_t *out = g_pba_index(out_s.buf, 0);
+	size_t written = 0;
+	if (in != nullptr && out != nullptr) {
+		// 头部 8 字节：out_cap = 结果段容量，cmd_len = 命令段长度。
+		// ⚠️ 拿不到 PackedByteArray 的 size（见 broadphase 那处的说明），
+		//    所以长度必须由调用方写在头里，不能靠"读到越界为止"。
+		int32_t out_cap = 0, cmd_len = 0;
+		std::memcpy(&out_cap, in, 4);
+		std::memcpy(&cmd_len, in + 4, 4);
+		if (out_cap < 0) out_cap = 0;
+		if (cmd_len < 0) cmd_len = 0;
+		run_rapier_cmd((RapierInstance *)p_instance, in + 8, (size_t)cmd_len, out + 4, (size_t)out_cap, written);
+		int32_t w32 = (int32_t)written;
+		std::memcpy(out, &w32, 4);
+	}
+	g_pba_to_variant(r_return, out_s.buf);
+	g_pba_destructor(out_s.buf);
+	g_pba_destructor(tmpl_s.buf);
+	g_pba_destructor(in_s.buf);
+}
+
+static void register_rapier_phys() {
+	GDExtensionClassCreationInfo6 info = {};
+	info.is_virtual = false;
+	info.is_abstract = false;
+	info.is_exposed = true;
+	info.is_runtime = false;
+	info.create_instance_func = create_rapier_instance;
+	info.free_instance_func = free_rapier_instance;
+	g_register_class6(g_library, (GDExtensionConstStringNamePtr)g_sn_rp_class.buf,
+		(GDExtensionConstStringNamePtr)g_sn_parent.buf, &info);
+	printf("[RapierPhys] 类已注册\n");
+
+	GDExtensionClassMethodInfo mi = {};
+	mi.name = (GDExtensionStringNamePtr)g_sn_rp_cmd.buf;
+	mi.call_func = call_rapier_cmd;
+	mi.ptrcall_func = nullptr;
+	mi.method_flags = GDEXTENSION_METHOD_FLAG_NORMAL;
+	mi.has_return_value = true;
+	static GDExtensionPropertyInfo ret_info = {};
+	ret_info.type = GDEXTENSION_VARIANT_TYPE_PACKED_BYTE_ARRAY;
+	ret_info.name = (GDExtensionStringNamePtr)g_sn_rp_ret.buf;
+	ret_info.class_name = (GDExtensionStringNamePtr)g_sn_empty_class.buf;
+	ret_info.hint_string = (GDExtensionStringPtr)g_str_empty_hint;
+	mi.return_value_info = &ret_info;
+	mi.return_value_metadata = GDEXTENSION_METHOD_ARGUMENT_METADATA_NONE;
+	static GDExtensionPropertyInfo args[2] = {};
+	args[0].type = GDEXTENSION_VARIANT_TYPE_PACKED_BYTE_ARRAY;
+	args[0].name = (GDExtensionStringNamePtr)g_sn_rp_a0.buf;
+	args[1].type = GDEXTENSION_VARIANT_TYPE_PACKED_BYTE_ARRAY;
+	args[1].name = (GDExtensionStringNamePtr)g_sn_rp_a1.buf;
+	for (int i = 0; i < 2; ++i) {
+		args[i].class_name = (GDExtensionStringNamePtr)g_sn_empty_class.buf;
+		args[i].hint_string = (GDExtensionStringPtr)g_str_empty_hint;
+	}
+	static GDExtensionClassMethodArgumentMetadata meta[2] = {
+		GDEXTENSION_METHOD_ARGUMENT_METADATA_NONE, GDEXTENSION_METHOD_ARGUMENT_METADATA_NONE };
+	mi.argument_count = 2;
+	mi.arguments_info = args;
+	mi.arguments_metadata = meta;
+	mi.default_argument_count = 0;
+	mi.default_arguments = nullptr;
+	g_register_method(g_library, (GDExtensionConstStringNamePtr)g_sn_rp_class.buf, &mi);
+	printf("[RapierPhys] 已注册方法 cmd\n");
+}
+
+
 static void initialize(void *p_userdata, GDExtensionInitializationLevel p_level) {
 	if (p_level != GDEXTENSION_INITIALIZATION_SCENE) return;
 	GDExtensionClassCreationInfo6 info = {};
@@ -506,6 +809,7 @@ static void initialize(void *p_userdata, GDExtensionInitializationLevel p_level)
 	register_collide_batch();
 	register_broadphase();
 	register_solve();
+	register_rapier_phys();
 }
 
 static void deinitialize(void *p_userdata, GDExtensionInitializationLevel p_level) {
@@ -560,6 +864,11 @@ extern "C" __declspec(dllexport) GDExtensionBool gdextension_init(
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_cw.buf, "clear_warm");
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_probe.buf, "warm_probe");
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_probe0.buf, "shape");
+	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_rp_class.buf, "RapierPhys");
+	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_rp_cmd.buf, "cmd");
+	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_rp_a0.buf, "input");
+	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_rp_a1.buf, "out_template");
+	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_rp_ret.buf, "result");
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_empty_class.buf, "");
 	g_str_new((GDExtensionUninitializedStringPtr)g_str_empty_hint, "");
 	// PackedByteArray 的构造索引 1 = 拷贝构造
