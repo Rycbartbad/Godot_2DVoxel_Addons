@@ -387,13 +387,26 @@ func _sync_transforms_deferred() -> void:
 ##    而且会丢掉运行时状态。关节只改了自己的锚点，摘掉旧的、按节点当前位置重建即可。
 ## 防抖同 on_child_transformed：拖动一次会连发很多 TRANSFORM_CHANGED。
 func on_joint_transformed(node) -> void:
-	if not Engine.is_editor_hint() or _joint_rebake_queued.has(node):
+	if not Engine.is_editor_hint():
+		return
+	# ⚠️⚠️ 这句判空不是防御性编程，是**实测过的坑**：
+	#    编辑器热重载脚本（@tool 改完保存）时，**已经存在的实例**是旧类，
+	#    新加的成员读出来是 **Nil** —— 报错是
+	#      Invalid call. Nonexistent function 'has' in base 'Nil'.
+	#    行号指向这里，但真因是"实例没跟着脚本一起重载"。
+	#    （用户重启编辑器/重开场景后不会再出现，但没必要让人踩一次。）
+	if _joint_rebake_queued == null:
+		_joint_rebake_queued = {}
+	if _joint_rebake_queued.has(node):
 		return
 	_joint_rebake_queued[node] = true
 	_joint_rebake_deferred.call_deferred()
 
 
 func _joint_rebake_deferred() -> void:
+	if _joint_rebake_queued == null:
+		_joint_rebake_queued = {}
+		return
 	var nodes: Array = _joint_rebake_queued.keys()
 	_joint_rebake_queued.clear()
 	for n in nodes:
