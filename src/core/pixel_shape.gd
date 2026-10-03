@@ -268,8 +268,26 @@ func remap_material(from_id: int, to_id: int) -> int:
 			m &= m - 1
 	return n
 
+## 缓存的像素级 AABB + 它对应的 revision。
+##
+## ⚠️⚠️ **必须缓存。** 本函数要遍历**所有 chunk**（每个 8x8），
+##    768x100 的地面是 1248 个 chunk —— 实测 **4.48 ms/次**。
+##    而渲染器 sync() 的**脏检查**每次都要调它，于是"什么都没变"
+##    也要付这个钱。
+##
+##    这就是"擦除地面很卡"的真正原因：擦一笔 = 挖像素(~58 ms) +
+##    sync(地面)(~51 ms)，而后者几乎全是这个 AABB 重算。
+##    Rapier 那边（把 81 个矩形推给物理）只要 0.17 ms，完全不是瓶颈。
+##
+##    用 revision 当键：它本来就由所有改内容的入口 +1，不需要调用方记得做什么。
+var _aabb_cache := Rect2i()
+var _aabb_rev := -1
+
+
 func local_aabb() -> Rect2i:
 	## 返回像素级 AABB（左上闭、右下开区间），空形状返回 Rect2i()。
+	if _aabb_rev == revision:
+		return _aabb_cache
 	var min_x := 1 << 30
 	var min_y := 1 << 30
 	var max_x := -(1 << 30)
@@ -292,9 +310,12 @@ func local_aabb() -> Rect2i:
 			max_x = maxi(max_x, bx + hi)
 			min_y = mini(min_y, by + y)
 			max_y = maxi(max_y, by + y + 1)
+	_aabb_rev = revision
 	if max_x <= min_x:
-		return Rect2i()
-	return Rect2i(min_x, min_y, max_x - min_x, max_y - min_y)
+		_aabb_cache = Rect2i()
+	else:
+		_aabb_cache = Rect2i(min_x, min_y, max_x - min_x, max_y - min_y)
+	return _aabb_cache
 
 func blit_mask_from(src: PixelChunk, key: int, mask: int) -> void:
 	## split 用：把 src 里 mask 内的像素按 key 复制进本 Shape。
