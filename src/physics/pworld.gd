@@ -1297,6 +1297,18 @@ func _damage_world(bounds: Rect2, material_delta: int, burst_speed: float,
 func fracture(body: PBody, damage, burst_speed: float = 40.0) -> Array:
 	var removed := 0
 	var parts: Array = []
+	# 报告受影响的块范围 —— 见 PixelShape.mark_dirty_range 的说明。
+	#
+	# ⚠️ 这里是**原生路径唯一的"通知点"**：C++ 直接改块位图，不经过 set_pixel，
+	#    所以拿不到逐块的脏标记。而伤害自己知道局部包围盒，顺手标出来，
+	#    渲染器就能只重建那几块，而不是整个形状的贴图。
+	#    不标的话渲染器只能退到"整块重建"（768x100 地面 ~44 ms/笔）。
+	var dmg_bounds: Rect2 = damage.bounds()
+	var dmg_rect := Rect2i(
+		floori(dmg_bounds.position.x), floori(dmg_bounds.position.y),
+		ceili(dmg_bounds.size.x) + 1, ceili(dmg_bounds.size.y) + 1)
+	for s in body.shapes:
+		s.mark_dirty_range(dmg_rect)
 	for s in body.shapes:
 		# 优先走 GPU：一次 dispatch 同时完成破坏 + 分量标注
 		var accel: Dictionary = Destruction.apply_damage_and_split_gpu(s, damage, min_fragment_pixels)

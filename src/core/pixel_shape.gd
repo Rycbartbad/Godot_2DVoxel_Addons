@@ -74,6 +74,33 @@ func mark_dirty_key(k: int) -> void:
 		_dirty[k] = true
 
 
+## 把一个**局部像素矩形**覆盖到的所有块标脏（revision 只自增一次）。
+##
+## ⚠️ 为什么需要它：破坏 / 擦除走的是**原生路径**（C++ 里直接改块位图），
+##    不经过 set_pixel，所以拿不到"到底哪一块变了"。以前只能 touch() ——
+##    那是"整块都脏"的信号，渲染器只能把**整个形状**的贴图重画一遍
+##    （768x100 的地面实测约 44 ms/笔，这就是擦除卡顿的来源）。
+##
+##    而伤害本身**知道自己的局部包围盒**（Damage.bounds()），
+##    顺手把覆盖到的块标出来，渲染器就能只重建那几块。
+##
+## 用法见 PWorld.fracture()。
+func mark_dirty_range(rect: Rect2i) -> void:
+	if rect.size.x <= 0 or rect.size.y <= 0:
+		return
+	revision += 1
+	# >> 3 是"除以 8 并向下取整"，对负数也成立（算术右移）
+	var cx0 := rect.position.x >> 3
+	var cy0 := rect.position.y >> 3
+	var cx1 := (rect.position.x + rect.size.x - 1) >> 3
+	var cy1 := (rect.position.y + rect.size.y - 1) >> 3
+	for cy in range(cy0, cy1 + 1):
+		for cx in range(cx0, cx1 + 1):
+			var k := make_key(cx, cy)
+			if not _dirty.has(k):
+				_dirty[k] = true
+
+
 ## 有没有待处理的脏块。世界层靠它快速跳过干净的形状。
 func has_dirty() -> bool:
 	return not _dirty.is_empty()
