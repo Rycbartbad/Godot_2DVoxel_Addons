@@ -414,10 +414,24 @@ var _rp_max_linvel_pushed := 0.0
 
 ## 三个"像素尺度"参数（**归一化值**，实际值 = 它 × length_unit）。
 ##
-## ⚠️ Rapier 的默认值全按"米"调，在像素世界里会**穿模**：
-##    · prediction_distance 默认 0.02 → 0.02 px，等于**没有推测接触**。
-##      快物体一步跨过薄几何就直接穿过去了 —— 这正是 demo 的穿模来源。
-##      本引擎原本的 max_speculative_margin(1.5 px) 就是同一个机制。
+## ⚠️ **prediction_distance 必须留在 Rapier 默认的 0.02 —— 它是幽灵碰撞的开关。**
+##
+##    实测（tests/diag_ghost_collision.gd，Rapier #669 判据）：
+##      pd = 0.02  A 一整块 OK | B 同一 body 内部边 OK | C 60 个独立静态体 OK
+##      pd = 1.0   A OK        | B OK                | C **第 8 步开始打转**
+##      pd = 2.0   A OK        | B **第 295 步打转**  | C **第 8 步开始打转**
+##
+##    这解释了整件事：Rapier 修好幽灵碰撞，**主要不是因为有伪法向，
+##    而是因为它默认不用推测接触边际**。把 pd 调大 = 把本引擎原来的
+##    max_speculative_margin(1.5 px) 又装了回去 —— 坑 39 测到的那个
+##    "滑过接缝时出现水平法向的假接触" 会原样回来。
+##
+##    C（60 个独立静态体）尤其说明问题：那些侧面是**真面**，伪法向救不了，
+##    只有"不产生推测接触"才救得了。
+##
+## ⚠️ 那穿模怎么办？**靠自适应子步**（见 step/_compute_substeps），
+##    不是靠推测接触。子步把每步位移压到最薄障碍厚度以下，是几何上就成立的保证。
+##    实测：pd=0.02 时 4 px 薄墙对 200/600/1200/2000/3000 px/s 全部挡住。
 ##    · max_corrective_velocity 默认 3.0 → 3 px/s，穿透挤出慢得离谱
 ##      （卡进墙里要好几秒才挤出来）。
 ##    · allowed_linear_error 默认 0.005 → 0.005 px，紧到几乎没有容差。
@@ -439,7 +453,7 @@ var rp_soft_ccd_prediction := 0.0
 var rp_ccd_substeps := 1
 var _rp_ccd_substeps_pushed := 0
 
-var rp_prediction_distance := 2.0
+var rp_prediction_distance := 0.02
 var rp_max_corrective_velocity := 300.0
 var rp_allowed_linear_error := 0.5
 var _rp_pixel_params_pushed := false
