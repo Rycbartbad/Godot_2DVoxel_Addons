@@ -39,16 +39,20 @@ PWorld.step(dt)
 > （`_packed_manifolds`），不能各判各的 —— 曾经因为两处判断条件不一致，
 > 导致"拖动一个方块，其它方块全部掉穿地面"。
 
-## 两条求解路径
+## 只有一条求解路径：Rapier
 
 ```
-_Packed 路径（默认，需要 FastPhys 扩展）
-  宽相在 C++ 里直接产出打包流形 → 求解器直接吃它
-  **连 Manifold/Point 对象都不建** —— 那一步在 GDScript 里是主要开销
-
-对象路径（**已删除** —— 现在只有 native 一条路）
-  宽相产出 Manifold / Point 对象 → solver.prepare() → 迭代 → store_warm()
+PWorld.step()
+  -> 把"引擎侧改过的"推给 Rapier（位姿 / 速度 / 矩形 / 力，逐字段比对镜像，没改的不推）
+  -> Rapier 走一步（宽相 / 窄相 / 求解 / 休眠 / CCD 全是它的）
+  -> 把结果读回来（位姿 / 速度 / 睡眠），再采集接触事件
 ```
+
+每个子步只有**一次** @@RapierPhys.cmd()@@ 调用。
+
+> 历史：这里曾经有 _Packed 路径与对象路径两条，加上 GDScript 宽相/求解器共三套实现。
+> 它们都已删除 —— 物理换成 Rapier 后没有存在理由了。
+> 详见 @@docs/development_log.md@@ 的「把物理交给 Rapier」一节。
 
 ⚠️ **这一段已作废**：对象路径（以及它的 GDScript 宽相/求解器）已经**全部删除**，
 float32/float64 边界换来的，见 [PRECISION.md](PRECISION.md)。

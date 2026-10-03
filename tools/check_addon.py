@@ -21,18 +21,16 @@ SRC = os.path.join(ROOT, "src")
 
 MODULES = ["physics", "core", "render", "gpu"]
 REQUIRED = [
-    "README.md",
-    "LICENSE",
-    "pixel_physics.gd",
-    "docs/ARCHITECTURE.md",
-    "docs/PRECISION.md",
-    "examples/minimal.gd",
-    "examples/facade_demo.gd",
+    "physics/pworld.gd",
+    "physics/pbody.gd",
+    "physics/collide.gd",
+    "physics/sweep.gd",
+    "physics/query.gd",
+    "physics/solver.gd",
+    "physics/grab.gd",
     "native/fastphys.cpp",
-    "native/collide_kernel.h",
-    "native/bp_kernel.h",
-    "native/solver_kernel.h",
-    "native/fastphys.gdextension.template",
+    "native/rapier_bridge/Cargo.toml",
+    "native/rapier_bridge/src/lib.rs",
 ]
 PREFIX = "res://addons/pixel_destruction/"
 REF = re.compile(r'res://addons/pixel_destruction/[A-Za-z0-9_./-]+\.(?:gd|tscn|tres)')

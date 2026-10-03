@@ -24,7 +24,6 @@ func _block(w: int, h: int) -> PixelShape:
 func _initialize() -> void:
 	print("=== Rapier 模式接触事件验证 ===")
 	var w := PWorld.new()
-	w.use_rapier = true
 	w.contact_events_enabled = true
 	var g := PBody.new()
 	g.position = Vector2(-200.0, 0.0)

@@ -11,8 +11,6 @@ func _block(w: int, h: int) -> PixelShape:
 func _initialize() -> void:
 	var world := PWorld.new()
 	world.sleeping_enabled = false
-	world.use_threads = true
-	world.use_coloring = false
 	var g := PBody.new()
 	g.position = Vector2(-600.0, 0.0)
 	g.make_static()

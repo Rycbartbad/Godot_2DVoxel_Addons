@@ -9,7 +9,6 @@ func _block(w: int, h: int) -> PixelShape:
 func _run(name: String, slop: float, maxdep: float, start_y0: float, steps: int = 400) -> void:
 	var world := PWorld.new()
 	world.sleeping_enabled = false
-	world.use_threads = false
 	world.solver.penetration_slop = slop
 	world.solver.max_depenetration_speed = maxdep
 	var g := PBody.new()

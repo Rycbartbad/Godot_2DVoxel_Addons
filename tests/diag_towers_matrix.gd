@@ -11,7 +11,6 @@ func _block(w: int, h: int) -> PixelShape:
 func _run(name: String, threads: bool, native: bool, ccd: bool, steps: int = 400) -> void:
 	var world := PWorld.new()
 	world.sleeping_enabled = false
-	world.use_threads = threads
 	world.ccd_enabled = ccd
 	var g := PBody.new()
 	g.position = Vector2(-600.0, 0.0)

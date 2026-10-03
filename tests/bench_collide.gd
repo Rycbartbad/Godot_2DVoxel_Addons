@@ -74,7 +74,6 @@ var _pen := 0
 func _gather() -> void:
 	var world := PWorld.new()
 	world.sleeping_enabled = false
-	world.use_threads = false
 	var g := PBody.new()
 	g.position = Vector2(-200.0, 0.0)
 	g.make_static()

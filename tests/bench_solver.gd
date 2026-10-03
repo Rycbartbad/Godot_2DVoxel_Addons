@@ -22,7 +22,6 @@ func _build(kind: String) -> PWorld:
 	var world := PWorld.new()
 	world.sleeping_enabled = false
 	world.ccd_enabled = false
-	world.use_threads = false          # 量的是**单核**内层成本
 	var g := PBody.new()
 	g.position = Vector2(-2000.0, 0.0)
 	g.make_static()

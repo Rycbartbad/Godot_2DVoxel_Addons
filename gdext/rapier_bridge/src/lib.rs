@@ -180,6 +180,16 @@ pub extern "C" fn rb_body_add_force(w: *mut World, id: u32, fx: f64, fy: f64, to
     }
 }
 
+/// 开关 CCD（对应 PWorld.ccd_enabled）。
+/// ⚠️ Rapier 的 CCD **默认是关的**（逐刚体），不设的话这个开关等于被静默忽略。
+#[no_mangle]
+pub extern "C" fn rb_body_set_ccd(w: *mut World, id: u32, enabled: i32) {
+    let Some(w) = (unsafe { wref(w) }) else { return };
+    if let Some(&h) = w.map.get(&id) {
+        w.bodies[h].enable_ccd(enabled != 0);
+    }
+}
+
 /// 清空累积的力与力矩。
 ///
 /// ⚠️ 必须有这个：Rapier 的 add_force 是**跨步累积**的（直到 reset_forces），

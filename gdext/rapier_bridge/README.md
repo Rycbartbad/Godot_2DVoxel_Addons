@@ -65,11 +65,23 @@ var out: PackedByteArray = inst.cmd(input, out_template)   # 命令流 in / 结�
 - 命令流格式见 `gdext/fastphys.cpp` 里 `RapierPhys` 那一节的注释；
   `tests/diag_rapier.gd` 是可直接运行的样例（含编码器）。
 
-## 下一步
+## 状态：已完成，是唯一路径
 
-1. **GDExtension 包装**：`fastphys.cpp` 用 `LoadLibrary` 动态加载本 DLL
-   （不做链接期耦合，避开 MinGW↔MSVC 的导入库问题），注册一个新的 GDExtension 类。
-2. **`PWorld` 接 Rapier**：位姿/矩形同步挂在 `PBody.rebuild()`（几何变化的唯一收口），
-   接触事件映射回 `Contact`（`_contact_width` / `shear_ratio` 的像素采样保留）。
-3. **用项目自己的测试套件判定**：289 项 + 8 条基准 + 幽灵/角接触诊断，然后重设基准。
-4. 判定通过后**删除手写内核**（`bp_kernel.h` / `collide_kernel.h` / `solver_kernel.h`）。
+1. ~~GDExtension 包装~~ ✅ `RapierPhys` 类，用 `LoadLibrary` 动态加载本 DLL。
+2. ~~`PWorld` 接 Rapier~~ ✅ 位姿/矩形同步逐字段比对镜像；接触事件映射回 `Contact`。
+3. ~~测试套件判定~~ ✅ **293 项全绿**；8 条基准已重设。
+4. ~~删除手写内核~~ ✅ `bp_kernel.h` / `collide_kernel.h` / `solver_kernel.h` 已删除。
+
+⚠️ **两个 DLL 必须一起重建。** 只重建其中一个的后果不是报错，而是
+`load_rapier()` 找不到新符号 → 世界指针为 null → **物理完全不动**。
+实测踩过一次：加了 op 19 只重建了 fastphys.dll，于是所有物体停在原点。
+
+## 两个标志性 bug 已消失
+
+| 幽灵碰撞诊断（Rapier #669 判据） | 手写引擎 | Rapier |
+|---|---|---|
+| A 一整块 | 0.0000 px | 0.0026 px |
+| B 同一 body 两段 | **16.1619 px** + 打转 | **0.0044 px** |
+| C 60 个独立静态体 | **14.9131 px** + 打转 | **0.0047 px** |
+
+角接触：四个场景全部倒到 −0.000°（手写路径 0.806°）。

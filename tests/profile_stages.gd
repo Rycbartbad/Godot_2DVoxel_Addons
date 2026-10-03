@@ -45,7 +45,6 @@ func _scene(kind: String, sleeping: bool) -> PWorld:
 
 func _profile(label: String, kind: String, sleeping: bool, steps: int, threads: bool) -> void:
 	var world := _scene(kind, sleeping)
-	world.use_threads = threads
 	world.profile_enabled = true
 	for i in 120:
 		world.step(1.0 / 60.0)

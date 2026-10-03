@@ -46,8 +46,21 @@ GDIGNORE = """# 这是构建产物（tools/build_addon.py 从 src/ + gdext/ + ad
 #   · Class "X" hides a global script class
 # 所以让 Godot 忽略整个目录。把 addon 拷进别的项目时删掉本文件即可（那边没有 src/）。
 """
-## 从 gdext/ 打包哪些原生源码
-NATIVE_SRC = ["fastphys.cpp", "collide_kernel.h", "bp_kernel.h", "solver_kernel.h"]
+## 从 gdext/ 打包哪些原生源码。
+##
+## ⚠️ 现在是**两个**动态库，都要编译出来放进 native/：
+##     · fastphys.dll       GDExtension 入口（MinGW g++ 编）
+##     · rapier_bridge.dll  Rust + Rapier（MSVC cargo 编，由前者运行时 LoadLibrary）
+##    只放一个会加载失败 —— 而且症状是"物理完全不动"，不是报错。
+##    手写内核（collide_kernel.h / bp_kernel.h / solver_kernel.h）已随 Rapier
+##    迁移删除，见 docs/development_log.md。
+NATIVE_SRC = [
+    "fastphys.cpp",
+    "rapier_bridge/Cargo.toml",
+    "rapier_bridge/Cargo.lock",
+    "rapier_bridge/README.md",
+    "rapier_bridge/src/lib.rs",
+]
 ## 扩展名故意不是 .gdextension —— Godot **编辑器**会自动扫描并加载项目里的
 ## .gdextension，而这个包里没有编译好的 .dll，留着会每次导入都报
 ## "GDExtension dynamic library not found"。要用原生加速就去掉 .template 后缀。
@@ -180,7 +193,9 @@ def main() -> int:
         for name in NATIVE_SRC:
             s = os.path.join(GDEXT, name)
             if os.path.isfile(s):
-                shutil.copyfile(s, os.path.join(nd, name))
+                d = os.path.join(nd, name)
+                os.makedirs(os.path.dirname(d), exist_ok=True)
+                shutil.copyfile(s, d)
                 n += 1
         with open(os.path.join(nd, "fastphys.gdextension.template"), "w",
                   encoding="utf-8", newline="\n") as f:

@@ -818,15 +818,20 @@ tests/bench_collide.gd                  窄相 A/B（一次多余的 SAT 值多�
 tests/dump_state.gd                     刚体状态 dump —— 物理改动的**逐位等价性判据**
 tests/bench_datalayout.gd               数据布局：对象属性 vs packed 数组（串行成本 + 并发膨胀）
 tests/dump_batch_bin.gd                 把 SoA 批次导出成二进制（给 C++ 侧读同一份数据）
-gdext/fastphys.cpp                      GDExtension（手写 C API）：collide_batch 批量窄相
-gdext/collide_kernel.h                  collide 的 C++ 移植（float 对齐 Vector2，逐位等价）
-gdext/bp_kernel.h                       整个宽相的 C++ 移植（扫掠 AABB / OBB 表 / SAP / 流形输出）
-gdext/collide_check.cpp                 独立台架：20000 组随机 OBB 对的逐位比对
-tests/bench_native_collide.gd           窄相两条路径的阶段拆分计时
-tests/dump_collide_random.gd            随机 OBB 对生成器（覆盖旋转/深穿透/相切/边际分离）
-gdext/bench_solve.cpp                   C++ 版求解器内层（同数据同循环，量倍数）
-tests/bench_batch.gd                    SoA 求解器 A/B（同进程，串行/并行 x 对象/SoA）
-tests/bench_variant.gd                  Variant 装箱 / Dictionary 分配到底多贵
+gdext/fastphys.cpp                      GDExtension 入口（手写 C API）：只注册 RapierPhys 一个类
+gdext/rapier_bridge/                    Rust + Rapier 桥接层（纯 C ABI，自包含，由前者运行时 LoadLibrary）
+gdext/rapier_bridge/src/lib.rs          19 个 rb_* 导出：世界 / 刚体 / 碰撞体 / 接触
+tests/diag_rapier.gd                    桥接层直连样例（含命令流编码器）
+tests/diag_rapier_world.gd              PWorld 最小验证：方块落下 -> 停住 -> 入睡
+tests/diag_rapier_contacts.gd           接触事件验证（世界系法向/点、真冲量、撞前 approach）
+tests/diag_multi_world.gd               同进程多世界的状态隔离
+tests/bench_ghost.gd                    幽灵碰撞 A/B（Rapier #669 判据）
+
+> 上面这一组是**手写内核时代**的产物，已随 Rapier 迁移删除：
+> @@collide_kernel.h@@ / @@bp_kernel.h@@ / @@solver_kernel.h@@ / @@collide_check.cpp@@
+> / @@bench_solve.cpp@@，以及 bench_native_collide / dump_collide_random / bench_batch
+> / bench_variant。它们存在的理由是"GDScript 与 C++ 逐字节等价"那个验证机制 ——
+> 物理交给 Rapier 之后，这个机制连同它要验证的东西一起消失了。
 tests/profile_many.gd                   多碎片场景**分阶段**画像（活跃 / 半落定 / 落定）
 tests/diag_sleep.gd                     休眠诊断：谁在抖、岛多大、计时卡在哪
 tests/validation_rect_shapes.gd         矩形分解精确性（凹陷形状）

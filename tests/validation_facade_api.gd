@@ -12,16 +12,25 @@ extends SceneTree
 ##   破坏：carve_circle / carve_rect / cut / explode / split_shape / merge_shape / is_broken
 
 ## ⚠️ 必须对着**构建产物**跑，不能用 addon_src 里的模板 ——
-##    模板里的 preload 路径是 res://addons/pixel_destruction/...，
+##    模板里的路径是 res://addons/pixel_destruction/...，
 ##    那些路径要在 build_addon.py 里才被改写出来，直接 load 模板会报
 ##    「Preload file ... does not exist」。
 ##
 ##    所以 promote.py 会在跑测试前先在树内构建 addon，跑完再移出
 ##    （和 check_manual_api.gd 同一个约束）。
-const Facade := preload("res://addons/pixel_destruction/pixel_physics.gd")
+##
+## ⚠️ 用 load() 而不是 preload()：addon 是构建产物，**平时不住在项目树里**，
+##    preload 会让整个脚本在编辑器里直接解析失败（红字刷屏），而实际原因只是
+##    "还没构建"。改成运行时加载 + 一句明确的失败信息，测试该红还是红，
+##    但不再污染编辑器的错误面板。
+const FACADE_PATH := "res://addons/pixel_destruction/pixel_physics.gd"
 
 var _pass := 0
 var _fail := 0
+## addon 脚本对象。**类级变量**（不是 const preload）——
+## preload 会在编辑器里直接解析失败，而原因只是"addon 还没构建"。
+var Facade = null
+
 func _c(n: String, ok: bool, d: String = "") -> void:
 	if ok:
 		_pass += 1
@@ -37,6 +46,12 @@ func _mk() -> Node:
 	return px
 
 func _initialize() -> void:
+	Facade = load(FACADE_PATH)
+	if Facade == null:
+		print("  FAIL  找不到 %s —— 先跑 python tools/build_addon.py" % FACADE_PATH)
+		print("=== 0 passed, 1 failed ===")
+		quit(1)
+		return
 	await process_frame
 	print("=== 力矩与动力学量 ===")
 	var px = _mk()

@@ -11,7 +11,6 @@ func _block(w: int, h: int) -> PixelShape:
 func _run(motion: float, steps: int = 400) -> void:
 	var world := PWorld.new()
 	world.sleeping_enabled = false
-	world.use_threads = false
 	world.ccd_max_motion = motion
 	var g := PBody.new()
 	g.position = Vector2(-600.0, 0.0)

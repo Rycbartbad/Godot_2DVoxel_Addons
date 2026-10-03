@@ -12,7 +12,6 @@ func _block(w: int, h: int) -> PixelShape:
 
 func _scene(piles: int, per_pile: int, threads: bool, sleeping: bool, ccd: bool) -> PWorld:
 	var world := PWorld.new()
-	world.use_threads = threads
 	world.sleeping_enabled = sleeping
 	world.ccd_enabled = ccd
 	var cols := int(ceil(sqrt(float(piles))))

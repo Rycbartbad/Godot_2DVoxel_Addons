@@ -39,7 +39,7 @@ var tint := Color(1, 1, 1)
 
 var _com_cache := Vector2.ZERO
 
-## ---- Rapier 后端的状态镜像（PWorld.use_rapier 时才有意义）----
+## ---- Rapier 后端的状态镜像 ----
 ##
 ## Rapier 是**权威状态源**：每个子步结束后 position / rotation / 速度都从它读回来。
 ## 这些镜像只有一个用途 —— 判断"引擎侧是否改过"，改过才推给 Rapier。

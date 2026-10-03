@@ -31,6 +31,7 @@ func _initialize() -> void:
 	_test_sleep()
 	_test_fracture()
 	_test_offset_origin_rotation()
+	_test_advance()
 	print("=== %d passed, %d failed ===" % [_pass, _fail])
 	quit(1 if _fail > 0 else 0)
 
@@ -141,3 +142,26 @@ func _test_offset_origin_rotation() -> void:
 	var com1 := b.com_world()
 	_check("com did not move", com0.distance_to(com1) < 0.01, "%.5f" % com0.distance_to(com1))
 	_check("body did rotate", absf(b.rotation) > 1.0, "rot=%.3f" % b.rotation)
+
+
+## ⚠️ 这一条是被**真实事故**逼出来的：删 pworld 里相邻的几个函数时误伤了 advance()，
+##    而当时没有任何测试覆盖它 —— 直到 demo 跑起来才炸
+##    （game.gd: "Nonexistent function 'advance' in base 'RefCounted (pworld.gd)'"）。
+##    公共 API 里"只被 demo 用"的那几个，正是最容易被静默删掉的。
+func _test_advance() -> void:
+	print("[advance]")
+	var world := _make_world()
+	_add_ground(world, 200.0)
+	var b := PBody.new()
+	b.position = Vector2(100, 100)
+	world.add_body(b, [_box_shape(16, 16)])
+	var y0: float = b.position.y
+	# fixed_dt 是 1/60；喂 0.05 秒应当正好走 3 步
+	var n: int = world.advance(0.05)
+	_check("advance 返回整数步数", n == 3, str(n))
+	_check("advance 之后物体确实动了", b.position.y > y0, "%.3f -> %.3f" % [y0, b.position.y])
+	# 不足一步的余量必须留着 —— 吞掉的话慢帧率下物理会越来越慢
+	var n2: int = world.advance(0.001)
+	_check("不足一步时不推进、余量保留", n2 == 0, str(n2))
+	var n3: int = world.advance(0.02)
+	_check("余量攒够后补上一步", n3 == 1, str(n3))

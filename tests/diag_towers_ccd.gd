@@ -10,7 +10,6 @@ func _block(w: int, h: int) -> PixelShape:
 func _run(name: String, cfg: Dictionary, steps: int = 400) -> void:
 	var world := PWorld.new()
 	world.sleeping_enabled = false
-	world.use_threads = false
 	for k in cfg:
 		world.set(k, cfg[k])
 	var g := PBody.new()
