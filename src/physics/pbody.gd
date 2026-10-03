@@ -65,6 +65,17 @@ var _rp_tq := 0.0
 ## 矩形分解的版本号：rebuild() 每次 +1。用来判断"要不要把矩形推给 Rapier"。
 var rects_rev := 0
 
+## 抓取约束这一子步施加的力与力矩。
+##
+## ⚠️ 为什么**不**复用 accum_force：那个是**持久累加器**（Box2D 那种，
+##    要调用方 clear_forces() 才清）。抓取力如果走它，而调用方直接调
+##    PWorld.step() / advance()（demo 就是这么干的），就没人清 ——
+##    实测力一帧涨 max_accel*mass = 640000，物体冲过目标后疯狂震荡
+##    （终态 x=185.7 而目标是 158，速度 ±397 来回翻）。
+##    所以抓取力是"这一子步的约束力"：Grab.apply 覆盖写，PWorld 用完清零。
+var grab_force := Vector2.ZERO
+var grab_torque := 0.0
+
 ## 上一子步**求解之前**的速度。
 ##
 ## 接触事件的 approach（"撞得多猛"）必须用它：求解之后接触点的相对法向速度

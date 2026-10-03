@@ -79,8 +79,12 @@ func apply(dt: float) -> void:
 	if max_impulse > 0.0 and imp.length() > max_impulse:
 		imp = imp.normalized() * max_impulse
 
-	# 冲量 -> 力（add_force 是"力"语义，引擎与 Rapier 都会自己乘 dt 再积分）。
+	# 冲量 -> 力。
 	# 等价性：Δv = F·inv_mass·dt = imp/mass；Δω = τ·inv_inertia·dt = (r×imp)·inv_inertia。
+	#
+	# ⚠️ 写**专用字段**而不是 add_force：add_force 是持久累加器，
+	#    调用方不清就会一帧一帧涨（实测每帧 +640000，物体冲过目标后震荡）。
+	#    这里是"覆盖写" —— 每个子步的约束力都从头算，与上一子步无关。
 	var f := imp / dt
-	b.add_force(f)
-	b.add_torque(r.cross(f))
+	b.grab_force = f
+	b.grab_torque = r.cross(f)

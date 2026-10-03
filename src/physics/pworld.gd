@@ -492,6 +492,9 @@ func _substep_rapier(dt: float) -> void:
 	# 引擎那条路径是在求解迭代里解 10 次（约束更硬）；这里是每子步一次 —— 手感略软，
 	# 但限力 max_accel * mass * dt 仍然精确成立，这是"重物要滞后"的来源。
 	_rp_grabbed.clear()
+	for b: PBody in bodies:
+		b.grab_force = Vector2.ZERO
+		b.grab_torque = 0.0
 	for g in grabs:
 		g.apply(dt)
 		if g.body != null:
@@ -561,21 +564,25 @@ func _substep_rapier(dt: float) -> void:
 		# 外力/力矩：变了才推，而且是 **reset + add**（等价于 set）。
 		# Rapier 的 add_force 跨步累积，直接每步 add 会让力矩按 1+2+…+N 涨 ——
 		# 实测 60 步差 33 倍（validation_dynamics 的"持续力矩"就是这么挂的）。
-		# 被抓住的刚体**每子步强制推一次**（不只是变化时）：
-		# Rapier 的 add_force(f, wake_up=true) 顺带把它唤醒，
-		# 这正是"被抓着不入睡"需要的 —— 不需要另写一套保醒逻辑。
-		if _rp_grabbed.has(b) or b.accum_force.x != b._rp_fx or b.accum_force.y != b._rp_fy 				or b.accum_torque != b._rp_tq:
+		# 外力 = 引擎的**持久累加器** + 抓取的**每子步力**。
+		# 被抓住的刚体每子步强制推一次（不只是变化时）：Rapier 的
+		# add_force(f, wake_up=true) 顺带把它唤醒 —— 这正是"被抓着不入睡"
+		# 需要的，不用另写一套保醒逻辑。
+		var fx := b.accum_force.x + b.grab_force.x
+		var fy := b.accum_force.y + b.grab_force.y
+		var tq := b.accum_torque + b.grab_torque
+		if _rp_grabbed.has(b) or fx != b._rp_fx or fy != b._rp_fy or tq != b._rp_tq:
 			_rp_u8(cmds, 18)
 			_rp_u32(cmds, b.rapier_id)
-			if b.accum_force != Vector2.ZERO or b.accum_torque != 0.0:
+			if fx != 0.0 or fy != 0.0 or tq != 0.0:
 				_rp_u8(cmds, 14)
 				_rp_u32(cmds, b.rapier_id)
-				_rp_f64(cmds, b.accum_force.x)
-				_rp_f64(cmds, b.accum_force.y)
-				_rp_f64(cmds, b.accum_torque)
-			b._rp_fx = b.accum_force.x
-			b._rp_fy = b.accum_force.y
-			b._rp_tq = b.accum_torque
+				_rp_f64(cmds, fx)
+				_rp_f64(cmds, fy)
+				_rp_f64(cmds, tq)
+			b._rp_fx = fx
+			b._rp_fy = fy
+			b._rp_tq = tq
 	# ---- 走一步 ----
 	_rp_u8(cmds, 2)
 	_rp_f64(cmds, dt)

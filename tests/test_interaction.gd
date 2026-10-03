@@ -166,6 +166,25 @@ func _test_grab_follows_target() -> void:
 	_check("被拉向目标", lifted.y < 80.0, "com=(%.1f, %.1f)" % [lifted.x, lifted.y])
 	_check("水平不漂移", absf(lifted.x - 100.0) < 3.0, "x=%.2f" % lifted.x)
 
+	# ⚠️ 回归断言：抓取力**绝不能**走 accum_force —— 那是**持久累加器**
+	#    （要调用方 clear_forces() 才清），而 demo 直接调 PWorld.advance()，
+	#    没人清。实测力每帧涨 max_accel*mass = 640000，物体冲过目标后疯狂震荡
+	#    （终态 x=185.7 而目标是 158，速度 ±397 来回翻）。
+	#    抓取力必须是"这一子步的约束力"：覆盖写 + 用完清零。
+	_check("抓取不污染 accum_force", box.accum_force == Vector2.ZERO,
+		"accum_force=%s" % str(box.accum_force))
+
+	# 目标**静止**时应当收敛在目标上（临界阻尼），而不是来回过冲。
+	# 上面那两条只看了"有没有被拉过去"，看不出震荡 —— 所以这条单独钉。
+	world.set_grab_target(Vector2(100, 60))
+	for i in 120:
+		world.step(1.0 / 60.0)
+	var settled := box.com_world()
+	var miss := settled.distance_to(Vector2(100, 60))
+	_check("静止目标下会收敛", miss < 3.0, "距目标 %.2f" % miss)
+	_check("收敛后不再震荡", box.linear_velocity.length() < 30.0,
+		"v=%.1f" % box.linear_velocity.length())
+
 	# 甩出去：目标必须持续高速移动，并在运动中途松手。
 	# （把目标停住再松手当然不会飞——那是正确的物理。）
 	for i in 20:
