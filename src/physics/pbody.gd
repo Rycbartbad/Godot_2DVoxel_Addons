@@ -283,7 +283,17 @@ func make_static() -> void:
 
 ## 用像素 Shape 重建质量属性与碰撞矩形。
 ## 组合律：并行的组合形状用平行轴定理逐块累加。
-func rebuild(shape_list: Array, density_of: Callable = Callable(), max_rects: int = 64) -> void:
+## dirty_rect：本次改动**已知的**局部像素范围（可空）。
+##
+## ⚠️⚠️ 它决定渲染器能不能走"只重建脏块"的快路径：
+##    给了 -> 用 mark_dirty_range（**记录了改了哪块**，渲染器只重建那几块）
+##    没给 -> 用 touch()（"内容变了但不知道哪里"，渲染器只能全量重建）
+##
+##    默认没给是**有意的保守**：绝大多数调用方确实不知道范围，
+##    全量重建虽然慢但一定对。知道范围的（fracture）必须显式传进来，
+##    否则 768x100 的地面每笔都要重建 24 块（~54 ms）而不是 1 块（~7 ms）。
+func rebuild(shape_list: Array, density_of: Callable = Callable(),
+		max_rects: int = 64, dirty_rect: Rect2i = Rect2i()) -> void:
 	# 几何变了 —— Rapier 后端据此决定要不要重建碰撞体（见 _rp_rects_rev）。
 	# 放在 rebuild() 里是**源头修**：破坏 / 擦除 / 绘制 / 分裂全都走这里。
 	rects_rev += 1
@@ -307,8 +317,12 @@ func rebuild(shape_list: Array, density_of: Callable = Callable(), max_rects: in
 	#     代价：擦地形时每帧都会 rebuild，于是每帧 touch 一次 —— 这是对的，
 	#     内容确实每帧都在变。不擦的时候不会调到这里。
 	for s1 in shape_list:
-		if s1 != null:
-			s1.touch()
+		if s1 == null:
+			continue
+		if dirty_rect.size.x > 0 and dirty_rect.size.y > 0:
+			s1.mark_dirty_range(dirty_rect)   # 已知范围 -> 渲染器可只重建脏块
+		else:
+			s1.touch()                        # 不知道范围 -> 渲染器只能全量
 	rects.clear()
 	# 静态体不需要质量属性（逆质量恒为 0，质心也不参与求解）。
 	# 擦地形时每帧都会 rebuild，跳过逐像素扫描是实打实的收益。

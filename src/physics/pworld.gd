@@ -1355,7 +1355,7 @@ func fracture(body: PBody, damage, burst_speed: float = 40.0) -> Array:
 
 	var parent_vel := body.linear_velocity
 	var parent_ang := body.angular_velocity
-	body.rebuild([parts[best]], Callable(), max_rects_per_shape)
+	body.rebuild([parts[best]], Callable(), max_rects_per_shape, dmg_rect)
 	# ⚠️ 现在才标 —— parts[best] 是 split 产出的**新** shape，是 body.shapes 里
 	#    真正留下的那个。见本函数开头关于"标记打早了会被丢掉"的说明。
 	#    split 保持局部坐标系，所以伤害的局部范围可以直接用。

@@ -28,8 +28,9 @@ func _run(label: String, world_y: float) -> void:
 		Editor.erase(pw.world, Vector2(80.0 + i * 120.0, world_y),
 			Vector2(80.0 + i * 120.0, world_y + 1.0), 6.0, 25.0)
 		pw.renderer.sync(ground)
-		print("    笔画 %d -> 重建 %d/%d 块" % [i,
-			pw.renderer.last_tiles_rebuilt, pw.renderer.last_tiles_total])
+		print("    笔画 %d -> 重建 %d/%d 块   [%s]" % [i,
+			pw.renderer.last_tiles_rebuilt, pw.renderer.last_tiles_total,
+			pw.renderer.last_debug])
 
 func _initialize() -> void:
 	print("=== 分块贴图是否真的生效 ===")

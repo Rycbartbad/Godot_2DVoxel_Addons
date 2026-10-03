@@ -48,6 +48,16 @@ var _warned_material := false
 ## ⚠️ 加它是因为：分块贴图写完**看起来**对了，但完全可能每笔都走
 ##    rebuild_all（那就等于没分块，白做）。这个计数器让"有没有真的分块"
 ##    变成一个可断言的事实，而不是靠读代码推断。
+## body.id -> 上次**全量重建**时的 (revision - range_revision) 差值。
+##
+## ⚠️⚠️ 不能直接比 revision != range_revision —— 那是**累计**的，
+##    只要历史上出现过一次 touch()（比如启动时烘焙那一次），
+##    差值就永远不为 0，快路径被**永久禁用**（实测差值恒为 2，
+##    分块贴图退回 24/24 全量重建，白做）。
+##
+##    要比的是"**自上次全量重建以来**有没有未记录的改动"。
+var _rev_offset := {}
+var last_debug := ""
 var last_tiles_rebuilt := 0
 var last_tiles_total := 0
 ## body.id -> Image（**持久**，供分块增量重绘）。
@@ -124,6 +134,7 @@ func forget(body_id: int) -> void:
 	_bounds.erase(body_id)
 	_rev.erase(body_id)
 	_images.erase(body_id)
+	_rev_offset.erase(body_id)
 	for key in (_tiles.get(body_id, {}) as Dictionary):
 		var sp: Sprite2D = (_tiles[body_id] as Dictionary)[key]
 		if sp != null:
@@ -215,9 +226,26 @@ func sync(body) -> void:
 		_tiles[body.id] = tiles
 		_tile_tex[body.id] = tts
 		_tile_img[body.id] = tis
-	# 没有块级脏信息（touch() 路径）、尺寸变了、或还没建过 -> 全部块重建
-	var rebuild_all: bool = size_changed or tiles.is_empty() 			or (content_changed and dirty.size.x <= 0)
+	# ⚠️⚠️ 只要**有未记录的改动**（revision != range_revision，即有人调过 touch()），
+	#    就必须全量重建 —— 那种情况下脏集合是**不完整**的，
+	#    只重建脏块会漏掉改动，症状是"擦出来的图形缺一块"。
+	#
+	#    这是我把"只重建脏块"上线后引入的回归：fracture 先 mark_dirty_range，
+	#    紧接着 PBody.rebuild 又 touch()（split 换了 shape 对象、碎片搬走了像素），
+	#    渲染器看到脏集合非空就只重建那几块 —— touch() 那部分改动全丢了。
+	# ⚠️ 比的是**差值**，不是绝对值 —— 见 _rev_offset 的说明。
+	var offset_now := 0
+	for s2: PixelShape in body.shapes:
+		offset_now += s2.revision - s2.range_revision
+	var untracked: bool = _rev_offset.get(body.id, offset_now) != offset_now
+	var rebuild_all: bool = size_changed or tiles.is_empty() or untracked 			or (content_changed and dirty.size.x <= 0)
+	var revinfo := ""
+	for s3: PixelShape in body.shapes:
+		revinfo += " rev=%d/%d" % [s3.revision, s3.range_revision]
+	last_debug = "size=%s untracked=%s dirty=%s%s" % [
+		str(size_changed), str(untracked), str(dirty), revinfo]
 	if content_changed or size_changed:
+		_rev_offset[body.id] = offset_now
 		last_tiles_rebuilt = 0
 		last_tiles_total = 0
 		var live := {}

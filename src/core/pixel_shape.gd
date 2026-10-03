@@ -37,12 +37,29 @@ var chunks: Dictionary = {}
 ## 读取方只比版本号，既不漏也不误。
 var revision := 0
 
+## **记录了块的**那部分版本号 —— 只有 mark_dirty* 会 bump 它，touch() 不会。
+##
+## ⚠️⚠️ 为什么必须区分这两个：
+##    渲染器想"只重建脏块"，但脏块信息只在 mark_dirty* 路径上是完整的。
+##    touch() 的语义是"内容变了，但**不知道哪里**"（原生破坏、split 换形状、
+##    rebuild 的收尾都会调它）。
+##
+##    只比 revision 的话：fracture 先 mark_dirty_range（记了块），
+##    紧接着 PBody.rebuild 又 touch()（没记块）—— 渲染器看到脏集合非空，
+##    就**只重建那几块**，而 touch() 带来的改动（比如 split 把像素搬到了
+##    碎片上、shape 对象整个被换掉）全被漏掉。
+##    症状就是"擦出来的图形缺一块"。
+##
+##    判据：revision != range_revision  =>  有**未记录**的改动  =>  必须全量重建。
+var range_revision := 0
+
 var _dirty: Dictionary = {}
 
 
 ## 标记一个 chunk 为脏（chunk 坐标）。已经脏了就早退，热路径上只有一次查表。
 func mark_dirty(cx: int, cy: int) -> void:
 	revision += 1
+	range_revision += 1
 	var k := make_key(cx, cy)
 	if not _dirty.has(k):
 		_dirty[k] = true
@@ -70,6 +87,7 @@ func touch() -> void:
 
 func mark_dirty_key(k: int) -> void:
 	revision += 1
+	range_revision += 1
 	if not _dirty.has(k):
 		_dirty[k] = true
 
@@ -89,6 +107,7 @@ func mark_dirty_range(rect: Rect2i) -> void:
 	if rect.size.x <= 0 or rect.size.y <= 0:
 		return
 	revision += 1
+	range_revision += 1
 	# >> 3 是"除以 8 并向下取整"，对负数也成立（算术右移）
 	var cx0 := rect.position.x >> 3
 	var cy0 := rect.position.y >> 3
