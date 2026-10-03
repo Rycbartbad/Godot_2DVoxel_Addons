@@ -65,6 +65,7 @@ var _dirty: Dictionary = {}
 func mark_dirty(cx: int, cy: int) -> void:
 	revision += 1
 	range_revision += 1
+	_bounds_rev += 1          # 逐像素写入：不知道动了哪里 -> AABB 可能变
 	var k := make_key(cx, cy)
 	if not _dirty.has(k):
 		_dirty[k] = true
@@ -88,11 +89,13 @@ func mark_dirty(cx: int, cy: int) -> void:
 ## 它不是"标某块脏"，是"告诉渲染器这块内容变了，重建贴图"。
 func touch() -> void:
 	revision += 1
+	_bounds_rev += 1          # 同上：不知道改了哪里，保守作废
 
 
 func mark_dirty_key(k: int) -> void:
 	revision += 1
 	range_revision += 1
+	_bounds_rev += 1
 	if not _dirty.has(k):
 		_dirty[k] = true
 
@@ -107,12 +110,29 @@ func mark_dirty_key(k: int) -> void:
 ##    而伤害本身**知道自己的局部包围盒**（Damage.bounds()），
 ##    顺手把覆盖到的块标出来，渲染器就能只重建那几块。
 ##
+## ⚠️⚠️ **契约：rect 必须覆盖本次改动的全部像素**（可以更大，不能更小）。
+##    这不只是"标脏"的契约 —— _aabb_survives() 也拿它当依据：
+##    rect 严格落在 AABB 内部 => AABB 一定不变 => 保留缓存。
+##    实际改动的像素一旦溢出 rect，AABB 缓存就会**静默**过期，
+##    表现是形状与碰撞体错位（用户报过两次，两次都很像"只差一点点"）。
+##
+##    当前唯一的调用方 PWorld.fracture() 传的是 dmg_rect ——
+##    damage.bounds() 向外取整 +1；而 make_keep_mask（CPU）和
+##    destruction.glsl（GPU）都只在 damage.hits(像素中心) 为真时删除，
+##    hits 的范围恰好就是 bounds()，所以"被删像素 ⊆ dmg_rect"是**可证的**。
+##    两条路径都逐行核过，不是"看起来差不多"。
+##
 ## 用法见 PWorld.fracture()。
 func mark_dirty_range(rect: Rect2i) -> void:
 	if rect.size.x <= 0 or rect.size.y <= 0:
 		return
 	revision += 1
 	range_revision += 1
+	# ⚠️ 这里**不能**无脑 bump：擦除的改动矩形绝大多数时候严格落在 AABB 内部，
+	#    那种情况下 AABB 一定不变，而无脑 bump 会让 decompose() 白扫 1248 个
+	#    chunk（实测 3.3 ms/笔）。见 _bounds_rev 的说明。
+	if not _aabb_survives(rect):
+		_bounds_rev += 1
 	# >> 3 是"除以 8 并向下取整"，对负数也成立（算术右移）
 	var cx0 := rect.position.x >> 3
 	var cy0 := rect.position.y >> 3
@@ -290,6 +310,13 @@ func translate_pixels(dx: int, dy: int) -> void:
 				out[key] = dst
 			dst.set_pixel(px - (cx << 3), py - (cy << 3), c.mat[i])
 	chunks = out
+	# ⚠️ 墓碑：这里以前**什么都不 bump** —— chunks 整个被换掉，revision 却不动，
+	#    于是 local_aabb() 的缓存键没变，返回的是平移**之前**的 AABB。
+	#    当前仓库没有调用方（死代码），但雷先拆掉。
+	#    平移只改位置不改形状，所以只 bump revision（渲染器必须全量重建），
+	#    range_revision 不动 —— 它表示"脏块记录是完整的"，这里显然不是。
+	revision += 1
+	_bounds_rev += 1
 
 
 ## 材质直方图：material id -> 像素数（不含 0）。
@@ -330,14 +357,31 @@ func remap_material(from_id: int, to_id: int) -> int:
 ##    sync(地面)(~51 ms)，而后者几乎全是这个 AABB 重算。
 ##    Rapier 那边（把 81 个矩形推给物理）只要 0.17 ms，完全不是瓶颈。
 ##
-##    用 revision 当键：它本来就由所有改内容的入口 +1，不需要调用方记得做什么。
 var _aabb_cache := Rect2i()
 var _aabb_rev := -1
+
+## AABB 缓存的版本号 —— **只在 AABB 可能改变时才 +1**。
+##
+## ⚠️⚠️ 为什么不用 revision 当键（这里踩过）：
+##    擦除走 mark_dirty_range()，它原本无脑 bump 了 revision，于是**每一笔擦除**
+##    都把 AABB 缓存打掉 —— 而 decompose() 第一件事就是调 local_aabb()，
+##    等于每笔白扫 1248 个 chunk（768x100 地面实测 3.3 ms）。
+##
+##    可是擦除**不可能**改变 AABB：AABB 的四个极值像素一定落在改动矩形之外。
+##    判据因此是「改动矩形是否严格落在当前 AABB 内部」：
+##      严格在内 -> AABB 一定不变   -> 保留缓存
+##      碰到边界 -> 可能缩（擦）也可能涨（画）-> 作废重算
+##
+##    这正是 bench_erase_interior 量到的"内部擦除 AABB 不变、边缘擦除 AABB 变"，
+##    只不过以前是**事后**才发现，现在是**事前**就判定。
+##
+##    touch() / mark_dirty() / mark_dirty_key() 不知道改了哪里，一律 +1（保守）。
+var _bounds_rev := 0
 
 
 func local_aabb() -> Rect2i:
 	## 返回像素级 AABB（左上闭、右下开区间），空形状返回 Rect2i()。
-	if _aabb_rev == revision:
+	if _aabb_rev == _bounds_rev:
 		return _aabb_cache
 	var min_x := 1 << 30
 	var min_y := 1 << 30
@@ -361,12 +405,28 @@ func local_aabb() -> Rect2i:
 			max_x = maxi(max_x, bx + hi)
 			min_y = mini(min_y, by + y)
 			max_y = maxi(max_y, by + y + 1)
-	_aabb_rev = revision
+	_aabb_rev = _bounds_rev
 	if max_x <= min_x:
 		_aabb_cache = Rect2i()
 	else:
 		_aabb_cache = Rect2i(min_x, min_y, max_x - min_x, max_y - min_y)
 	return _aabb_cache
+
+
+## 这次改动**是否可能**改变 AABB。只有缓存本身是新鲜的，才敢回答"不会变"。
+##
+## 严格在内（四条边一条都不碰）才返回 true：AABB 的四个极值像素都落在
+## 矩形之外，既删不掉也盖不住，四个边界值必然不变。
+func _aabb_survives(rect: Rect2i) -> bool:
+	if _aabb_rev != _bounds_rev:
+		return false          # 缓存本来就过期了，别装作知道
+	var ax := _aabb_cache.position.x
+	var ay := _aabb_cache.position.y
+	return (rect.position.x > ax
+			and rect.position.y > ay
+			and rect.position.x + rect.size.x < ax + _aabb_cache.size.x
+			and rect.position.y + rect.size.y < ay + _aabb_cache.size.y)
+
 
 func blit_mask_from(src: PixelChunk, key: int, mask: int) -> void:
 	## split 用：把 src 里 mask 内的像素按 key 复制进本 Shape。
