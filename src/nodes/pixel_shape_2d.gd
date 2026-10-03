@@ -202,7 +202,7 @@ func build_shape() -> PixelShape:
 						var sx2 := clampi(int(float(px2) * psx), 0, paint.get_width() - 1)
 						var pm := int(round(paint.get_pixel(sx2, sy2).r * 255.0))
 						if pm != 0:
-							s.set_pixel(ox + px2, oy + py2, pm)
+							s.set_pixel(ox + px2, oy + py, pm)
 			else:
 				push_warning("PixelShape2D: source=PAINT 但没设 paint（画笔还没落过笔）")
 	return s
