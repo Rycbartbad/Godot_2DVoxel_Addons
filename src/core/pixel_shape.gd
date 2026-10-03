@@ -48,6 +48,26 @@ func mark_dirty(cx: int, cy: int) -> void:
 		_dirty[k] = true
 
 
+## 内容变了，但**不是从 set_pixel 走的** —— 只 bump 版本号，不动块脏标记。
+##
+## ⚠️⚠️ 为什么必须有这个：
+##
+## 破坏（fracture / apply_damage）走的是**原生路径** —— C++ 里直接改块位图，
+## **不经过 PixelShape.set_pixel**，而 mark_dirty() 是在 set_pixel 里调的。
+## 于是 revision 不变，渲染器 sync() 一看
+##     _bounds 没变 且 _rev 没变  ->  跳过贴图重建
+## 表现就是：**右键擦掉了像素，画面上却还在** —— 直到生成新碎片（新 body id，
+## _rev.get(新id, -1) != rev 必然成立）才刷新。
+##
+## 这和 P0-1（冲量回填在原生路径下空转）是同一个模式：
+## **原生路径做了事，但没有通知 GDScript 侧。**
+##
+## 什么时候调：任何绕过 set_pixel 的批量修改之后（破坏、paint、换 shape……）。
+## 它不是"标某块脏"，是"告诉渲染器这块内容变了，重建贴图"。
+func touch() -> void:
+	revision += 1
+
+
 func mark_dirty_key(k: int) -> void:
 	revision += 1
 	if not _dirty.has(k):

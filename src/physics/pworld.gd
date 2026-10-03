@@ -2008,7 +2008,23 @@ func _damage_world(bounds: Rect2, material_delta: int, burst_speed: float,
 			continue
 		var d = make_damage.call(b)
 		d.material_delta = material_delta
-		for p in fracture(b, d, burst_speed):
+		var before_shapes: Array = b.shapes.duplicate()
+		var new_parts := fracture(b, d, burst_speed)
+		# ⚠️⚠️ 破坏走的是**原生路径**（C++ 里直接改块位图），不经过 PixelShape.set_pixel ——
+		#     而 revision += 1 是在 set_pixel 里调 mark_dirty() 时做的。
+		#     不补这一步，渲染器看到 _rev 没变就跳过贴图重建，
+		#     表现是「擦掉了像素，画面上却还在，直到生成新碎片才刷新」。
+		#     （新碎片是新 body id，_rev 里查不到 -> 必然重建，所以它们正常显示，
+		#      这正好解释了"只有新碎片才显示"这个现象。）
+		for s in before_shapes:
+			s.touch()
+		# 原 Body 保留了最大的一块：rebuild() 会换一个**新的 Shape 对象**，
+		# 新对象的 revision 从 0 开始，和旧的 0 一样 -> 照样检测不到，所以也要补。
+		for s in b.shapes:
+			s.touch()
+		for p in new_parts:
+			for s in p.shapes:
+				s.touch()
 			out.append(p)
 	return out
 

@@ -1,15 +1,6 @@
-[gd_scene load_steps=3 format=3]
+[gd_scene format=3 uid="uid://3wnbw8qpv4b2"]
 
-[ext_resource type="Script" path="res://src/demo/game.gd" id="1_game"]
-[ext_resource type="Script" path="res://src/render/debug_overlay.gd" id="2_overlay"]
+[ext_resource type="Script" uid="uid://odl8wa3oj3u0" path="res://src/demo/game.gd" id="1_game"]
 
-[node name="Demo" type="Node2D"]
+[node name="Demo" type="Node2D" unique_id=1377500599]
 script = ExtResource("1_game")
-
-; 物理调试叠加层：场景编辑器里就能看到碰撞矩形/接触点/质心/速度。
-; 甲方要求「能在场景编辑器中可视化」。在 Inspector 里勾 show_obbs 等开关。
-; ⚠️ .tscn 的注释符是 ; 不是 ## —— 用 ## 会让这一行被当成节点定义解析失败。
-[node name="DebugOverlay" type="Node2D" parent="."]
-script = ExtResource("2_overlay")
-show_velocity = true
-show_angular = true

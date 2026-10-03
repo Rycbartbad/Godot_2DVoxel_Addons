@@ -117,8 +117,24 @@ func _draw() -> void:
 	#    教训：**调试可视化本身画错，比没有可视化更糟**，它会把人引到错误的方向。
 	# 坐标系已在上面用 draw_set_transform 抵消了缩放 —— 所以这里**直接用形状坐标**，
 	# 不需要任何补偿系数。形状的外接是多少就画多大，经过节点变换后正好贴住形状。
-	if aabb.size.x > 0 and aabb.size.y > 0:
-		var col := Color(0.4, 0.8, 1.0, 0.8) if is_static else Color(0.3, 1.0, 0.5, 0.7)
+	var col := Color(0.4, 0.8, 1.0, 0.8) if is_static else Color(0.3, 1.0, 0.5, 0.7)
+	if source == Source.CIRCLE:
+		# ⚠️⚠️ 球形**不能**画外接矩形 —— 外接矩形是正方形，
+		#    看起来就像"球变成了四边形"，很容易让人以为形状生成错了。
+		#
+		#    形状是按 scale 生成过的（见 build_shape），而这里画的是**未缩放的局部坐标**
+		#    （上面 draw_set_transform 已经抵消了缩放），所以直接用 radius 画圆，
+		#    节点变换会把它拉成椭圆 —— 和实际生成的像素完全一致。
+		#
+		#    圆心在 (r, r)：形状从 (0,0) 铺到 (2r, 2r)，原点在左上角。
+		var c := Vector2(radius, radius)
+		draw_circle(c, radius, col, false, 1.0)
+		draw_circle(Vector2.ZERO, 1.5, col)
+	elif aabb.size.x > 0 and aabb.size.y > 0:
+		# RECT / TEXTURE / PAINT：外接矩形就是形状的边界，画它是对的。
+		#
+		# （TEXTURE/PAINT 的真实轮廓要逐像素描边才准，代价太高 ——
+		#   外接框作为抓手够用，而且不会误导：它不是"形状本身"，只是范围。）
 		var p := Vector2(aabb.position)
 		var sz := Vector2(aabb.size)
 		draw_rect(Rect2(p, sz), col, false, 1.0)
