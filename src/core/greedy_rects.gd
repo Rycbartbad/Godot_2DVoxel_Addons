@@ -126,6 +126,17 @@ static func _build_grid(shape: PixelShape) -> Grid:
 		grid.fill(1)
 		g.cells = grid
 		return g
+	# ⚠️ 试过把这里改成"逐行用 append_array/slice 原生拼接"（配 256 项
+	#    8 字节模式表）—— **实测同样是 8.71 ms，白做**，已回退。
+	#
+	#    原因：地板不在"每次写多少字节"，而在**迭代次数** ——
+	#    768x100 是 96 chunk x 100 行 = 9600 次 chunk-行访问，
+	#    无论里面是 8 次赋值还是 1 次原生拼接，都要付这 9600 次的代价。
+	#
+	#    要真正降下来只能**减少迭代**（比如用位网格：1248 个 word 而不是
+	#    76800 个字节），那是重写 _greedy，不是改这一处能解决的。
+	#
+	#    真正有效的是上面的**实心快路径**（fill(1)，8.71 -> 0.52 ms）。
 	for k: int in shape.chunks:
 		var c: PixelChunk = shape.chunks[k]
 		var bx := (PixelShape.key_x(k) << 3) - aabb.position.x

@@ -19,7 +19,11 @@ func _initialize() -> void:
 	for b in pw.world.bodies:
 		if b.is_static: s = b.shapes[0]; break
 
-	print("=== decompose 分段（实心地面，单位 ms）===")
+	# 打个洞 —— 实心快路径失效，走逐行拼接那条
+	var d = Destruction.Damage.circle(Vector2(300, 50), 20.0)
+	Destruction.apply_damage(s, d)
+	s.touch()
+	print("=== decompose 分段（有洞，单位 ms）px=%d aabb=%s ===" % [s.pixel_count(), str(s.local_aabb())])
 	var N := 5
 	var t := Time.get_ticks_usec()
 	for i in N:
