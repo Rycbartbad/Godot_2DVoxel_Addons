@@ -217,6 +217,33 @@ zoom     = voxel_size * render_scale = voxel_size * (视口高 / 540)
 UI 用原生 `Control` + `Theme`。引擎只暴露**数据**
 （`px.momentum(body)`、`px.total_kinetic_energy()` 等），UI 去读。
 
+## 预引用：`@onready` 直接拿 PBody
+
+```gdscript
+@onready var body = $Placed.body        # 就这一句，不用等帧、不用 find
+```
+
+⚠️ 以前不行：`body` 只是"运行时才有值的普通字段"，而 Godot 的 `_ready` 是**子节点先、
+父节点后**，`PixelWorld` 又是在自己的 `_ready` 里才烘焙 —— 子脚本里读到的是 `null`，
+只能 `await get_tree().process_frame` 或者自己 `find_children` 找一遍。
+
+现在 `body` 是**访问时按需烘焙**（幂等，走 `PixelWorld.add_body_node`）：
+不管 `_ready` 顺序、不管世界建没建好，第一次读就能拿到东西；编辑器里读也会烘。
+
+想在 Inspector 里"拖一个刚体进来"，导出**节点**（`PBody` 是 RefCounted，`@export` 不支持）：
+
+```gdscript
+@export var body_node: PixelBody2D
+
+func _ready() -> void:
+    var body = body_node.body          # 拖节点 -> 拿 PBody
+```
+
+契约由 [`tests/validation_preref.gd`](../../tests/validation_preref.gd) 钉住：探针挂在
+`PixelWorld` 下面（它的 `_ready` 一定早于世界的烘焙），在里面读 `.body` 必须拿到
+**世界里的那个刚体**，而且世界不会被二次重建把引用作废。
+
+
 ## 节点摆的 + 代码生成的，可以共存
 
 两条路落在**同一个 world** 上，互不打扰：

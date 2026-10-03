@@ -3896,3 +3896,56 @@ PixelJoint2D._notification(TRANSFORM_CHANGED)
 ## 基准
 
 默认摩擦 0.5 / 恢复 0.0 与 Rapier 默认值相同，所以 8 条基准**逐位不变**。
+
+---
+
+# 预引用：PBody 不再"运行时才有"（@onready 直接拿）
+
+## 甲方要求
+
+> "希望使用 Onready 预加载 body……不要浪费性能在查找，或者写一个莫名其妙的 wait 一帧，
+>  参考 RigidBody2D 可以直接找到，甚至在 export 里面拖动。"
+
+## 为什么以前做不到
+
+`PixelBody2D.body` 以前只是**运行时才有值的普通字段**，而 Godot 的 `_ready` 是
+**子节点先、父节点后**，`PixelWorld` 又是在自己的 `_ready` 里才 `rebuild()` ——
+于是子脚本里 `@onready var b = $Placed.body` 拿到的是 `null`，只能 `await` 一帧或自己找。
+
+## 改法
+
+1. `body` 改成**属性 + getter**：第一次读时**按需烘焙**（幂等，走 `PixelWorld.add_body_node`，
+   世界还没建就先建）。`_body` 做真实字段，`bake()` 里的赋值走 setter；
+2. `PixelWorld._ready()` 里加 `if world == null: rebuild()` —— 已经被懒建过就**别再建**，
+   否则 `PWorld.new()` 会把刚拿到的引用作废；
+3. ⚠️ 渲染器改成 `add_child.call_deferred`：懒烘焙可能从**别的节点的 _ready** 里触发，
+   那时本节点还在 "busy setting up children" 状态，同步 `add_child` 会直接失败：
+   `Parent node is busy setting up children, add_child() failed.`
+   贴图节点挂在渲染器自己的 holder 下，**不在树里也能建**，所以延迟入树不影响这一趟。
+
+## 导出里"拖一个刚体"
+
+`PBody` 是 RefCounted，`@export` 不支持 —— 所以导出**节点**：
+
+```gdscript
+@export var body_node: PixelBody2D
+var body = body_node.body
+```
+
+（把 PBody 改成 Resource 是另一场重构，收益不大：它带着运行时状态。）
+
+## 验收 tests/validation_preref.gd（7 项）
+
+探针脚本挂在 `PixelWorld` 下面，它的 `_ready` 一定早于世界的烘焙：
+
+```text
+[probe] _ready 跑了；此刻 pw.world == null ? true
+[probe] 读到 .body = <RefCounted#...>
+```
+
+断言：探针真的跑了、确实在世界建好之前、**读 .body 拿到了东西**、拿到的就是世界里的
+那个刚体、世界没被二次重建、重复访问幂等、@export 拖节点的写法可用。
+
+⚠️ 写这个测试时踩了一次量法坑：`SceneTree` 脚本的 `_initialize` 里 `add_child`
+**不会**同步触发 `_ready`（主循环还没开始跑），第一版六个断言全读到默认值（false/null），
+看起来像"功能没做"。要 `await process_frame` 让主循环跑起来才对。
