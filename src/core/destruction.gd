@@ -168,6 +168,19 @@ static func split(shape: PixelShape, min_pixels: int = 1) -> Array:
 ## 返回 {"removed": int, "parts": Array}；返回空字典表示应退回 CPU
 ## （设备不可用 / 规模太小 / 分量溢出）。
 static func apply_damage_and_split_gpu(shape: PixelShape, damage: Damage, min_pixels: int = 1, force: bool = false) -> Dictionary:
+	# ⚠️⚠️ **先判开关，再取后端。**
+	#
+	#    gpu_backend() 第一次调用会建 RenderingDevice 后端 + 编译 compute pipeline，
+	#    实测 **5.5 ms**（带窗口时是 126 ms）—— 然后才发现 GPU 破坏路径是关的
+	#    （gpu_destruction.gd: const ENABLED := false），白做一场。
+	#
+	#    后果不只是慢：这 5.5 ms 只出现在**第一笔**上，之后每一笔只要 0.12 ms。
+	#    于是第一笔和其余各笔的手感不一样 —— 用户说的"影响擦除手感"。
+	#    这就是"预热"要解决的东西：**把一次性成本从热路径上挪走**。
+	#
+	#    force=true 是显式要求（测试会用），那种情况仍然走完整流程。
+	if not force and not _gpu_enabled():
+		return {}
 	var keys: Array = shape.chunks.keys()
 	if keys.is_empty():
 		return {}
@@ -261,6 +274,24 @@ const GpuOverflowFlag := 0x80000000
 const GpuMaxComp := 16
 
 static var _gpu_backend_cache = null
+
+## GPU 破坏路径是否启用（缓存一次）。
+##
+## ⚠️ 存在的理由是**避免一次性成本落在热路径上**：
+##    gpu_backend() 第一次调用会建 RenderingDevice 后端 + 编译 compute pipeline，
+##    实测 5.5 ms（带窗口时 126 ms）—— 然后才发现 ENABLED 是 false，白做一场。
+##    这 5.5 ms 只出现在**第一笔**上，于是第一笔和其余各笔手感不一样。
+##    用这个函数在取后端**之前**判掉，一次性成本就不会落在第一笔上。
+static var _gpu_enabled_cache := -1
+
+static func _gpu_enabled() -> bool:
+	if _gpu_enabled_cache < 0:
+		var script = load("res://src/gpu/gpu_destruction.gd")
+		_gpu_enabled_cache = 0
+		if script != null and script.get("ENABLED") != null and script.ENABLED:
+			_gpu_enabled_cache = 1
+	return _gpu_enabled_cache == 1
+
 
 static func gpu_backend():
 	if _gpu_backend_cache == null:

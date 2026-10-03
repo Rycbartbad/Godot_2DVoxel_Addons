@@ -147,6 +147,40 @@ func rebuild() -> void:
 	_sync_overlays()
 	if log_bake:
 		print("[PixelWorld] 烘焙 %d 个刚体（场景节点 -> RefCounted，之后热循环不碰 Node）" % n)
+	_preheat()
+
+
+## 预热擦除路径上的一次性初始化。
+##
+## ⚠️ 为什么需要它：**第一笔擦除总是明显比之后每一笔慢**。
+##    实测（tests/diag_fracture_parts.gd）：
+##        笔画 0   合计 31.66 ms
+##        笔画 1   合计 25.10 ms
+##    差的这 5~6 ms 不是任何一处算法的成本，而是**首次调用付的惰性初始化**：
+##    脚本/类缓存、GPU 后端的 device + pipeline 编译（5.5 ms，带窗口 126 ms）、
+##    各种 static 变量的首次填充……
+##
+##    用户的原话是"影响擦除手感"——手会先建立预期，然后被打破。
+##    把这些成本**从热路径挪到加载时**，每一笔就都一样了。
+##
+##    只跑一次；只碰擦除路径上真正会用到的函数，不做多余的事。
+var _preheated := false
+
+func _preheat() -> void:
+	if _preheated or Engine.is_editor_hint():
+		return
+	_preheated = true
+	var GreedyRects = load("res://src/core/greedy_rects.gd")
+	var Destruction = load("res://src/core/destruction.gd")
+	if GreedyRects == null or Destruction == null:
+		return
+	var probe := Rect2i(0, 0, 4, 4)
+	for b in world.bodies:
+		for s in b.shapes:
+			# 这两个正是擦除路径上最重的两个函数的首次调用
+			GreedyRects.decompose(s, 64)
+			Destruction.touches_boundary(s, probe)
+			Destruction.apply_damage_and_split_gpu(s, Destruction.Damage.circle(Vector2.ZERO, 1.0), 25.0)
 
 
 ## 把一个 PixelBody2D 子节点烘焙进**当前世界**，返回造出来的 PBody。
