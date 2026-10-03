@@ -167,16 +167,29 @@ func _draw() -> void:
 		"游戏取景 %.0f x %.0f" % [sz.x, sz.y], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, col)
 
 
-var _preview_cache := Vector3.ZERO
+## 取景框的"指纹"：相机是谁、在哪、转了多少、zoom 多少、offset 多少，加上体素尺寸。
+##
+## ⚠️ 只比 position 是不够的（第一版就这么写的）：编辑器里**旋转相机、改 zoom、
+##    改 offset、换一台相机**都不会改 position —— 框就停在原地不跟。
+##    甲方原话："青色面板应该在操作摄像机等时重绘"。
+func preview_key() -> Array:
+	var cam := _preview_camera()
+	if cam == null:
+		return [0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, PixelScale.get_scale()]
+	return [cam.get_instance_id(), cam.global_position.x, cam.global_position.y,
+		cam.global_rotation, cam.zoom.x, cam.zoom.y, cam.offset.x + cam.offset.y,
+		PixelScale.get_scale()]
+
+
+var _preview_cache: Array = []
 
 
 func _process(_dt: float) -> void:
 	# ⚠️ 这个 _process 只在**编辑器**里干活（游戏里第一句就返回，不碰热循环）。
-	#    相机被拖动 / 体素尺寸被改时要重画取景框，否则框会停在旧位置。
+	#    相机被拖动/旋转/缩放、换相机、改体素尺寸时要重画取景框。
 	if not Engine.is_editor_hint():
 		return
-	var cam := _preview_camera()
-	var key := Vector3(cam.global_position.x, cam.global_position.y, PixelScale.get_scale()) if cam != null else Vector3.ZERO
+	var key := preview_key()
 	if key != _preview_cache:
 		_preview_cache = key
 		queue_redraw()
@@ -186,6 +199,9 @@ func _ready() -> void:
 	PixelScale.set_scale(voxel_size)
 	rebuild()
 	_apply_voxel_size()
+	# ⚠️ 显式打开：编辑器里要靠它跟踪相机的变化来重画取景框。
+	set_process(true)
+	queue_redraw()
 	if Engine.is_editor_hint():
 		return
 	set_physics_process(true)

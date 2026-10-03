@@ -267,5 +267,32 @@ func _initialize() -> void:
 		"%.1f" % gw.game_view_size().y)
 	gw.voxel_size = 3.0
 
+	# ---- 取景框的"指纹"：相机的任何操作都要能让它重绘 ----
+	#
+	# ⚠️ 第一版只比了相机 position —— 编辑器里旋转相机、改 zoom、改 offset、换相机
+	#    都不改 position，框就停在原地不跟（甲方："青色面板应该在操作摄像机等时重绘"）。
+	print("=== 取景框跟随相机 ===")
+	var cw := PixelWorld.new()
+	root.add_child(cw)
+	var cam := Camera2D.new()
+	cam.name = "PreviewCam"
+	cw.add_child(cam)
+	var k0 := cw.preview_key()
+	cam.position = Vector2(10, 20)
+	_c("移动相机 -> 指纹变", cw.preview_key() != k0)
+	var k1 := cw.preview_key()
+	cam.rotation = 0.5
+	_c("旋转相机 -> 指纹变", cw.preview_key() != k1)
+	var k2 := cw.preview_key()
+	cam.zoom = Vector2(2, 2)
+	_c("改 zoom -> 指纹变", cw.preview_key() != k2)
+	var k3 := cw.preview_key()
+	cam.offset = Vector2(5, 5)
+	_c("改 offset -> 指纹变", cw.preview_key() != k3)
+	var k4 := cw.preview_key()
+	cw.voxel_size = 8.0
+	_c("改体素尺寸 -> 指纹变", cw.preview_key() != k4)
+	cw.voxel_size = 3.0
+
 	print("=== %d passed, %d failed ===" % [_pass, _fail])
 	quit(0 if _fail == 0 else 1)
