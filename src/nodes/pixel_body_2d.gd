@@ -46,6 +46,29 @@ func _enter_tree() -> void:
 var _last_scale := Vector2.ONE
 
 
+## 节点被删掉（编辑器里 Delete / 剪切）时，把它从**活着的世界**里摘掉。
+##
+## ⚠️ 这里曾经是空的：PixelWorld 早就有增量的 add_body_node()/remove_body_node()，
+##    但**没人调**（只有测试调）。症状：编辑器里删掉一个刚体节点，它的像素和碰撞
+##    还留在世界里继续挡路、继续画，直到下一次 rebuild() 才消失 ——
+##    而 rebuild() 会丢掉所有破坏状态，所以不能拿它兜底。
+##
+## ⚠️ 只在编辑器里做：运行时删节点是玩法（比如把碎块回收）自己的事，
+##    该走 world.remove_body() / 门面 API，不该由节点生命周期隐式决定。
+func _exit_tree() -> void:
+	if not Engine.is_editor_hint():
+		return
+	detach_from_world()
+
+
+## 把本节点从世界里摘掉（增量）。编辑器删节点走 _exit_tree，测试直接调这里。
+func detach_from_world() -> bool:
+	var pw := get_parent()
+	if pw != null and pw.has_method("remove_body_node"):
+		return pw.remove_body_node(self)
+	return false
+
+
 func _notification(what: int) -> void:
 	# 编辑器里拖动/旋转本节点时，立刻让父世界重烘焙 ——
 	# 否则画面上的像素和碰撞形状停在旧位置，看起来像"拖不动"。

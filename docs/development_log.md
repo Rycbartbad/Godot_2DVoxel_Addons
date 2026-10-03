@@ -3735,3 +3735,44 @@ return _substeps_held
 - `test_physics` 32 项：新增"拖动时子步数只涨不落"（回落 0 次，峰值 6 子步）；
 - `tests/diag_substeps.gd`：量子步数分布的尺子（修前/修后的数字都在文件头）；
 - `dump_state` 8 条基准逐位不变。
+
+---
+
+# 编辑器里删掉刚体节点：增量摘除从来没接线
+
+## 甲方问的
+
+> "gui 里删除和拖动触发重绘是否实现"
+
+## 查下来的结果
+
+| 操作 | 触发重绘 | 说明 |
+|---|---|---|
+| 运行时擦除像素（右键） | **是** | `game.gd:_erase()` -> `PixelEditor.erase()` -> `world.fracture()`，
+|  |  | 然后**显式** `renderer.sync(原体)` + 每个碎片 |
+| 编辑器拖动节点 | **是** | `TRANSFORM_CHANGED` -> `PixelWorld.on_child_transformed()`（防抖）
+|  |  | -> 只同步位姿 + `renderer.sync()`，**不重烘焙**（那条路 50~70 ms/次，拖动会卡死）|
+| 编辑器改缩放 | **是** | 缩放会改变生成的像素 -> 走完整重烘焙（`on_child_moved`）|
+| 运行时拖动（Ctrl+左键） | **是** | 物理层抓取 -> `_physics_process` 每帧同步所有动态体 |
+| **编辑器删掉刚体节点** | **否**（本次修） | `add_body_node()`/`remove_body_node()` 早就写好了，**但没人调** |
+
+## 症状（删除那条）
+
+编辑器里删掉一个 `PixelBody2D`，它的像素和碰撞**还留在世界里**继续挡路、继续画 ——
+直到下一次 `rebuild()` 才消失。而 `rebuild()` 会丢掉所有破坏状态（碎块、擦除），
+所以不能拿它兜底。
+
+## 修法
+
+`PixelBody2D._exit_tree()` -> `detach_from_world()` -> `PixelWorld.remove_body_node()`
+（增量：`world.remove_body()` + `renderer.prune(_live_ids())`，不重建）。
+
+- 只在**编辑器**里自动做（`Engine.is_editor_hint()`）：运行时删节点是玩法自己的事，
+  该走 `world.remove_body()` / 门面 API，不该由节点生命周期隐式决定；
+- `_body_nodes` 与 `world.bodies` 的"下标一一对应"不变量由 `remove_body_node` 维持。
+
+## 测试
+
+`validation_nodes` 23 项（新增 5 条）：add_body_node 进世界、detach 摘掉、
+世界少一个刚体（4 -> 3）、`_body_nodes` 与 `bodies` 仍一一对应、
+运行时 `free()` 节点**不**隐式摘刚体（把"故意不做"也钉住）。

@@ -169,5 +169,35 @@ func _initialize() -> void:
 	_c("没有 DebugOverlay（纯代码建）-> 不画", not lone.debug_visible_now())
 	lone.free()
 
+	# ---- 删除刚体节点：编辑器里删掉就该从世界摘掉 ----
+	#
+	# ⚠️ 这里曾经是空的：PixelWorld 早就有增量的 add_body_node()/remove_body_node()，
+	#    但**没人调**（只有测试调）。症状：编辑器里删掉一个刚体节点，它的像素和碰撞
+	#    还留在世界里继续挡路、继续画，直到下一次 rebuild() 才消失 ——
+	#    而 rebuild() 会丢掉所有破坏状态，所以不能拿它兜底。
+	print("=== 删除刚体节点 ===")
+	var dn := PixelBody2D.new()
+	dn.name = "DN"
+	dn.position = Vector2(400, 40)
+	dn.rect_size = Vector2i(8, 8)
+	pw.add_child(dn)
+	var dn_body = pw.add_body_node(dn)
+	_c("add_body_node 把刚体加进世界", dn_body != null and pw.world.bodies.has(dn_body))
+	var cnt: int = pw.world.bodies.size()
+	_c("detach_from_world 摘掉刚体", dn.detach_from_world())
+	_c("世界少了一个刚体", pw.world.bodies.size() == cnt - 1, "%d -> %d" % [cnt, pw.world.bodies.size()])
+	_c("_body_nodes 与 bodies 仍然一一对应", pw._body_nodes.size() == pw.world.bodies.size(),
+		"%d vs %d" % [pw._body_nodes.size(), pw.world.bodies.size()])
+	# 运行时 free 节点**不**隐式摘刚体：那是玩法的事（回收碎块走 world.remove_body）。
+	var rn := PixelBody2D.new()
+	rn.position = Vector2(420, 40)
+	rn.rect_size = Vector2i(8, 8)
+	pw.add_child(rn)
+	pw.add_body_node(rn)
+	var cnt2: int = pw.world.bodies.size()
+	rn.free()
+	_c("运行时 free 节点不隐式摘刚体", pw.world.bodies.size() == cnt2,
+		"bodies=%d（应当仍是 %d）" % [pw.world.bodies.size(), cnt2])
+
 	print("=== %d passed, %d failed ===" % [_pass, _fail])
 	quit(0 if _fail == 0 else 1)
