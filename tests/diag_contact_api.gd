@@ -33,8 +33,8 @@ func _initialize() -> void:
 		print("  pos=(%.2f,%.2f) dist=%.3f 冲量=%.4f fid=(%d,%d)" % [
 			p["position"].x, p["position"].y, p["dist"], p["impulse"], p["fid1"], p["fid2"]])
 	print("各点冲量之和 = %.4f" % s)
-	var g: Dictionary = w.contact_geometry(0)
-	print("contact_geometry(0)：宽度=%.3f 深度=%.4f 面积=%.4f 总冲量=%.4f" % [
-		g["width"], g["depth"], g["area"], g["total_impulse"]])
+	var g: Dictionary = w.contact_info(0)
+	print("contact_info(0)：点数=%d 总冲量=%.4f id=(%d,%d)" % [
+		(g["points"] as Array).size(), g["total_impulse"], g["id_a"], g["id_b"]])
 	print("  => 各点冲量之和 / 总冲量 = %.4f（共同分配预算的份额之和）" % (s / maxf(g["total_impulse"], 1e-9)))
 	quit(0)

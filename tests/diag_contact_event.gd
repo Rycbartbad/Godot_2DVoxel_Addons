@@ -30,7 +30,7 @@ func _initialize() -> void:
 				print("第 %d 帧：Contact.points = %d 个" % [i, c.points.size()])
 				for p in c.points:
 					print("    pos=(%.2f,%.2f) dist=%.3f 冲量=%.4f" % [p["position"].x, p["position"].y, p["dist"], p["impulse"]])
-				print("  impulse=%.4f total_impulse=%.4f width=%.3f depth=%.4f area=%.4f approach=%.3f" % [
-					c.impulse, c.total_impulse, c.width, c.depth, c.area, c.approach])
+				print("  impulse=%.4f total_impulse=%.4f approach=%.3f" % [
+					c.impulse, c.total_impulse, c.approach])
 	print("最大点数 = %d" % best)
 	quit(0)

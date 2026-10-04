@@ -1107,50 +1107,31 @@ func _contact_fetch(idx: int) -> Dictionary:
 	}
 
 
-## 第 idx 个接触对的**几何摘要** —— 宽度 / 穿透深度 / "相互进入的面积"估计。
+## 第 idx 个接触对的**配对级**信息：全部接触点 + 整对总冲量 + 两个刚体 id。
 ##
-## ⚠️⚠️ 用户三条要求里最容易混的一条：**接触宽度 ≠ 相互进入的面积**。
-##   · 接触宽度 = 接触段两端点的距离（2D 里是一条**线**的长度）；
-##   · 相互进入的面积 = 两者真正重叠的**面积**。
-##   宽面**浅**碰 -> 宽度很大、面积很小；角部**深**插 -> 宽度很小、面积可能不小。
-##   我上一次就把宽度当面积答了 —— 是错的。
-##
-## 面积是**估计**：area ≈ 宽度 × 最大穿透深度（把接触带当成矩形）。
-## 精确值要两个 OBB 的相交多边形（拿 collide.gd 那套裁剪多裁 4 次），
-## ⚠️ 但只能对**已经成接触**的那几百对算，绝不能对每对都算。
-##
-## ⚠️ depth = max(0, -dist) 的最大值：推测接触（dist > 0）深度为 **0** ——
-##    它还没碰上，只是被拦住。**伤害判据看这个，才不会"擦身而过也打洞"。**
-## ⚠️ total_impulse 是"这次碰撞的预算"：多个入口要**共同分配**它（每个入口按自己的
-##    impulse 占比领），而不是各自领走一整份。
-func contact_geometry(idx: int) -> Dictionary:
+## ⚠️⚠️ 这里**故意不给面积**（用户的决定）。原因记在这里，免得以后有人再加回来：
+##   · "带宽面积"（宽度 x 平均深度）在**角接触上是结构性错的** —— 窄相只给 1 个点，
+##     宽度就是 0，面积算成 0，而真实重叠是一个非零的小三角形。**静默的错值最坏**。
+##   · 真正想要的"相互进入的面积" = 两个 OBB 相交多边形的面积。要它必须先知道
+##     **是哪两个矩形在相交** —— 而接触导出里不带矩形身份：实测
+##     （tests/diag_fid_rect.gd）同一个方块砸在同一个两矩形刚体的左半与右半，
+##     feature id **完全相同** -> fid 只是面/顶点级特征，不含子形状索引。
+##   · 要做精确面积得先补 local_p1/local_p2（接触点在各自碰撞体局部坐标）、
+##     再在 rect 列表里反查矩形、然后做多边形裁剪 —— 那是另一件事，当前不需要。
+##   · **各点冲量已经够用**：份额 = |impulse_i| / total_impulse，实测份额之和 = 1。
+func contact_info(idx: int) -> Dictionary:
 	var r := _contact_fetch(idx)
-	var pts: Array = r.get("points", [])
-	if pts.is_empty():
-		return {"points": [], "total_impulse": 0.0, "width": 0.0, "depth": 0.0, "area": 0.0}
-	var width := 0.0
-	var depth := 0.0
-	var depth_sum := 0.0
-	for i in pts.size():
-		var p: Dictionary = pts[i]
-		var d := maxf(0.0, -float(p["dist"]))
-		depth = maxf(depth, d)
-		depth_sum += d
-		for j in range(i + 1, pts.size()):
-			width = maxf(width, (p["position"] - (pts[j] as Dictionary)["position"]).length())
 	return {
-		"points": pts,
+		"points": r.get("points", []),
 		"total_impulse": float(r.get("total_impulse", 0.0)),
 		"id_a": int(r.get("id_a", 0)),
 		"id_b": int(r.get("id_b", 0)),
-		"width": width,
-		"depth": depth,
-		# ⚠️ 面积 = 宽度 × **两端深度的平均**（梯形），比"宽度 × 最大深度"更接近真实的
-		#    相互进入面积。⚠️ 精确值要两个 OBB 的相交多边形 —— 但导出里**不带矩形身份**
-		#    （collider 是整个刚体的矩形集），拿不到"是哪两个矩形在相交"，所以梯形是
-		#    当前能给出的最好估计。要做到精确，得让接触导出带上"命中的那两个矩形"。
-		"area": width * (depth_sum / float(pts.size())),
 	}
+
+
+## ⚠️ 已删除：contact_geometry（宽度/深度/面积）—— 见 contact_info 的墓碑说明。
+##    一句话：带宽面积在角接触上是**结构性错的**（1 个点 -> 宽度 0 -> 面积 0），
+##    而精确的相互进入面积需要"是哪两个矩形"，当前导出不带这个身份。
 
 
 ## 本步的接触对数量（只数有流形点的）。
@@ -1181,7 +1162,7 @@ func _collect_contacts_rapier() -> void:
 		#    整对总冲量），于是 Contact 带上完整的接触面。
 		# ⚠️ op 12 已删除（它在本项目里静默返回全 0，留着只会误导）。
 		for i in n:
-			var g := contact_geometry(i)
+			var g := contact_info(i)
 			var pts: Array = g["points"]
 			if pts.is_empty():
 				continue
@@ -1191,7 +1172,7 @@ func _collect_contacts_rapier() -> void:
 				continue
 			var p0: Dictionary = pts[0]
 			_contact_add_rapier(a, b, p0["position"], p0["normal"],
-				float(g["total_impulse"]), pts, g)
+				float(g["total_impulse"]), pts)
 			var ka := a.id
 			var kb := b.id
 			seen[(ka << 32) | (kb & 0xFFFFFFFF) if ka < kb else (kb << 32) | (ka & 0xFFFFFFFF)] = true
@@ -1199,7 +1180,7 @@ func _collect_contacts_rapier() -> void:
 
 
 func _contact_add_rapier(a: PBody, b: PBody, point: Vector2, normal: Vector2, impulse: float,
-		pts: Array = [], geo: Dictionary = {}) -> void:
+		pts: Array = []) -> void:
 	if contacts.size() >= max_contacts:
 		return
 	var c := Contact.new()
@@ -1218,9 +1199,6 @@ func _contact_add_rapier(a: PBody, b: PBody, point: Vector2, normal: Vector2, im
 	#    8 条逐位基准立刻就不再成立。这里只是把数据摆出来给游戏层用。
 	c.points = pts
 	c.total_impulse = impulse
-	c.width = float(geo.get("width", 0.0))
-	c.depth = float(geo.get("depth", 0.0))
-	c.area = float(geo.get("area", 0.0))
 	var ka := a.id
 	var kb := b.id
 	var key := (ka << 32) | (kb & 0xFFFFFFFF) if ka < kb else (kb << 32) | (ka & 0xFFFFFFFF)
@@ -1409,11 +1387,8 @@ class Contact:
 	## 整对的总冲量 —— 这次碰撞的**预算**。多个入口要**共同分配**它
 	## （每个入口按自己的 impulse 占比领，份额之和 = 1），而不是各自领走一整份。
 	var total_impulse := 0.0
-	## 接触宽度（接触段两端点距离，2D 里是一条**线**）/ 最大穿透深度 / 相互进入的**面积**估计。
-	## ⚠️ 宽度 != 面积：宽面浅碰 -> 宽度大、面积小；角部深插 -> 宽度小、面积可能不小。
-	var width := 0.0
-	var depth := 0.0
-	var area := 0.0
+	# ⚠️ 这里曾经有 width / depth / area（接触带几何）。已删除 —— 见 contact_info 的墓碑：
+	#    带宽面积在角接触上是结构性错的，精确面积又需要"是哪两个矩形"（当前导出不带）。
 	## 这一步才接触上（上一步不在这对里）。做"首次撞击"触发用。
 	var is_new := false
 
