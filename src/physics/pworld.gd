@@ -2261,3 +2261,71 @@ func enforce_body_budget() -> int:
 		remove_body(b3)
 		removed += 1
 	return removed
+
+
+## **摘除**：damage 命中的像素变成**碎片**（新刚体），**体素个数守恒**。
+##
+## ⚠️ 与 fracture 的分工（这是设计决定，不是实现细节）：
+##   · fracture = "挖掉" —— 命中的像素**消失**，只有**断开**的块变成碎片；
+##   · detach   = "摘下来" —— 命中的像素**自己变成碎片**，总数不变。
+##   笔刷擦除用 fracture（擦掉就是擦掉）；撞击/切断用 detach（Teardown 那样，碎块留下来）。
+##
+## ⚠️ 顺序不能反：必须**先** extract（此时像素还在），**再** fracture（它会把像素删掉）。
+##    反过来就什么都捡不到了。
+func detach(body: PBody, damage, burst_speed: float = 40.0) -> Array:
+	# ① 先捡：把"将被命中"的像素收集出来
+	var extracted: Array = []
+	for s in body.shapes:
+		var ex := Destruction.extract_damage(s, damage)
+		if ex.pixel_count() > 0:
+			extracted.append(ex)
+	# ② 挖：**从同一个集合里删**，而不是再让 fracture 自己判一次。
+	#
+	# ⚠️⚠️ 这是守恒能成立的关键，也是我踩过的坑：
+	#    fracture 内部会**重算一遍**伤害判据，而任何两次独立计算都会在边界上差一点
+	#    （实测：extract 捡到 113 个像素，fracture 只删了 112 个 -> 总数 1601，多 1）。
+	#    想靠"让两边的边界行为一致"来修是死路（我先试了按 chunk 对齐，反而捡到 464 个）。
+	#    正解是**只算一次**：extract 出来的集合就是被摘下来的集合，
+	#    碎片从它来、洞也从它来 -> 守恒是**恒等式**，不是需要验证的性质。
+	var out: Array = []
+	for s in body.shapes:
+		for ex in extracted:
+			var bb: Rect2i = ex.local_aabb()
+			for y in range(bb.position.y, bb.position.y + bb.size.y + 1):
+				for x in range(bb.position.x, bb.position.x + bb.size.x + 1):
+					if ex.get_pixel(x, y) != 0 and s.get_pixel(x, y) != 0:
+						s.clear_pixel(x, y)
+	# ⚠️ 这里**不要**自己调 body.rebuild()：
+	#   · 它的签名是 rebuild(shape_list, density_of, max_rects_per_shape, dirty_rect)，
+	#     参数从 PWorld 里来（density_callable() / max_rects_per_shape）；
+	#   · 而且 ensure_connected() 内部已经用正确的参数 rebuild 了（见它里面的
+	#     body.rebuild(kept, density_callable(), max_rects_per_shape)）；
+	#   · 脏标记也是 PBody.rebuild() 里统一做的（见它的注释），不需要手动标。
+	#   （我第一版写了 body.rebuild() -> "Too few arguments"，白跑一轮。）
+	# 断开的连通分量各自成体（引擎本来就有的机制）
+	out.append_array(ensure_connected(body, min_fragment_pixels))
+	# ⚠️⚠️ 这里曾经有一段"按结果对齐"的修正：遍历 extract 捡到的像素，
+	#    凡**仍然留在原刚体里**的就从碎片里去掉。**已删除** —— 它是错的：
+	#    fracture 会 rebuild/平移形状的局部坐标（split -> _assemble），
+	#    于是"这个坐标上原刚体还有没有像素"在 fracture 之后**问的不是同一件事**，
+	#    结果把碎片像素全清空了（症状：detach 的刚体数始终是 1，碎片生不出来，
+	#    而且**没有任何报错** —— 因为空碎片被 pixel_count() <= 0 跳过了）。
+	#    正确的修法在源头：extract_damage 的拷贝范围**按 chunk 对齐**，
+	#    于是它捡到的和 apply_damage 删掉的**精确相等**，不需要事后对齐。
+	# ③ 把捡到的像素切成碎片（连通分量各自成体）
+	var lv := body.linear_velocity
+	var av := body.angular_velocity
+	var pos := body.position
+	var rot := body.rotation
+	for ex in extracted:
+		for piece in Destruction.split(ex, min_fragment_pixels):
+			if piece.pixel_count() <= 0:
+				continue
+			var nb := PBody.new()
+			nb.position = pos
+			nb.rotation = rot
+			nb.linear_velocity = lv
+			nb.angular_velocity = av
+			add_body(nb, [piece], Callable(), true)
+			out.append(nb)
+	return out

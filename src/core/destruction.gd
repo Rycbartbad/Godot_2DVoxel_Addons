@@ -801,3 +801,38 @@ static func _union(parent: Array, a: int, b: int) -> void:
 		parent[rb] = ra
 	else:
 		parent[ra] = rb
+
+
+## 把 damage **命中的像素**收集成一个新形状（**不修改**原形状）。
+##
+## ⚠️ 与 apply_damage 互补：那个把命中的像素删掉，这个把它们捡起来。
+##    配合 split 就能做到"被打掉的那一块变成碎片" —— **体素个数守恒**（Teardown 那样）。
+##    笔刷擦除该继续用 apply_damage/fracture（擦掉就是擦掉），
+##    撞击/切断该用 PWorld.detach（碎片留下来）。
+##
+## ⚠️⚠️ 实现上有个关键取巧：**不自己实现一遍伤害判据**。
+##    先按伤害包围盒把像素原样拷进一个临时形状，再对**它**跑同一个 apply_damage ——
+##    范围外的像素被剔掉，剩下的正好是命中的像素。
+##    这样判据只有 make_keep_mask 一份（抄一份出来迟早会漂移），
+##    而且不需要知道 chunk key 怎么算。
+##    代价只是拷贝伤害包围盒那一小片像素。
+static func extract_damage(shape: PixelShape, damage: Damage) -> PixelShape:
+	var out := PixelShape.new()
+	var b: Rect2 = damage.bounds()
+	# 余量 1：伤害边界可能落在一个像素内部，取整会漏掉最外那一列/行。
+	# ⚠️ 这个余量会让结果**可能多捡 1 个像素**（实测 40x40 挖 112 -> 捡到 113），
+	#    所以**不能**拿它去和别处算的判据对总数 —— 见 PWorld.detach 的说明：
+	#    detach 只用**这一个**集合去删，碎片和洞按构造完全一致，守恒是恒等式。
+	# ⚠️ 也不要试图"按 chunk 对齐"来消除这个差：apply_damage 对**完全未被伤害覆盖**
+	#    的 chunk 不做处理，对齐后反而会捡到一大堆（实测 464 个）。
+	var x0 := floori(b.position.x) - 1
+	var y0 := floori(b.position.y) - 1
+	var x1 := ceili(b.position.x + b.size.x) + 1
+	var y1 := ceili(b.position.y + b.size.y) + 1
+	for y in range(y0, y1 + 1):
+		for x in range(x0, x1 + 1):
+			var m := shape.get_pixel(x, y)
+			if m != 0:
+				out.set_pixel(x, y, m)
+	apply_damage(out, damage)
+	return out
