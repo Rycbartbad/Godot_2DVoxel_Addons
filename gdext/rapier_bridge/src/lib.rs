@@ -432,7 +432,25 @@ pub extern "C" fn rb_contact_get(w: *mut World, i: i32, out: *mut f64) -> i32 {
 /// id_a, id_b, n_points, total_impulse，然后每个点 nx, ny, px, py, dist, impulse。
 /// 返回**点个数**；cap 不够时只返回个数、不写数据，调用方扩容后重来。
 ///
-/// ⚠️⚠️ 为什么必须导出**全部**点：一次物理更新里，整个面可以同时存在多个接触点
+/// ⚠️⚠️⚠️ **这条路径在本项目里是死的，别指望它** —— 2026-10 实测
+/// （tests/diag_contact_points2.gd）：方块平放在地面上**确实停住**了
+/// （底面 100.008 vs 地面顶 100，正好是 penetration_slop），但每一帧接触对都是 0。
+///
+/// 真因：判据 `has_any_active_contact()` 查的是 Rapier 的 **solver_manifolds**
+/// （源码：`self.solver_manifolds().iter().any(|m| !m.data.solver_contacts.is_empty())`），
+/// 而本项目默认走**自己的**宽相与求解器（use_native_solve/use_native_broadphase ->
+/// _packed_manifolds），**Rapier 的求解器根本不跑** -> solver_manifolds 永远为空。
+/// 于是 op 11 / op 12 / 这条 op 35 都拿不到任何东西，**而且不报任何错**。
+/// （项目自己的墓碑 pworld.gd:1366 已经记着半句："冲量留在 C++ 里且**不回写**"。）
+///
+/// 要拿到"全部接触点 + 各自冲量"，正确的数据源是**项目自己的流形**：
+/// _broadphase_native 的打包数据（C++ 侧）/ GDScript 的 manifolds 对象数组。
+/// 冲量也在那边 —— 要补的是**把每个点的冲量回写出来**，不是再从 Rapier 里读一遍。
+///
+/// ⚠️ 下面这段代码本身是对的（遍历所有流形 × 所有点、取每点自己的冲量），
+///    只是**数据源是空的**。等数据源换到项目自己的流形上，这段逻辑可以复用。
+///
+/// ⚠️ 为什么必须导出**全部**点：一次物理更新里，整个面可以同时存在多个接触点
 /// （面-面接触通常 2 个，见 Rapier 的流形），引擎内部本来就是按多点求解的。
 /// 旧接口 rb_contact_get 只取 `manifolds().first()` 的 `points.first()` 作**位置**，
 /// 却用 `pair.total_impulse()` 作**冲量** —— 整个面受到的冲量被附在一个代表点上返回了。
