@@ -17,6 +17,7 @@ script = ExtResource("1_game")
 
 [node name="Camera2D" type="Camera2D" parent="." unique_id=1548728324]
 position = Vector2(368, 157)
+zoom = Vector2(0.011111111, 0.011111111)
 
 [node name="PixelWorld" type="Node2D" parent="." unique_id=1043475145]
 script = ExtResource("2_world")
