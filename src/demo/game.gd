@@ -47,6 +47,21 @@ var paused := false
 var brush_radius := 6.0
 var material_id := 1
 
+## ---- 撞击伤害（**游戏规则**，不是引擎规则）----
+##
+## ⚠️ 引擎只把"这一步发生了哪些接触、撞得多猛、接触面多宽、相互进入多深"摆出来
+##    （`world.contacts` / `Contact.points` / `total_impulse`）；
+##    "多猛算高速""要不要打洞"是**游戏规则**，在这里决定。
+##
+## ⚠️⚠️ 多入口共享预算：一次碰撞可能有**多个**接触点（面-面通常 2 个），而整对的冲量是
+##    **一个预算** —— 必须走 `Destruction.contact_entries` 按份额分配（面积按 sqrt(份额)），
+##    否则每个点都用同一半径 = 总损伤面积是单点的 N 倍 = 预算被重复领取。
+@export var impact_damage := false
+## 应力门槛（冲量 / 接触宽度，像素量纲）。低于它的接触不打洞。
+@export var impact_stress_threshold := 30.0
+## 单次撞击在接触点上的基础半径（实际半径按份额开根缩放）。
+@export var impact_radius := 6.0
+
 var _canvas_tiles := {}       # Vector2i -> PBody（静态画布瓦片）
 var _stroke_body: PBody = null  # Shift 绘制时本次笔画归属的动态体
 var _lmb := false
@@ -189,6 +204,8 @@ func _process(delta: float) -> void:
 		_last_erase = mouse
 	if world.is_grabbing():
 		world.set_grab_target(mouse)
+	if impact_damage:
+		_apply_impact_damage()
 
 	# ⚠️ 这里**不能**再推进物理 —— 世界已经由 PixelWorld 节点在 _physics_process
 	#    里按 fixed_dt 推进了（auto_step 默认 true）。
@@ -444,6 +461,39 @@ func _set_voxel_scale(v: float) -> void:
 
 
 # ---------------------------------------------------------------- 擦除
+
+## 撞击伤害：把这一步的接触事件变成损伤（**游戏规则**）。
+##
+## ⚠️ 只在 `is_new` 上触发：同一个配对在一步里可能被多个子步各记一次，
+##    不判 is_new 的话一次撞击会被打洞 N 次（子步越多打得越狠）。
+##
+## ⚠️ 应力用 `impulse / contact_width` 现算（就是引擎的破坏判据同量纲的那个量），
+##    不假设 `Contact` 上有现成的 stress 字段。
+func _apply_impact_damage() -> void:
+	# ⚠️ 接触事件默认关闭（开了就有每步构造对象的开销），要用才开。
+	if not world.contact_events_enabled:
+		world.contact_events_enabled = true
+	for c in world.contacts:
+		if not c.is_new:
+			continue
+		# ⚠️ 必须显式标注类型：world.contacts 是无类型 Array，c 是 Variant，
+		#    除法结果没有确定类型，用 := 会报 "Cannot infer the type of stress"。
+		var stress: float = c.impulse / maxf(c.contact_width, 0.001)
+		if stress < impact_stress_threshold:
+			continue
+		# ⚠️ 多个接触点 -> 多个损伤入口，**共同分配**这次碰撞的预算
+		for e in Destruction.contact_entries(c.points, c.total_impulse, impact_radius):
+			# ⚠️ 推测接触（dist > 0：还没碰上、只是被拦住）不打洞 —— 否则擦身而过也打洞
+			if not e["penetrating"]:
+				continue
+			for body in [c.a, c.b]:
+				if body == null or body.shapes.is_empty():
+					continue
+				var dmg = Destruction.Damage.circle(body.to_local(e["point"]), e["radius"])
+				for frag in world.fracture(body, dmg):
+					renderer.sync(frag)
+				renderer.sync(body)
+
 
 func _erase(from: Vector2, to: Vector2) -> void:
 	for r in Editor.erase(world, from, to, brush_radius, ERASE_BURST):

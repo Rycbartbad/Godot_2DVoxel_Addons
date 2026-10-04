@@ -1073,7 +1073,8 @@ func _contact_fetch(idx: int) -> Dictionary:
 	if np <= 0:
 		return {"ok": false}
 	# 第二次：取全部
-	var cap := 4 + np * 6
+	# 每点 8 个 f64：nx, ny, px, py, dist, impulse, fid1, fid2
+	var cap := 4 + np * 8
 	var cmds := PackedByteArray()
 	_rp_u8(cmds, 35)
 	_rp_u32(cmds, idx)
@@ -1084,12 +1085,17 @@ func _contact_fetch(idx: int) -> Dictionary:
 	var out: Array = []
 	for i in np:
 		# 跳过 res 头(4) + payload 头(i32 n + id_a,id_b,n_points,total 共 4 个 f64 = 36 字节)
-		var o := 40 + i * 48
+		# 每点 8 个 f64 = 64 字节（stride 从 48 改成 64 是因为加了 fid1/fid2）
+		var o := 40 + i * 64
 		out.append({
 			"normal": Vector2(res.decode_double(o), res.decode_double(o + 8)),
 			"position": Vector2(res.decode_double(o + 16), res.decode_double(o + 24)),
 			"dist": res.decode_double(o + 32),
 			"impulse": res.decode_double(o + 40),
+			# 接触特征 id（跨帧稳定）：(fid1, fid2) 合起来标识"同一个接触特征"。
+			# warm start 靠它，多点伤害也靠它避免"同一特征跨帧被重复领取预算"。
+			"fid1": int(res.decode_double(o + 48)),
+			"fid2": int(res.decode_double(o + 56)),
 		})
 	# ⚠️ total_impulse 在 payload 的最后一个 f64：res 头(4) + i32 n(4) + id_a,id_b,n_points(24)
 	return {
@@ -1124,9 +1130,12 @@ func contact_geometry(idx: int) -> Dictionary:
 		return {"points": [], "total_impulse": 0.0, "width": 0.0, "depth": 0.0, "area": 0.0}
 	var width := 0.0
 	var depth := 0.0
+	var depth_sum := 0.0
 	for i in pts.size():
 		var p: Dictionary = pts[i]
-		depth = maxf(depth, maxf(0.0, -float(p["dist"])))
+		var d := maxf(0.0, -float(p["dist"]))
+		depth = maxf(depth, d)
+		depth_sum += d
 		for j in range(i + 1, pts.size()):
 			width = maxf(width, (p["position"] - (pts[j] as Dictionary)["position"]).length())
 	return {
@@ -1136,7 +1145,11 @@ func contact_geometry(idx: int) -> Dictionary:
 		"id_b": int(r.get("id_b", 0)),
 		"width": width,
 		"depth": depth,
-		"area": width * depth,
+		# ⚠️ 面积 = 宽度 × **两端深度的平均**（梯形），比"宽度 × 最大深度"更接近真实的
+		#    相互进入面积。⚠️ 精确值要两个 OBB 的相交多边形 —— 但导出里**不带矩形身份**
+		#    （collider 是整个刚体的矩形集），拿不到"是哪两个矩形在相交"，所以梯形是
+		#    当前能给出的最好估计。要做到精确，得让接触导出带上"命中的那两个矩形"。
+		"area": width * (depth_sum / float(pts.size())),
 	}
 
 

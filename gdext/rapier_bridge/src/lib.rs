@@ -441,7 +441,7 @@ pub extern "C" fn rb_contact_get_points(w: *mut World, i: i32, out: *mut f64, ca
         for m in pair.manifolds() {
             n += m.points.len() as i32;
         }
-        if cap < 4 + n * 6 {
+        if cap < 4 + n * 8 {
             return n; // 让调用方扩容后重来
         }
         unsafe {
@@ -465,8 +465,13 @@ pub extern "C" fn rb_contact_get_points(w: *mut World, i: i32, out: *mut f64, ca
                     //    几何（local_p1/dist）在包装上，**冲量在内层的 data 里**。
                     //    写 pt.impulse 编译不过（no field impulse on TrackedContact）。
                     *out.add(o + 5) = pt.data.impulse as f64;
+                    // 接触特征 id（parry 的 PackedFeatureId -> u32）：
+                    // 这两个合起来标识"同一个接触特征"，跨帧稳定 —— warm start 靠它，
+                    // 多点伤害也靠它避免"同一特征被重复领取预算"。
+                    *out.add(o + 6) = pt.fid1.0 as f64;
+                    *out.add(o + 7) = pt.fid2.0 as f64;
                 }
-                o += 6;
+                o += 8;
             }
         }
         return n;
