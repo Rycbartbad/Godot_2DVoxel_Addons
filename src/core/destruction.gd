@@ -269,7 +269,14 @@ static func split(shape: PixelShape, min_pixels: int = 1) -> Array:
 const LOCAL_UNKNOWN := -1
 const LOCAL_DROPPED := 0
 const LOCAL_CONNECTED := 1
-const LOCAL_MAX_PROBE := 1024      # 探测框像素上限；再大就退回全量（全量 7.8 ms 更快）
+## 探测框像素上限。
+##
+## ⚠️ 这是**代价交叉点**，不是随手取的数：局部判据约 1.5 us/像素（探测框逐像素取占用 +
+##    框内泛洪），而它要替代的全量连通分量标注在 768x100 上是 **13.5 ms** —— 交叉点约
+##    9000 像素。原来取 1024 太小：一笔 90px 的 segment 探测框就有 1456 像素，
+##    于是**长笔画全部退回全量**（实测贴边界拖一笔 15.7 ms，而单点小洞只要 7.3 ms，
+##    差的正是这一趟）。取 4096 让长笔画也走快路径，同时保证最坏情况仍比全量便宜。
+const LOCAL_MAX_PROBE := 4096
 
 static func local_connectivity(shape: PixelShape, box: Rect2i, min_pixels: int) -> int:
 	var grow := Rect2i(box.position - Vector2i(1, 1), box.size + Vector2i(2, 2))
