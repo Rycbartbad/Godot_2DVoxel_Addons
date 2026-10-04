@@ -58,15 +58,9 @@ func _initialize() -> void:
 	if best <= 0:
 		quit(0)
 		return
-	# 旧接口：一个代表点 + 整对总冲量
-	var c12 := PackedByteArray()
-	c12.resize(5)
-	c12.encode_u8(0, 12)
-	c12.encode_u32(1, 0)
-	var r12 := _send(rp, c12, 4 + 8 * 8)
-	print("op 12（旧）：ok=%d id_a=%.0f id_b=%.0f 法向=(%.2f,%.2f) 点=(%.2f,%.2f) dist=%.3f 总冲量=%.4f" % [
-		r12.decode_s32(4), r12.decode_double(8), r12.decode_double(16), r12.decode_double(24),
-		r12.decode_double(32), r12.decode_double(40), r12.decode_double(48), r12.decode_double(56), r12.decode_double(64)])
+	# ⚠️ op 12（旧接口：一个代表点 + 整对总冲量）**已删除** —— 它在本项目里静默返回全 0，
+	#    而且"整个面的冲量附在一个代表点上"正是要修的缺陷。这里不再测它。
+	#    （本探针最早的那一版测过它，输出全是 0，那份记录在提交信息里。）
 	# 新接口：全部点 + 各自冲量
 	var c35 := PackedByteArray()
 	c35.resize(9)
