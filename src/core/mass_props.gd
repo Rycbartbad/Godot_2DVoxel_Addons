@@ -61,7 +61,73 @@ static func compute(shape: PixelShape, density_of: Callable = Callable(),
 		var c: PixelChunk = shape.chunks[k]
 		var bx := PixelShape.key_x(k) << 3
 		var by := PixelShape.key_y(k) << 3
-		var bits := c.occ
+		var occ := c.occ
+		if occ == 0:
+			continue
+		var n_c := Bits.popcount(occ)
+		# ⚠️⚠️ **整块同材质时的边际量快路径**。逐像素要付位扫描 + 三次查表 + 12 次浮点，
+		#    实测 **0.61 us/像素**：768x100 一刀切开后两片共 6.6 万像素 = **40 ms**，
+		#    是"生成新实体"里最大的一项（比 apply_damage 9.4 + split 17.3 加起来还大）。
+		#
+		#    整块同材质时，质量/一阶矩/极惯性矩都能从**行、列 popcount** 一次算完：
+		#      m = n*d          sx = d*Σ_j (bx+j+0.5)*colcnt[j]
+		#      sy = d*Σ_j (by+j+0.5)*rowcnt[j]
+		#      I_origin = d*(Σ_j (bx+j+0.5)^2*colcnt[j] + Σ_j (by+j+0.5)^2*rowcnt[j] + n/6)
+		#    ⚠️ 极惯性矩只要 Σx² 与 Σy²，**不需要 x·y 交叉项** —— 所以边际量就够，
+		#      不必知道行列的联合分布。
+		#    ⚠️ 摩擦/恢复系数同理（同材质 -> n 倍同一个值），**必须一起聚合**，
+		#      否则快路径会静默漏掉它们（那条路是别人刚加的功能）。
+		#
+		#    "整块同材质"的判据：空像素的 mat 恒为 0（PixelChunk 的约定），
+		#    所以 mat.count(v) == popcount(occ) 等价于"所有占用像素的材质都是 v"。
+		#    这是一次**原生**扫描（PackedByteArray.count），比逐像素便宜得多。
+		#    不满足就走下面的逐像素慢路径 —— 累加顺序与旧实现完全相同。
+		var v: int = c.mat[Bits.first_bit_index(occ)]
+		if v != 0 and c.mat.count(v) == n_c:
+			var d0 := 1.0
+			if has_density:
+				var cd = dens.get(v)
+				if cd == null:
+					cd = density_of.call(v)
+					dens[v] = cd
+				d0 = cd
+			d0 *= dscale
+			var fv0 := 0.0
+			if has_fric:
+				var cf = fric.get(v)
+				if cf == null:
+					cf = friction_of.call(v)
+					fric[v] = cf
+				fv0 = cf
+			var rv0 := 0.0
+			if has_rest:
+				var cr = rest.get(v)
+				if cr == null:
+					cr = restitution_of.call(v)
+					rest[v] = cr
+				rv0 = cr
+			var sx_c := 0.0
+			var sy_c := 0.0
+			var sxx := 0.0
+			var syy := 0.0
+			for j in 8:
+				var cj := Bits.popcount(occ & (0x0101010101010101 << j))
+				var rj := Bits.popcount(occ & (0xFF << (j << 3)))
+				var fx := float(bx + j) + 0.5
+				var fy := float(by + j) + 0.5
+				sx_c += fx * float(cj)
+				sxx += fx * fx * float(cj)
+				sy_c += fy * float(rj)
+				syy += fy * fy * float(rj)
+			m += d0 * float(n_c)
+			sx += d0 * sx_c
+			sy += d0 * sy_c
+			i_origin += d0 * (sxx + syy + float(n_c) / 6.0)
+			f_sum += fv0 * float(n_c)
+			r_sum += rv0 * float(n_c)
+			n += n_c
+			continue
+		var bits := occ
 		while bits != 0:
 			var i := Bits.first_bit_index(bits)
 			bits &= bits - 1
