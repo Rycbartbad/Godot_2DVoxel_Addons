@@ -41,6 +41,7 @@ const PixelShape := preload("res://addons/pixel_destruction/core/pixel_shape.gd"
 const PixelRenderer := preload("res://addons/pixel_destruction/render/pixel_renderer.gd")
 const Query := preload("res://addons/pixel_destruction/physics/query.gd")
 const ShapeOps := preload("res://addons/pixel_destruction/core/shape_ops.gd")
+const Destruction := preload("res://addons/pixel_destruction/core/destruction.gd")
 
 ## 世界（想直接调底层接口时用它，但优先用门面的方法）。
 ##
@@ -801,6 +802,55 @@ func draw_shape_box(shape: PixelShape, rect: Rect2i, material: int = 1) -> void:
 ## 显式清空）。门面把它改成更贴合游戏循环的语义 —— **力只作用于本帧**，
 ## 下一帧不 push 就没有力。这样既不用记得清空，也不会出现"忘了清空导致力越滚越大"。
 ## 需要持续力就每帧 push 一次。
+## ---- 接触数据（只读，轮询）----
+##
+## ⚠️ 为什么门面要包一层：门面的规矩是"调用方只需要认识这一个类"，
+##    而接触数据原本只能从 world 逃生口拿（`.world` 的注释写着"想直接调底层接口时用它，
+##    但优先用门面的方法"）。加在这里，调用方就不用碰底层。
+##
+## ⚠️ 两条使用约定：
+##   · **不需要开事件**：下面三个查询直接读求解器，每帧都能查。
+##     （`Contact` 事件那条路要 `world.contact_events_enabled = true` —— 每步构造对象有开销。）
+##   · **在步进之后查**：接触是 step 的产物 —— 在 `_process` 或靠后的 `_physics_process` 里查。
+##
+## ⚠️ 项目一贯用**轮询**而不是 signal（节点层一个 signal 都没有，`broken_joints` 也是这样），
+##    所以这里给的是方法，不是信号。
+func contact_pair_count() -> int:
+	if world == null:
+		return 0
+	return world.contact_pair_count()
+
+
+## 第 idx 个接触对的**全部**接触点：{normal, position, dist, impulse, fid1, fid2}
+##   position 世界坐标；normal 世界系法向（由 a 指向 b）
+##   dist < 0 才是真穿透；> 0 是推测接触（还没碰上，只是被拦住）
+##   impulse 是**该点自己的**冲量 —— 面-面接触通常 2 个点，而不是"一个点背着整个面的冲量"
+func contact_points(idx: int) -> Array:
+	if world == null:
+		return []
+	return world.contact_points(idx)
+
+
+## 第 idx 个接触对的配对级信息：{points, total_impulse, id_a, id_b}
+## ⚠️ `total_impulse` 是这次碰撞的**预算**：多个损伤入口要**共同分配**它。
+func contact_info(idx: int) -> Dictionary:
+	if world == null:
+		return {}
+	return world.contact_info(idx)
+
+
+## 把第 idx 个接触对变成**多个损伤入口**，并按各点冲量分配这次碰撞的预算。
+## 返回 [{point, impulse, share, radius, penetrating}, ...]（半径按 sqrt(份额) 分配）。
+##
+## ⚠️ 这是**游戏规则**的原料，不是规则本身：引擎只给"各点冲量 + 整对总冲量"，
+##    "多猛算高速""要不要打洞"由调用方决定。
+func contact_entries(idx: int, base_radius: float, min_share: float = 0.05) -> Array:
+	if world == null:
+		return []
+	var info: Dictionary = world.contact_info(idx)
+	return Destruction.contact_entries(info["points"], info["total_impulse"], base_radius, min_share)
+
+
 func step(delta: float) -> void:
 	_accum += delta
 	var steps := 0
