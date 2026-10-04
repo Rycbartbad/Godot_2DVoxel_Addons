@@ -62,8 +62,25 @@ func _initialize() -> void:
 	_c("最近点在缝壁上", h6.point.y >= 15.0 and h6.point.y <= 25.0, str(h6.point))
 
 	# 6. AABB
-	_c("AABB 查刚体", Query.aabb_bodies(Rect2(90.0, 10.0, 60.0, 20.0)).size() == 1)
-	_c("AABB 查形状", Query.aabb_shapes(Rect2(90.0, 10.0, 60.0, 20.0)).size() == 1)
+	#
+	# ⚠️⚠️ 期望是 **2** 不是 1：缝是**通高**的（见 _slab 的注释），而"每个实体内部连通"
+	#    这条不变量（PWorld.ensure_connected）会把通高的缝切成**两个刚体** ——
+	#    上半 y∈[0,16]、下半 y∈[24,40]；查询矩形 y∈[10,30] 与两者都相交。
+	#
+	# ⚠️ 这条断言原本写的是 == 1（连通性不变量之前），后来结果变成 2 却没人更新它 ——
+	#    于是它**红着发布了两版**（v0.3.1 / v0.3.2）。教训：重构改了语义之后，
+	#    散落在测试里的旧期望不会自己变红，它只是"一直红"，然后就没人看了。
+	var hit_bodies: Array = Query.aabb_bodies(Rect2(90.0, 10.0, 60.0, 20.0))
+	var hit_shapes: Array = Query.aabb_shapes(Rect2(90.0, 10.0, 60.0, 20.0))
+	_c("AABB 查刚体", hit_bodies.size() == 2, "实际 %d 个" % hit_bodies.size())
+	_c("AABB 查形状", hit_shapes.size() == 2, "实际 %d 个" % hit_shapes.size())
+	# 查到的必须都是那面墙的两半（世界 x 都在 100 附近、宽都是 8），不能混进别的刚体
+	var all_wall := true
+	for hb: PBody in hit_bodies:
+		if absf(hb.aabb.position.x - 100.0) > 0.01 or absf(hb.aabb.size.x - 8.0) > 0.01:
+			all_wall = false
+	_c("AABB 查到的都是那面墙的两半", all_wall,
+		"aabb: %s" % str(hit_bodies.map(func(b: PBody) -> String: return str(b.aabb))))
 	_c("AABB 查空处", Query.aabb_bodies(Rect2(-500.0, -500.0, 10.0, 10.0)).size() == 0)
 
 	# 7. reject

@@ -126,21 +126,45 @@ func _initialize() -> void:
 	#    且局部矩形（offset + 贴图尺寸）必须等于形状的局部 AABB。
 	#    这两条一起成立 => 像素、碰撞矩形、渲染三者共用同一套局部坐标，零偏差。
 	print("=== B2. 精灵摆放 vs 刚体变换 ===")
-	var node: Sprite2D = rend._nodes.get(b2.id)
+	# ⚠️⚠️ 这里以前读的是 rend._nodes.get(b2.id).texture —— 那是**旧的单节点渲染**时代的写法。
+	#    渲染器后来改成"1 个 Node2D 载体 + 每 64px 块一个 Sprite2D"，载体上**没有 texture**，
+	#    于是 node.texture 报 "Invalid access to property 'texture' on Node2D"。
+	#    ⚠️ 而 GDScript 的运行时错误会**中断 _initialize**，永远走不到 quit() ——
+	#    进程就**挂死**（CI 里表现为"这一支测试永远不结束"）。它挂了两版（v0.3.1 / v0.3.2）。
+	#    现在改成：载体比**变换**，每块贴图比**覆盖**（并集 == 形状局部 AABB，零偏移）。
+	var node: Node2D = rend._nodes.get(b2.id)
 	if node == null:
 		_c("找到精灵节点", false)
 	else:
 		var want := Transform2D(Vector2(cos(b2.rotation), sin(b2.rotation)),
 			Vector2(-sin(b2.rotation), cos(b2.rotation)), b2.position)
 		var got: Transform2D = node.transform
-		var same := got.origin.is_equal_approx(want.origin) 			and got.x.is_equal_approx(want.x) and got.y.is_equal_approx(want.y)
-		_c("精灵变换 == 刚体变换（旋转 0.5）", same, "%s" % str(got.origin))
+		var same: bool = (got.origin.is_equal_approx(want.origin)
+			and got.x.is_equal_approx(want.x) and got.y.is_equal_approx(want.y))
+		_c("精灵载体变换 == 刚体变换（旋转 0.5）", same, "%s" % str(got.origin))
 		var laabb := _local_bounds_of(b2)
-		var sprite_rect := Rect2(node.offset, Vector2(node.texture.get_size()))
-		_c("精灵局部矩形 == 形状局部 AABB（零偏移）",
-			sprite_rect.position.is_equal_approx(Vector2(laabb.position))
-			and sprite_rect.size.is_equal_approx(Vector2(laabb.size)),
-			"精灵 %s vs 形状 %s" % [str(sprite_rect), str(laabb)])
+		var cover := Rect2()
+		var first := true
+		var bad_tile := 0
+		for ch in node.get_children():
+			var sp := ch as Sprite2D
+			if sp == null or sp.texture == null:
+				bad_tile += 1
+				continue
+			var r := Rect2(sp.position, Vector2(sp.texture.get_size()))
+			if (r.position.x < float(laabb.position.x) - 0.01
+				or r.position.y < float(laabb.position.y) - 0.01
+				or r.end.x > float(laabb.end.x) + 0.01
+				or r.end.y > float(laabb.end.y) + 0.01):
+				bad_tile += 1
+			cover = r if first else cover.merge(r)
+			first = false
+		_c("每块贴图都在形状局部 AABB 内（无溢出、都有贴图）", bad_tile == 0,
+			"越界/无贴图 %d 块" % bad_tile)
+		_c("贴图并集 == 形状局部 AABB（零偏移）",
+			(not first) and cover.position.is_equal_approx(Vector2(laabb.position))
+			and cover.size.is_equal_approx(Vector2(laabb.size)),
+			"贴图并集 %s vs 形状 %s" % [str(cover), str(laabb)])
 
 	# 像素→世界：局部像素 (x,y) 的**左上角**应当映射到 to_world(x,y)
 	print("=== C. 局部像素 -> 世界坐标 ===")
