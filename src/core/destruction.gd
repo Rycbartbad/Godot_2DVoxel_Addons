@@ -701,12 +701,18 @@ static func _assemble(shape: PixelShape, keys: Array, parts: Dictionary, min_pix
 		#    末尾 sort 一次是为了让矩形输出顺序与母形状一致（确定性）。
 		s._rect_blocks = shape._rect_blocks.duplicate()
 		s._grid_sigs = shape._grid_sigs.duplicate()
-		var last_bk := -1
+		# ⚠️⚠️ 块 key 列表必须**去重**再排序。我第一版按"相邻 key 相同就跳过"去重，
+		#    那是**错的**：chunk 的迭代顺序不保证按块聚簇（Dictionary.keys() 是内部
+		#    顺序，分片的 chunks 还是按 split 的分组顺序插进去的）—— 同一个块会反复
+		#    出现，于是同一个块的矩形被 append 多次。
+		#    症状：768x100 切开后每片 380 个矩形里**每个像素被覆盖 2 次**
+		#    （实测 33198 处 overlap）= 分片的碰撞体成对重叠 = 幻影接触。
+		#    ⚠️ 8 条基准没抓到（它们不走 split），像素覆盖闸门也没抓到
+		#    （它测的是独立形状，不是分片）—— 所以补了 tests/validation_fragment_cover.gd。
+		var seen := {}
 		for k3: int in g2:
-			var bk3 := ((k3 >> 35) << 32) | (((k3 << 32) >> 35) & 0xFFFFFFFF)
-			if bk3 != last_bk:
-				s._grid_keys.append(bk3)
-				last_bk = bk3
+			seen[((k3 >> 35) << 32) | (((k3 << 32) >> 35) & 0xFFFFFFFF)] = true
+		s._grid_keys = seen.keys()
 		s._grid_keys.sort()
 		var total := 0
 		for k3: int in g2:
