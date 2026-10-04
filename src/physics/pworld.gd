@@ -1046,28 +1046,39 @@ func _vel_at_pre(b: PBody, p: Vector2) -> Vector2:
 ##    res 的头 4 字节是**实际写入字节数**（不是数据！），数据从**偏移 4** 开始。
 ##    这两条我都踩过：漏头 -> "未知操作码 247（命令流错位）"；把头当数据读 -> "数量 = 0"。
 func contact_points(idx: int) -> Array:
+	return _contact_fetch(idx).get("points", [])
+
+
+## 一次调用取回第 idx 对的**全部**数据（点 + 整对总冲量）。两个公开接口都走它。
+##
+## ⚠️⚠️ 协议坑（我连踩两次，别再踩）：
+##   1. `inp` 必须带 **8 字节头**：`i32 out_cap + i32 cmds.size()`，然后才是命令流
+##      —— 漏了会报 "未知操作码 247（命令流错位）"；
+##   2. 返回值的**头 4 字节是"实际写入字节数"**（不是数据！），数据从**偏移 4** 开始；
+##   3. op 35 的 `cap` 参数单位是 **double 个数**（= 4 + 6n），协议头的 `out_cap` 是
+##      **字节数**（= 4 + cap*8）。差 4 字节就会被"写入字节数不足"挡掉、返回空数组。
+##   生产者是 `_rp_send`（645 行）—— 动协议前先读它。
+func _contact_fetch(idx: int) -> Dictionary:
+	# 第一次：只问点数（cap = 0，扩展不会写数据）
 	var head := PackedByteArray()
 	_rp_u8(head, 35)
 	_rp_u32(head, idx)
 	_rp_i32(head, 0)
 	var hres := _rp_send(head, 4)
 	if hres.decode_s32(0) < 4:
-		return []
+		return {"ok": false}
 	var np: int = hres.decode_s32(4)
 	if np <= 0:
-		return []
+		return {"ok": false}
+	# 第二次：取全部
 	var cap := 4 + np * 6
 	var cmds := PackedByteArray()
 	_rp_u8(cmds, 35)
 	_rp_u32(cmds, idx)
 	_rp_i32(cmds, cap)
-	# ⚠️ 两个"cap"单位不同，别混：op 35 的 cap 参数是**double 个数**（= 4 + 6n），
-	#    而协议头里的 out_cap 是**字节数**（= 4 + cap*8，前面还有那个 i32 n）。
-	#    我第一版写成 cap*8、并把判据写成 (4+cap)*8 —— 差 4 字节，于是每次都被
-	#    "写入字节数不足"挡掉、返回空数组（而 op 35 本身是好的）。
 	var res := _rp_send(cmds, 4 + cap * 8)
 	if res.decode_s32(0) < 4 + cap * 8:
-		return []
+		return {"ok": false}
 	var out: Array = []
 	for i in np:
 		# 跳过 res 头(4) + payload 头(i32 n + id_a,id_b,n_points,total 共 4 个 f64 = 36 字节)
@@ -1078,7 +1089,45 @@ func contact_points(idx: int) -> Array:
 			"dist": res.decode_double(o + 32),
 			"impulse": res.decode_double(o + 40),
 		})
-	return out
+	# ⚠️ total_impulse 在 payload 的最后一个 f64：res 头(4) + i32 n(4) + id_a,id_b,n_points(24)
+	return {"ok": true, "points": out, "total_impulse": res.decode_double(32)}
+
+
+## 第 idx 个接触对的**几何摘要** —— 宽度 / 穿透深度 / "相互进入的面积"估计。
+##
+## ⚠️⚠️ 用户三条要求里最容易混的一条：**接触宽度 ≠ 相互进入的面积**。
+##   · 接触宽度 = 接触段两端点的距离（2D 里是一条**线**的长度）；
+##   · 相互进入的面积 = 两者真正重叠的**面积**。
+##   宽面**浅**碰 -> 宽度很大、面积很小；角部**深**插 -> 宽度很小、面积可能不小。
+##   我上一次就把宽度当面积答了 —— 是错的。
+##
+## 面积是**估计**：area ≈ 宽度 × 最大穿透深度（把接触带当成矩形）。
+## 精确值要两个 OBB 的相交多边形（拿 collide.gd 那套裁剪多裁 4 次），
+## ⚠️ 但只能对**已经成接触**的那几百对算，绝不能对每对都算。
+##
+## ⚠️ depth = max(0, -dist) 的最大值：推测接触（dist > 0）深度为 **0** ——
+##    它还没碰上，只是被拦住。**伤害判据看这个，才不会"擦身而过也打洞"。**
+## ⚠️ total_impulse 是"这次碰撞的预算"：多个入口要**共同分配**它（每个入口按自己的
+##    impulse 占比领），而不是各自领走一整份。
+func contact_geometry(idx: int) -> Dictionary:
+	var r := _contact_fetch(idx)
+	var pts: Array = r.get("points", [])
+	if pts.is_empty():
+		return {"points": [], "total_impulse": 0.0, "width": 0.0, "depth": 0.0, "area": 0.0}
+	var width := 0.0
+	var depth := 0.0
+	for i in pts.size():
+		var p: Dictionary = pts[i]
+		depth = maxf(depth, maxf(0.0, -float(p["dist"])))
+		for j in range(i + 1, pts.size()):
+			width = maxf(width, (p["position"] - (pts[j] as Dictionary)["position"]).length())
+	return {
+		"points": pts,
+		"total_impulse": float(r.get("total_impulse", 0.0)),
+		"width": width,
+		"depth": depth,
+		"area": width * depth,
+	}
 
 
 ## 本步的接触对数量（只数有流形点的）。
