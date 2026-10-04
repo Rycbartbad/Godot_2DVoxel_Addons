@@ -94,21 +94,42 @@ static func _block_rects(shape: PixelShape) -> Array:
 	var cache: Dictionary = shape._rect_blocks
 	var sigs: Dictionary = shape._grid_sigs
 	var keys: Array = shape._grid_keys
-	# 1) 新块。chunk 属于哪个块是它的 key 的函数，所以"新块"一定伴随"新 chunk"。
+	# 1) 把"本形状有 chunk 但 key 列表里没有"的块补进来。
+	#
+	# ⚠️⚠️ 判据必须是"**key 在不在 keys 里**"，不能是"在不在 sigs 里"：
+	#    split 的分片会从母体**继承 sigs**（还有按块缓存），于是 sigs 里已经有那些块，
+	#    用 sigs 判就会跳过插入 -> key 列表靠 _assemble 预建 -> 两边一叠加，
+	#    在 sigs 为空的形状上（例如被 clone 出来的、或游戏层刚造好还没 rebuild 的）
+	#    就会**重复插入**同一个块 -> 同一个块的矩形被 append 多次
+	#    -> 分片的碰撞体成对重叠（实测每片 380 个矩形、每个像素被覆盖 2 次）。
+	#    ⚠️ 这个 bug 8 条基准没抓到（它们不走 split），像素覆盖闸门也没抓到
+	#    （它测独立形状）—— tests/validation_fragment_cover.gd 就是为它补的。
+	var seen := {}
+	for kk: int in keys:
+		seen[kk] = true
 	for k: int in shape.chunks:
 		var bk := ((k >> 35) << 32) | (((k << 32) >> 35) & 0xFFFFFFFF)
+		if seen.has(bk):
+			continue
+		seen[bk] = true
+		_sorted_insert(keys, bk)
 		if not sigs.has(bk):
+			# 真正的新块：没有指纹可比 -> 置空指纹与空缓存，让下面的循环重算它。
 			sigs[bk] = PackedInt64Array()
-			_sorted_insert(keys, bk)
 			cache[bk] = []
 	# 2) 指纹变了才重算这一块
 	var out: Array = []
 	for bk2: int in keys:
 		var sig := _block_sig(shape, bk2)
-		if sig != sigs[bk2]:
+		# ⚠️⚠️ 必须用 get() 安全查找：上面的发现循环**不保证**每个 key 都在 sigs 里
+		#    （key 可能由 _assemble 预建、或从母体继承而来）。而 GDScript 里
+		#    sigs[bk2] 访问不存在的键会**中断整个函数** —— 症状是 decompose 静默返回
+		#    **0 个矩形**（形状有像素、碰撞体却是空的）。踩过一次。
+		var old = sigs.get(bk2)
+		if old == null or sig != old:
 			sigs[bk2] = sig
 			cache[bk2] = _decompose_block(shape, bk2)
-		for r: Rect2 in cache[bk2]:
+		for r: Rect2 in cache.get(bk2, []):
 			out.append(r)
 	return out
 
