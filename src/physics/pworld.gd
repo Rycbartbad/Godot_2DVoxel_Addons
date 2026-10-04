@@ -91,6 +91,23 @@ var ccd_substep_budget := 600
 var ccd_substep_hold := 0.25
 ## 保持还剩多少模拟时间（内部状态，由 _compute_substeps 维护）。
 var _substeps_hold_left := 0.0
+## 抓取时子步的**代价上限**（微秒）。抓着东西时，子步数还要再按**世界大小**压一遍。
+##
+## ⚠️⚠️ 为什么：子步是**全局**的 —— 每个子步都要把整个世界步进一遍，所以帧时间随
+##    "子步数 x 世界大小" 涨。实测每子步成本 ≈ **1 us/矩形**
+##    （1000 矩形 ≈ 1.0 ms/子步，100 矩形 ≈ 0.13 ms/子步）。
+##    用户报的"1000 矩形时按住 Ctrl 左键拖动掉到 8 帧"就是这条：
+##    一次快速拖动 = 25 子步 x 每个子步都要步进 1000 个矩形 = 125 ms/帧。
+##
+## ⚠️ 只在**抓取时**生效 —— 不抓时完全走原来的行为，所以 8 条基准**逐位不变**
+##    （它们不抓东西）。这和 ccd_substep_hold 的取舍是同一条：
+##    把"拖动时的可用性"和"基准不动"这两件事分开。
+##
+## ⚠️ 代价：重场景里子步变少 -> 每子步位移变大 -> 被 ccd_clamp_motion 钳住 ->
+##    那一帧**变慢动作**（绝不穿模，和子步上限被顶满时同一个取舍）。
+##    ⚠️ 正常拖动速度（几百单位/秒 -> 每帧几像素）根本碰不到这个上限，
+##    只有"甩"这种极端速度才会被钳。
+var ccd_grab_substep_cost_budget_us := 6000
 ## 子步上限被顶满时，位移会被**硬钳**在这个值上。
 ## 代价是超高速物体变成慢动作，换来的是"绝不可能穿模"的硬保证。
 var ccd_clamp_motion := true
@@ -1082,7 +1099,9 @@ func _compute_substeps(dt: float) -> int:
 	var need := 1
 	if ccd_enabled and dt > 0.0:
 		var fastest := 0.0
+		var total_rects := 0
 		for b: PBody in bodies:
+			total_rects += b.rects.size()
 			if b.is_static or not b.awake:
 				continue
 			var v := b.linear_velocity.length() + absf(b.angular_velocity) * b.bounding_radius()
@@ -1091,6 +1110,10 @@ func _compute_substeps(dt: float) -> int:
 			var motion := fastest * dt
 			if motion > ccd_max_motion:
 				need = clampi(int(ceil(motion / ccd_max_motion)), 1, ccd_substep_budget)
+		# 抓取时再按**世界大小**压一遍：每个子步都要步进整个世界（见
+		# ccd_grab_substep_cost_budget_us 的说明）。⚠️ 只在抓取时生效 -> 基准逐位不变。
+		if not grabs.is_empty() and total_rects > 0:
+			need = mini(need, maxi(1, ccd_grab_substep_cost_budget_us / total_rects))
 	# 迟滞：**涨立刻涨**（CCD 是安全项）；**回落要等一小段模拟时间**（见 ccd_substep_hold）。
 	#
 	# ⚠️⚠️ 旧实现是"只要 grabs 非空就只涨不落" —— 于是按住 Ctrl 左键拖动之后，
