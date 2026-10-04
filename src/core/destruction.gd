@@ -79,6 +79,44 @@ class Damage:
 
 
 ## 生成一个 chunk 的 keep 掩码（bit 1 = 保留，bit 0 = 删除）。
+## 把一次碰撞的**多个接触点**变成多个**损伤入口**，并按各点冲量分配这次碰撞的预算。
+##
+## ⚠️⚠️ 为什么需要它：面-面接触有多个点（通常 2 个），而整对的冲量是**一个预算**。
+##    对每个点都用同一个半径打洞 = 总损伤面积是单点的 N 倍 = **预算被重复领取**。
+##    这里让**面积**按份额走：radius_i = base_radius * sqrt(share_i)，
+##    于是 Σ 面积 ≈ 单点面积（预算守恒）。
+##
+## ⚠️ 重叠区域：本引擎的伤害是**二值**的（make_keep_mask 只决定"这个像素留不留"），
+##    所以两个入口覆盖同一像素**不会**被扣两次 —— 那部分天然安全。
+##    要防的只是上面那条"预算被重复领取"。
+##    ⚠️ 但游戏层若用 aux 表做**逐像素血量**，重复扣减要游戏层自己记账 —— 引擎不替它决定
+##    （"多猛算高速""高速要怎样"是游戏规则，见 PWorld.Contact 的说明）。
+##
+## ⚠️ penetrating 只在 dist < 0（真穿透）时为 true：推测接触（dist > 0）虽然也有冲量，
+##    但那是在**阻止接近** —— 照着它打洞就是"擦身而过也打洞"。
+##
+## points: [{position, dist, impulse}, ...]（来自 PWorld.Contact.points）
+## total_impulse: 整对总冲量（来自 Contact.total_impulse，实测各点之和 = 它）
+## 返回 [{point, impulse, share, radius, penetrating}, ...]
+static func contact_entries(points: Array, total_impulse: float, base_radius: float,
+		min_share: float = 0.05) -> Array:
+	var out: Array = []
+	if total_impulse <= 0.0 or base_radius <= 0.0:
+		return out
+	for p in points:
+		var share: float = absf(float(p["impulse"])) / total_impulse
+		if share < min_share:
+			continue          # 份额太小：不打洞，免得拖出一串微小入口
+		out.append({
+			"point": p["position"],
+			"impulse": float(p["impulse"]),
+			"share": share,
+			"radius": base_radius * sqrt(share),
+			"penetrating": float(p["dist"]) < 0.0,
+		})
+	return out
+
+
 static func make_keep_mask(chunk_key: int, damage: Damage, force_keep: int = 0) -> int:
 	# ⚠️⚠️ **判据按 kind 内联，不要逐像素调 damage.hits()**：
 	#    · 方法调用本身约 0.3 us/像素；
