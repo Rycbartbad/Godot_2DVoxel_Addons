@@ -462,7 +462,10 @@ func _apply_impact_damage() -> void:
 				if body == null or body.shapes.is_empty():
 					continue
 				var dmg = Destruction.Damage.circle(body.to_local(e["point"]), e["radius"])
-				for frag in world.fracture(body, dmg):
+				# ⚠️ 用 detach（摘除）而不是 fracture（挖掉）：
+				#    命中的那一小块**变成碎片**留下来，总像素数不变 —— Teardown 那样。
+				#    fracture 会让像素直接消失（挖个洞），那是笔刷擦除该有的行为。
+				for frag in world.detach(body, dmg):
 					renderer.sync(frag)
 				renderer.sync(body)
 
