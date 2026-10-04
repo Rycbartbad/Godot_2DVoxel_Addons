@@ -428,6 +428,67 @@ pub extern "C" fn rb_contact_get(w: *mut World, i: i32, out: *mut f64) -> i32 {
     0
 }
 
+/// 读第 i 个接触对的**全部接触点**：out 至少 4 + 6*n 个 f64 ——
+/// id_a, id_b, n_points, total_impulse，然后每个点 nx, ny, px, py, dist, impulse。
+/// 返回**点个数**；cap 不够时只返回个数、不写数据，调用方扩容后重来。
+///
+/// ⚠️⚠️ 为什么必须导出**全部**点：一次物理更新里，整个面可以同时存在多个接触点
+/// （面-面接触通常 2 个，见 Rapier 的流形），引擎内部本来就是按多点求解的。
+/// 旧接口 rb_contact_get 只取 `manifolds().first()` 的 `points.first()` 作**位置**，
+/// 却用 `pair.total_impulse()` 作**冲量** —— 整个面受到的冲量被附在一个代表点上返回了。
+/// 消费方若照着这个点打洞，宽面撞击就会错误地集中成一次尖刺攻击。
+/// 60 Hz 是**更新时间**，不是接触数量限制。
+#[no_mangle]
+pub extern "C" fn rb_contact_get_points(w: *mut World, i: i32, out: *mut f64, cap: i32) -> i32 {
+    let Some(w) = (unsafe { wref(w) }) else { return 0 };
+    if out.is_null() || i < 0 { return 0; }
+    let mut k = 0i32;
+    for pair in w.nf.contact_pairs() {
+        if !pair.has_any_active_contact() { continue; }
+        if k != i { k += 1; continue; }
+        let ca = pair.collider1;
+        let cb = pair.collider2;
+        let ida = w.colliders[ca].parent().map(|h| w.bodies[h].user_data as u32).unwrap_or(0);
+        let idb = w.colliders[cb].parent().map(|h| w.bodies[h].user_data as u32).unwrap_or(0);
+        let pose = w.colliders[ca].position();
+        let total = pair.total_impulse().length();
+        let mut n = 0i32;
+        for m in pair.manifolds() {
+            n += m.points.len() as i32;
+        }
+        if cap < 4 + n * 6 {
+            return n; // 让调用方扩容后重来
+        }
+        unsafe {
+            *out = ida as f64;
+            *out.add(1) = idb as f64;
+            *out.add(2) = n as f64;
+            *out.add(3) = total as f64;
+        }
+        let mut o = 4usize;
+        for m in pair.manifolds() {
+            let nrm = m.data.normal;
+            for pt in m.points.iter() {
+                let p = pose.translation + pose.rotation * pt.local_p1;
+                unsafe {
+                    *out.add(o) = nrm.x as f64;
+                    *out.add(o + 1) = nrm.y as f64;
+                    *out.add(o + 2) = p.x as f64;
+                    *out.add(o + 3) = p.y as f64;
+                    *out.add(o + 4) = pt.dist as f64;
+                    // ⚠️ 流形里的点是 parry 的 TrackedContact<ContactData> 包装：
+                    //    几何（local_p1/dist）在包装上，**冲量在内层的 data 里**。
+                    //    写 pt.impulse 编译不过（no field impulse on TrackedContact）。
+                    *out.add(o + 5) = pt.data.impulse as f64;
+                }
+                o += 6;
+            }
+        }
+        return n;
+    }
+    0
+}
+
 #[no_mangle]
 pub extern "C" fn rb_body_count(w: *mut World) -> i32 {
     let Some(w) = (unsafe { wref(w) }) else { return 0 };

@@ -104,6 +104,13 @@ alignas(16) static unsigned char g_str_empty_hint[64];
 //  11  contact_count()                            -> i32
 //  12  contact_get(i32 idx)                       -> f64 id_a, id_b, nx, ny, px, py, dist, impulse
 //                                                    （法向与点都是**世界系**）
+//                                                    ⚠️ 只给**一个代表点 + 整对的总冲量**，
+//                                                    宽面撞击会被压成一次尖刺，见 op 35
+//  35  contact_get_points(u32 idx, i32 cap)       -> i32 n_points，然后（cap 够时）
+//                                                    f64 id_a, id_b, n_points, total_impulse,
+//                                                    每个点 nx, ny, px, py, dist, impulse
+//                                                    ⚠️ 一次物理更新里整个面可以同时有多个接触点
+//                                                    （60 Hz 是更新时间，不是接触数量限制）
 //  13  body_count()                               -> i32
 //  14  body_add_force(u32 id, f64 fx, fy, torque)
 //  15  body_set_type(u32 id, i32 is_static)
@@ -153,6 +160,8 @@ struct RapierApi {
 	void (*body_wake)(RPWorld, uint32_t) = nullptr;
 	int32_t (*contact_count)(RPWorld) = nullptr;
 	int32_t (*contact_get)(RPWorld, int32_t, double *) = nullptr;
+	// ⚠️ 与 contact_get 的区别：导出**全部**接触点及**各自的**冲量（见 op 35 的说明）
+	int32_t (*contact_get_points)(RPWorld, int32_t, double *, int32_t) = nullptr;
 	int32_t (*body_count)(RPWorld) = nullptr;
 	void (*body_add_force)(RPWorld, uint32_t, double, double, double) = nullptr;
 	void (*body_set_type)(RPWorld, uint32_t, int32_t) = nullptr;
@@ -249,6 +258,7 @@ static bool load_rapier() {
 	RP_GET(joint_count, "rb_joint_count")
 	RP_GET(body_set_groups, "rb_body_set_groups")
 	RP_GET(joint_set_contacts, "rb_joint_set_contacts")
+	RP_GET(contact_get_points, "rb_contact_get_points")
 	RP_GET(body_set_density, "rb_body_set_density")
 RP_GET(body_set_friction, "rb_body_set_friction")
 RP_GET(body_set_restitution, "rb_body_set_restitution")
@@ -409,6 +419,25 @@ static void run_rapier_cmd(RapierInstance *inst, const uint8_t *in, size_t in_n,
 				uint32_t id = r.u32();
 				double dens = r.f64();
 				g_rap.body_set_density(W, id, dens);
+				break;
+			}
+			case 35: {
+				// 导出第 idx 个接触对的**全部**接触点及各自的冲量。
+				// ⚠️ 两步式：点数事先不知道，cap 不够时只回点数（i32），调用方扩容后重来。
+				//    输出 = i32 n_points，然后（cap 够时）f64 id_a, id_b, n_points, total_impulse,
+				//    以及每个点 nx, ny, px, py, dist, impulse。
+				uint32_t idx = r.u32();
+				int32_t cap = r.i32();
+				static std::vector<double> pt_scratch;
+				pt_scratch.resize((size_t)(cap > 0 ? cap : 1));
+				int32_t n = 0;
+				if (g_rap.contact_get_points != nullptr)
+					n = g_rap.contact_get_points(W, (int32_t)idx, pt_scratch.data(), cap);
+				w.i32(n);
+				size_t need = (size_t)(4 + n * 6);
+				if (cap > 0 && (size_t)cap >= need) {
+					for (size_t q = 0; q < need; ++q) w.f64(pt_scratch[q]);
+				}
 				break;
 			}
 			case 38: {
