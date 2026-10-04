@@ -75,9 +75,11 @@ func _initialize() -> void:
 	_assert(after > cap, "松手后上限仍生效（%d <= %d）—— 那会把基准走的路也改掉" % [after, cap])
 	# ③ 确定性：同一状态重复给出同一个值
 	big.linear_velocity = Vector2(0, -3000)
-	var v1 := w._compute_substeps(dt)
+	# ⚠️ 必须显式标注类型：_compute_substeps 的返回在静态分析里没有确定类型，
+	#    用 := 会报 "Cannot infer the type of v1"（GDScript 的经典坑）。
+	var v1: int = w._compute_substeps(dt)
 	big.linear_velocity = Vector2(0, -3000)
-	var v2 := w._compute_substeps(dt)
+	var v2: int = w._compute_substeps(dt)
 	_assert(v1 == v2, "同一状态两次算出不同子步数：%d vs %d" % [v1, v2])
 	print("  确定性：同一状态两次 -> %d / %d" % [v1, v2])
 	print("---")
