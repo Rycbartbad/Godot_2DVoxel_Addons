@@ -1360,7 +1360,12 @@ func center_of_mass_world() -> Vector2:
 ##
 ## ⚠️ 三点约定，用之前必须知道：
 ##
-## 1. **默认关闭**。开了就有每步构造事件的分配开销（对象分配在 GDScript 里不便宜）。
+## 1. **默认关闭**，而且开了**很贵** —— 实测（200 步、12 个刚体、7 对接触）：
+##    关 79.3 ms / 开 1125.1 ms，即**每帧多 5.2 ms**，摊到每对接触约 **0.74 ms/帧**。
+##    ⚠️ 开销大头**不是**对象分配，而是每对接触都要算的 contact_width
+##    （沿切向逐像素走，见 _contact_width 的说明）和 shear_ratio。
+##    => 只在真的需要"接触宽度/剪切比"时才开；只要接触点/冲量的话走
+##    **查询路径**（contact_pair_count / contact_points / contact_info），那条路**不需要**开事件。
 ##
 ## 2. 事件在**求解之前**采集，所以 approach 是"撞击前的接近速度" —— 它是"撞得多猛"的
 ##    直接量，而且不受质量和恢复系数影响。
@@ -2302,8 +2307,27 @@ func detach(body: PBody, damage, burst_speed: float = 40.0) -> Array:
 	#     body.rebuild(kept, density_callable(), max_rects_per_shape)）；
 	#   · 脏标记也是 PBody.rebuild() 里统一做的（见它的注释），不需要手动标。
 	#   （我第一版写了 body.rebuild() -> "Too few arguments"，白跑一轮。）
-	# 断开的连通分量各自成体（引擎本来就有的机制）
-	out.append_array(ensure_connected(body, min_fragment_pixels))
+	# ⚠️ 便宜的**必要条件**（与 fracture 里那条同源）：
+	#    凸的伤害集**严格在形状内部**时不可能把刚体弄断，而 ensure_connected 要跑
+	#    全量连通分量标记 —— 实测 200x200 形状：detach 一次 15.5 ms，
+	#    对照 fracture 的内部挖洞只要 9.1 ms，**差额就是它**（fracture 有这条跳过）。
+	#    绝大多数撞击都是内部摘除，不需要查连通性。
+	var dmg_bounds: Rect2 = damage.bounds()
+	var dmg_rect := Rect2i(
+		floori(dmg_bounds.position.x), floori(dmg_bounds.position.y),
+		ceili(dmg_bounds.size.x) + 1, ceili(dmg_bounds.size.y) + 1)
+	var probe := Rect2i(dmg_rect.position - Vector2i(2, 2), dmg_rect.size + Vector2i(4, 4))
+	var was_boundary := false
+	for s in body.shapes:
+		if Destruction.touches_boundary(s, probe):
+			was_boundary = true
+			break
+	if was_boundary:
+		# 断开的连通分量各自成体（引擎本来就有的机制）
+		out.append_array(ensure_connected(body, min_fragment_pixels))
+	else:
+		# 没碰边界 -> 一定没断 -> 只重建（形状数据 + 质量/碰撞体 + 脏标记）
+		body.rebuild(body.shapes, density_callable(), max_rects_per_shape)
 	# ⚠️⚠️ 这里曾经有一段"按结果对齐"的修正：遍历 extract 捡到的像素，
 	#    凡**仍然留在原刚体里**的就从碎片里去掉。**已删除** —— 它是错的：
 	#    fracture 会 rebuild/平移形状的局部坐标（split -> _assemble），

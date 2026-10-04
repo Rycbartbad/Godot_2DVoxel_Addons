@@ -424,49 +424,76 @@ func _brush_step(dir: float) -> void:
 
 # ---------------------------------------------------------------- 撞击伤害（demo 玩法）
 
-## 撞击伤害：把这一步的接触事件变成破坏。
+## 撞击伤害：撞得够猛就在接触点摘下一小块（Teardown 那样，碎块留下来）。
 ##
 ## ⚠️⚠️ 这是 **demo 自己的玩法**，不是引擎 API —— 故意**不做成 @export、不放进 addon**。
-##    引擎只把接触数据摆出来（world.contacts / contact_points / contact_info），
-##    "多猛算高速、要不要破坏、破坏多大"是**游戏规则**，由使用者自己写。
-##    这里就是一份**能直接照抄**的实现。
+##    引擎只把接触数据摆出来，"多猛算高速、要不要破坏、破坏多大"是**游戏规则**。
 ##
-## ⚠️ 四条判断各有原因，都是踩过的坑：
-##   1. 只判 is_new —— 同一个配对在一步里会被**多个子步各记一次**，
-##      不判就会被打 N 次，**子步越多打得越狠**；
-##   2. **应力门槛** —— 分母用引擎数体素量出来的**真实接触宽度**
-##      （矛尖窄 -> 应力大 -> 能破盾；盾面宽 -> 应力小 -> 不破）；
-##   3. **共享预算** —— 面-面接触有 2 个点，整对总冲量是**一个预算**，必须走
-##      contact_entries 按份额分配，否则每个点都用同一半径 = 预算被重复领取；
-##   4. 只打 penetrating（dist < 0）—— 推测接触是在**阻止接近**，照着它打洞就是"擦身而过也打洞"。
-const IMPACT_STRESS_THRESHOLD := 30.0
+## ⚠️⚠️⚠️ 性能上踩过的两个大坑（都实测过，别再犯）：
+##
+##   1. **不要开接触事件**（world.contact_events_enabled）。
+##      实测（200 步 / 12 刚体 / 7 对接触）：关 79.3 ms，开 1125.1 ms
+##      -> **每帧多 5.2 ms**，摊到每对接触约 **0.74 ms/帧**。
+##      开销大头不是对象分配，而是每对接触都要算的 contact_width（逐像素走切向）。
+##      demo 里几十对接触就是几十 ms/帧 —— 这就是"一拖动就掉到几帧"的来源。
+##      所以这里走**查询路径**（contact_pair_count / contact_info，**不需要开事件**）。
+##      代价：拿不到 contact_width，判据只能用**冲量**（见 IMPACT_MIN_IMPULSE 的说明）。
+##
+##   2. **必须限流**。接触会抖（同一对刚体反复重新接触），不限流就会每帧都破坏一次；
+##      而一次破坏在大物体上实测 **10~15 ms**（rebuild 5.7 ms + split 4.0 ms + ...），
+##      直接一帧没了。这里按"刚体对 + 接触点（量化到 8 像素）"记冷却。
+##
+## ⚠️ 其余三条判断也都是踩过的坑：
+##   · **共享预算** —— 面-面接触有 2 个点，整对总冲量是**一个预算**，必须走
+##     contact_entries 按份额分配，否则每个点都用同一半径 = 预算被重复领取；
+##   · 只打 penetrating（dist < 0）—— 推测接触是在**阻止接近**，照着它打洞就是"擦身而过也打洞"；
+##   · 破坏用 detach（摘除）而不是 fracture（挖掉）—— 前者让命中的像素**变成碎片**
+##     留下来（总像素数守恒），后者是笔刷擦除该有的"挖洞"。
+##
+## ⚠️ 量纲变了：引擎的"应力"是 冲量/接触宽度（要开事件才拿得到），
+##    这里用的是**整对总冲量**，所以阈值不是一个量级 —— 按手感调。
+const IMPACT_MIN_IMPULSE := 150000.0
 const IMPACT_BASE_RADIUS := 6.0
+const IMPACT_COOLDOWN := 0.35
+
+var _impact_seen := {}       # "ida:idb:qx:qy" -> 上次破坏的时间（秒）
 
 
 func _apply_impact_damage() -> void:
-	# ⚠️ 接触事件默认关闭（每步构造对象有开销）—— 要用才开。
-	if not world.contact_events_enabled:
-		world.contact_events_enabled = true
-	for c in world.contacts:
-		if not c.is_new:
+	var now := Time.get_ticks_msec() / 1000.0
+	var by_id := {}
+	for b in world.bodies:
+		by_id[b.id] = b
+	for i in world.contact_pair_count():
+		var info: Dictionary = world.contact_info(i)
+		var pts: Array = info["points"]
+		if pts.is_empty():
 			continue
-		# ⚠️ 必须显式标注类型：world.contacts 是无类型 Array，c 是 Variant，
-		#    用 := 会报 "Cannot infer the type of stress"。
-		var stress: float = c.impulse / maxf(c.contact_width, 0.001)
-		if stress < IMPACT_STRESS_THRESHOLD:
+		var total := float(info["total_impulse"])
+		if total < IMPACT_MIN_IMPULSE:
 			continue
-		for e in Destruction.contact_entries(c.points, c.total_impulse, IMPACT_BASE_RADIUS):
+		var a = by_id.get(int(info["id_a"]))
+		var b = by_id.get(int(info["id_b"]))
+		if a == null or b == null:
+			continue
+		var p0: Dictionary = pts[0]
+		var q: Vector2 = p0["position"]
+		var key := "%d:%d:%d:%d" % [int(info["id_a"]), int(info["id_b"]),
+			int(floor(q.x / 8.0)), int(floor(q.y / 8.0))]
+		var last: float = _impact_seen.get(key, -1e9)
+		if now - last < IMPACT_COOLDOWN:
+			continue
+		_impact_seen[key] = now
+		for e in Destruction.contact_entries(pts, total, IMPACT_BASE_RADIUS):
 			if not e["penetrating"]:
 				continue
-			for body in [c.a, c.b]:
+			for body in [a, b]:
 				if body == null or body.shapes.is_empty():
 					continue
 				var dmg = Destruction.Damage.circle(body.to_local(e["point"]), e["radius"])
-				# ⚠️ 用 detach（摘除）而不是 fracture（挖掉）：
-				#    命中的那一小块**变成碎片**留下来，总像素数不变 —— Teardown 那样。
-				#    fracture 会让像素直接消失（挖个洞），那是笔刷擦除该有的行为。
 				for frag in world.detach(body, dmg):
 					renderer.sync(frag)
+				renderer.sync(body)
 				renderer.sync(body)
 
 
