@@ -439,9 +439,15 @@ func _brush_step(dir: float) -> void:
 ##      所以这里走**查询路径**（contact_pair_count / contact_info，**不需要开事件**）。
 ##      代价：拿不到 contact_width，判据只能用**冲量**（见 IMPACT_MIN_IMPULSE 的说明）。
 ##
-##   2. **必须限流**。接触会抖（同一对刚体反复重新接触），不限流就会每帧都破坏一次；
-##      而一次破坏在大物体上实测 **10~15 ms**（rebuild 5.7 ms + split 4.0 ms + ...），
-##      直接一帧没了。这里按"刚体对 + 接触点（量化到 8 像素）"记冷却。
+##   2. **必须限流**，而且**冷却要按刚体对记，不能按接触点位置记**。
+##      一次破坏在大物体上实测 **10~15 ms**（rebuild 5.7 ms + split 4.0 ms + ...），
+##      直接一帧没了。
+##      ⚠️⚠️ 我第一版把接触点位置也算进 key（"刚体对 + 量化到 8 像素的位置"），
+##      结果**拖动时完全失效**：拖着一个物体沿别的物体刮过去，每帧的接触点都是新位置
+##      -> 每帧都是新 key -> 每帧都破坏一次 -> 用户报"主要是 drag 时很卡"。
+##      按刚体对记冷却才对（滑动时同一对刚体不会每帧重复破坏）。
+##      ⚠️ 再加一道**每帧总量**上限：一次撞击可能同时产生好几对接触，
+##      每对都破坏的话就是 N × 10 ms。
 ##
 ## ⚠️ 其余三条判断也都是踩过的坑：
 ##   · **共享预算** —— 面-面接触有 2 个点，整对总冲量是**一个预算**，必须走
@@ -454,17 +460,24 @@ func _brush_step(dir: float) -> void:
 ##    这里用的是**整对总冲量**，所以阈值不是一个量级 —— 按手感调。
 const IMPACT_MIN_IMPULSE := 150000.0
 const IMPACT_BASE_RADIUS := 6.0
-const IMPACT_COOLDOWN := 0.35
+## 同一对刚体的冷却（秒）。⚠️ 只按刚体对，不含接触点位置 —— 见上面的说明。
+const IMPACT_COOLDOWN := 0.5
+## 每帧最多破坏几次。一次破坏 10~15 ms，多了直接掉帧。
+const IMPACT_MAX_PER_FRAME := 1
 
-var _impact_seen := {}       # "ida:idb:qx:qy" -> 上次破坏的时间（秒）
+var _impact_seen := {}       # "ida:idb" -> 上次破坏的时间（秒）
 
 
 func _apply_impact_damage() -> void:
 	var now := Time.get_ticks_msec() / 1000.0
+	# ⚠️ 每帧总量上限：撞击常常同时产生好几对接触，每对都破坏就是 N × 10 ms。
+	var done := 0
 	var by_id := {}
 	for b in world.bodies:
 		by_id[b.id] = b
 	for i in world.contact_pair_count():
+		if done >= IMPACT_MAX_PER_FRAME:
+			break
 		var info: Dictionary = world.contact_info(i)
 		var pts: Array = info["points"]
 		if pts.is_empty():
@@ -476,14 +489,14 @@ func _apply_impact_damage() -> void:
 		var b = by_id.get(int(info["id_b"]))
 		if a == null or b == null:
 			continue
-		var p0: Dictionary = pts[0]
-		var q: Vector2 = p0["position"]
-		var key := "%d:%d:%d:%d" % [int(info["id_a"]), int(info["id_b"]),
-			int(floor(q.x / 8.0)), int(floor(q.y / 8.0))]
+		# ⚠️ key **只含刚体对**。曾经把接触点位置也放进来（量化到 8 像素），
+		#    结果拖动时每帧的接触点都是新位置 -> 冷却形同不存在 -> 每帧破坏一次。
+		var key := "%d:%d" % [int(info["id_a"]), int(info["id_b"])]
 		var last: float = _impact_seen.get(key, -1e9)
 		if now - last < IMPACT_COOLDOWN:
 			continue
 		_impact_seen[key] = now
+		done += 1
 		for e in Destruction.contact_entries(pts, total, IMPACT_BASE_RADIUS):
 			if not e["penetrating"]:
 				continue
