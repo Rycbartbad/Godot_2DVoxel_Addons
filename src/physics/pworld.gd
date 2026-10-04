@@ -1092,8 +1092,11 @@ func _contact_fetch(idx: int) -> Dictionary:
 			"position": Vector2(res.decode_double(o + 16), res.decode_double(o + 24)),
 			"dist": res.decode_double(o + 32),
 			"impulse": res.decode_double(o + 40),
-			# 接触特征 id（跨帧稳定）：(fid1, fid2) 合起来标识"同一个接触特征"。
-			# warm start 靠它，多点伤害也靠它避免"同一特征跨帧被重复领取预算"。
+			# 接触特征 id：(fid1, fid2) 是**面/顶点级**的特征，warm start 靠它。
+			# ⚠️⚠️ 但它**不含"第几个矩形"** —— 实测（tests/diag_fid_rect.gd）同一个方块砸在
+			#    同一个两矩形刚体的左半与右半，fid **完全相同**。
+			#    所以跨帧去重**不能只用它**：方块从矩形 A 滑到矩形 B 时 fid 可能不变，
+			#    只用它会把两处当成同一个接触。**必须和位置（或矩形索引）组合**。
 			"fid1": int(res.decode_double(o + 48)),
 			"fid2": int(res.decode_double(o + 56)),
 		})
@@ -1383,6 +1386,8 @@ class Contact:
 	## ⚠️⚠️ 为什么需要它：面-面接触通常有 **2 个**接触点（60 Hz 是**更新时间**，
 	##    不是接触数量限制）。只用 point 会在宽面撞击时把**整个面**的冲量集中到一处 ——
 	##    照着那个点打洞就是"一次尖刺攻击"。多点伤害要把入口铺在这上面。
+	## ⚠️ 每点带 fid1/fid2（面/顶点级特征 id），但它**不含矩形索引**（见 _contact_fetch 的说明）——
+	##    跨帧去重要和位置组合，不能只靠它。
 	var points: Array = []
 	## 整对的总冲量 —— 这次碰撞的**预算**。多个入口要**共同分配**它
 	## （每个入口按自己的 impulse 占比领，份额之和 = 1），而不是各自领走一整份。
