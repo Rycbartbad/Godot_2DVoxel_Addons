@@ -88,7 +88,9 @@ var ccd_substep_budget := 600
 ## ⚠️ 迟滞**只在抓着东西时**生效：不抓时保持原来的行为（need 是多少就多少），
 ##    否则 dump_state 的 sleep_frag 会变（实测 -35.696264844083 -> -35.760093441963）——
 ##    那是把"拖动时的稳定性"和"基准不动"这两件事分开的唯一办法。
-var ccd_substep_hold := 0.0
+var ccd_substep_hold := 0.25
+## 保持还剩多少模拟时间（内部状态，由 _compute_substeps 维护）。
+var _substeps_hold_left := 0.0
 ## 子步上限被顶满时，位移会被**硬钳**在这个值上。
 ## 代价是超高速物体变成慢动作，换来的是"绝不可能穿模"的硬保证。
 var ccd_clamp_motion := true
@@ -1089,9 +1091,24 @@ func _compute_substeps(dt: float) -> int:
 			var motion := fastest * dt
 			if motion > ccd_max_motion:
 				need = clampi(int(ceil(motion / ccd_max_motion)), 1, ccd_substep_budget)
-	# 迟滞：**涨立刻涨**（CCD 是安全项），**抓着东西时不许落**（见 ccd_substep_hold 的说明）。
-	# 不抓东西时 = 原来的行为（need 是多少就是多少），所以基准逐位不变。
+	# 迟滞：**涨立刻涨**（CCD 是安全项）；**回落要等一小段模拟时间**（见 ccd_substep_hold）。
+	#
+	# ⚠️⚠️ 旧实现是"只要 grabs 非空就只涨不落" —— 于是按住 Ctrl 左键拖动之后，
+	#    即使物体已经停下、悬在空中不碰任何东西，子步数也钉在峰值
+	#    （实测 21 刚体 + 1000 矩形的大物体：停下不松手 26 子步 = 23.3 ms/帧）。
+	#    正确的形状是"**一段时间**的保持"：过零是几分之一秒，"停下"是持续状态。
+	#
+	# ⚠️⚠️ 这段时间用**模拟时间**（dt）度量，**不能用挂钟**：挂钟会让物理依赖机器速度，
+	#    基准就不再可比。试过挂钟版（子步时间预算）：症状 25.6 -> 5.7 ms/帧 有效，
+	#    但 sleep_frag 从 -35.696264844083 变成 -35.400524684771，两次运行还不一致 —— 已整段撤回。
+	#
+	# ⚠️ 不抓东西时完全走原来的行为（need 是多少就是多少），所以基准逐位不变。
 	if need >= _substeps_held or grabs.is_empty():
+		_substeps_held = need
+		_substeps_hold_left = ccd_substep_hold if not grabs.is_empty() else 0.0
+	elif _substeps_hold_left > 0.0:
+		_substeps_hold_left -= dt
+	else:
 		_substeps_held = need
 	return _substeps_held
 
