@@ -22,7 +22,13 @@ var mat: PackedByteArray = PackedByteArray()
 ##       clear_pixel 会把 aux 归零（像素没了，它的历史也没意义了）。
 var aux: PackedByteArray = PackedByteArray()
 
-func _init() -> void:
+## ⚠️ skip_tables：整块拷贝（split 的绝大多数 chunk）走**零拷贝共享** ——
+##    PackedByteArray 是写时复制，直接赋值只是共享缓冲区，任何一方之后写入才会真的复制。
+##    所以那种情况下不必先分配两张 64 字节的表再被覆盖掉（每块省 2 次分配）。
+##    部分掩码的拷贝仍然需要这两张表（逐像素写入会触发 COW 复制）。
+func _init(skip_tables := false) -> void:
+	if skip_tables:
+		return
 	mat.resize(Bits.PIXELS)
 	aux.resize(Bits.PIXELS)
 
