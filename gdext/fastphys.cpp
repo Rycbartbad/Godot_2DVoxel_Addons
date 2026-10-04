@@ -106,8 +106,11 @@ alignas(16) static unsigned char g_str_empty_hint[64];
 //     宽面撞击会被压成一次尖刺；而且实测静默返回全 0。替代品是 op 35。
 //  35  contact_get_points(u32 idx, i32 cap)       -> i32 n_points，然后（cap 够时）
 //                                                    f64 id_a, id_b, n_points, total_impulse,
-//                                                    每个点 nx, ny, px, py, dist, impulse, fid1, fid2
-//                                                    （fid1/fid2 = 接触特征 id，跨帧稳定）
+//                                                    每个点 nx, ny, px, py, dist, impulse,
+//                                                    tangent_impulse, fid1, fid2
+//                                                    （impulse 是**法向**分量；tangent_impulse 是
+//                                                      **切向（摩擦）**分量，世界向量 = perp(n) * 它；
+//                                                      fid1/fid2 = 接触特征 id，跨帧稳定）
 //                                                    ⚠️ 一次物理更新里整个面可以同时有多个接触点
 //                                                    （60 Hz 是更新时间，不是接触数量限制）
 //  13  body_count()                               -> i32
@@ -431,7 +434,7 @@ static void run_rapier_cmd(RapierInstance *inst, const uint8_t *in, size_t in_n,
 				if (g_rap.contact_get_points != nullptr)
 					n = g_rap.contact_get_points(W, (int32_t)idx, pt_scratch.data(), cap);
 				w.i32(n);
-				size_t need = (size_t)(4 + n * 8);
+				size_t need = (size_t)(4 + n * 9);
 				if (cap > 0 && (size_t)cap >= need) {
 					for (size_t q = 0; q < need; ++q) w.f64(pt_scratch[q]);
 				}

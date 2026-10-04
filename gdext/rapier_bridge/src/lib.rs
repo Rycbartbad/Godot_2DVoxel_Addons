@@ -441,7 +441,7 @@ pub extern "C" fn rb_contact_get_points(w: *mut World, i: i32, out: *mut f64, ca
         for m in pair.manifolds() {
             n += m.points.len() as i32;
         }
-        if cap < 4 + n * 8 {
+        if cap < 4 + n * 9 {
             return n; // 让调用方扩容后重来
         }
         unsafe {
@@ -468,10 +468,14 @@ pub extern "C" fn rb_contact_get_points(w: *mut World, i: i32, out: *mut f64, ca
                     // 接触特征 id（parry 的 PackedFeatureId -> u32）：
                     // 这两个合起来标识"同一个接触特征"，跨帧稳定 —— warm start 靠它，
                     // 多点伤害也靠它避免"同一特征被重复领取预算"。
-                    *out.add(o + 6) = pt.fid1.0 as f64;
-                    *out.add(o + 7) = pt.fid2.0 as f64;
+                    // 切向（**摩擦**）冲量：接触点的冲量是"法向 + 切向"两个分量之和，
+                    // 只有摩擦为零时才沿法向。这里是切向那个标量（2D 的切空间是 1 维），
+                    // 世界向量 = perp(法向) * 它。符号遵循 Rapier 的约定。
+                    *out.add(o + 6) = pt.data.tangent_impulse.x as f64;
+                    *out.add(o + 7) = pt.fid1.0 as f64;
+                    *out.add(o + 8) = pt.fid2.0 as f64;
                 }
-                o += 8;
+                o += 9;
             }
         }
         return n;

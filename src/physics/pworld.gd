@@ -1073,8 +1073,8 @@ func _contact_fetch(idx: int) -> Dictionary:
 	if np <= 0:
 		return {"ok": false}
 	# 第二次：取全部
-	# 每点 8 个 f64：nx, ny, px, py, dist, impulse, fid1, fid2
-	var cap := 4 + np * 8
+	# 每点 9 个 f64：nx, ny, px, py, dist, impulse, tangent, fid1, fid2
+	var cap := 4 + np * 9
 	var cmds := PackedByteArray()
 	_rp_u8(cmds, 35)
 	_rp_u32(cmds, idx)
@@ -1085,20 +1085,26 @@ func _contact_fetch(idx: int) -> Dictionary:
 	var out: Array = []
 	for i in np:
 		# 跳过 res 头(4) + payload 头(i32 n + id_a,id_b,n_points,total 共 4 个 f64 = 36 字节)
-		# 每点 8 个 f64 = 64 字节（stride 从 48 改成 64 是因为加了 fid1/fid2）
-		var o := 40 + i * 64
+		# 每点 9 个 f64 = 72 字节（48 -> 64 加 fid1/fid2，64 -> 72 加切向冲量）
+		var o := 40 + i * 72
 		out.append({
 			"normal": Vector2(res.decode_double(o), res.decode_double(o + 8)),
 			"position": Vector2(res.decode_double(o + 16), res.decode_double(o + 24)),
 			"dist": res.decode_double(o + 32),
+			# ⚠️ impulse 是**法向**分量（Rapier 文档：along the contact normal）。
+			#    接触点的冲量其实是"法向 + 切向"两个分量之和，只有摩擦为零时才沿法向。
 			"impulse": res.decode_double(o + 40),
+			# **切向（摩擦）**分量（2D 的切空间是 1 维，所以是个标量）。
+			# 世界向量 = perp(normal) * 它，即 (-n.y, n.x) * tangent_impulse。
+			# 符号遵循 Rapier 的约定；库仑约束：|切向| <= mu * |法向|。
+			"tangent_impulse": res.decode_double(o + 48),
 			# 接触特征 id：(fid1, fid2) 是**面/顶点级**的特征，warm start 靠它。
 			# ⚠️⚠️ 但它**不含"第几个矩形"** —— 实测（tests/diag_fid_rect.gd）同一个方块砸在
 			#    同一个两矩形刚体的左半与右半，fid **完全相同**。
 			#    所以跨帧去重**不能只用它**：方块从矩形 A 滑到矩形 B 时 fid 可能不变，
 			#    只用它会把两处当成同一个接触。**必须和位置（或矩形索引）组合**。
-			"fid1": int(res.decode_double(o + 48)),
-			"fid2": int(res.decode_double(o + 56)),
+			"fid1": int(res.decode_double(o + 56)),
+			"fid2": int(res.decode_double(o + 64)),
 		})
 	# ⚠️ total_impulse 在 payload 的最后一个 f64：res 头(4) + i32 n(4) + id_a,id_b,n_points(24)
 	return {
