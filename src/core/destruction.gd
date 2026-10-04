@@ -80,16 +80,51 @@ class Damage:
 
 ## 生成一个 chunk 的 keep 掩码（bit 1 = 保留，bit 0 = 删除）。
 static func make_keep_mask(chunk_key: int, damage: Damage, force_keep: int = 0) -> int:
-	var keep := 0
+	# ⚠️⚠️ **判据按 kind 内联，不要逐像素调 damage.hits()**：
+	#    · 方法调用本身约 0.3 us/像素；
+	#    · segment 还会**每像素重算** ab 与 length_squared()（各一次向量运算）；
+	#    · match kind 也每像素走一遍。
+	#    实测 768x100 一刀 r=60（14400 像素）**8.8 ms**，内联 + 提公因式后 ~2 ms。
+	#    这是每一笔破坏都在付的钱（擦除/画笔/碎片生成都走这里）。
+	#
+	# ⚠️⚠️ **表达式与 hits() 里逐字相同**（同一个浮点运算顺序）—— 这是位等价的前提：
+	#    所以 radius*radius、ab = b-a、len2、dot 的展开都**原样保留**，不能"顺手化简"。
+	#    位等价由 tests/validation_damage_mask.gd 拿冻结的旧实现逐位对拍。
 	var bx := PixelShape.key_x(chunk_key) << 3
 	var by := PixelShape.key_y(chunk_key) << 3
+	var kind := damage.kind
+	var ax := damage.a.x
+	var ay := damage.a.y
+	var rr := damage.radius * damage.radius
+	var abx := damage.b.x - ax
+	var aby := damage.b.y - ay
+	var len2 := abx * abx + aby * aby
+	var hx := damage.half.x
+	var hy := damage.half.y
+	var keep := 0
 	for y in 8:
+		var py := float(by + y) + 0.5
 		for x in 8:
 			var bit := 1 << (x + (y << 3))
 			if (force_keep & bit) != 0:
 				keep |= bit
 				continue
-			if not damage.hits(bx + x + 0.5, by + y + 0.5):
+			var px := float(bx + x) + 0.5
+			var hit := false
+			if kind == Kind.CIRCLE:
+				var dx := px - ax
+				var dy := py - ay
+				hit = dx * dx + dy * dy <= rr
+			elif kind == Kind.SEGMENT:
+				var t := 0.0
+				if len2 > 0.000001:
+					t = clampf(((px - ax) * abx + (py - ay) * aby) / len2, 0.0, 1.0)
+				var qx := px - (ax + abx * t)
+				var qy := py - (ay + aby * t)
+				hit = qx * qx + qy * qy <= rr
+			else:
+				hit = absf(px - ax) <= hx and absf(py - ay) <= hy
+			if not hit:
 				keep |= bit
 	return keep
 
