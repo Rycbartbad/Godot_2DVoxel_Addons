@@ -389,44 +389,11 @@ pub extern "C" fn rb_contact_count(w: *mut World) -> i32 {
 ///   · 法向直接取 Rapier 的 \`ContactManifoldData.normal\`（它本来就是世界系）；
 ///   · 点要由 **collider1 的位姿**把 \`local_p1\` 变换过去 —— 它本身是 collider1 的局部坐标。
 ///     第一版直接把它当世界坐标输出，结果是错的（但看起来"有个数"）。
-#[no_mangle]
-pub extern "C" fn rb_contact_get(w: *mut World, i: i32, out: *mut f64) -> i32 {
-    let Some(w) = (unsafe { wref(w) }) else { return 0 };
-    if out.is_null() || i < 0 { return 0; }
-    let mut k = 0i32;
-    for pair in w.nf.contact_pairs() {
-        if !pair.has_any_active_contact() { continue; }
-        if k != i { k += 1; continue; }
-        let ca = pair.collider1;
-        let cb = pair.collider2;
-        let ida = w.colliders[ca].parent().map(|h| w.bodies[h].user_data as u32).unwrap_or(0);
-        let idb = w.colliders[cb].parent().map(|h| w.bodies[h].user_data as u32).unwrap_or(0);
-        let mut n = Vector::new(0.0, 1.0);
-        let mut p = Vector::new(0.0, 0.0);
-        let mut d = 0.0f32;
-        if let Some(m) = pair.manifolds().first() {
-            n = m.data.normal;
-            if let Some(pt) = m.points.first() {
-                let pose = w.colliders[ca].position();
-                p = pose.translation + pose.rotation * pt.local_p1;
-                d = pt.dist;
-            }
-        }
-        let imp = pair.total_impulse();
-        unsafe {
-            *out = ida as f64;
-            *out.add(1) = idb as f64;
-            *out.add(2) = n.x as f64;
-            *out.add(3) = n.y as f64;
-            *out.add(4) = p.x as f64;
-            *out.add(5) = p.y as f64;
-            *out.add(6) = d as f64;
-            *out.add(7) = imp.length() as f64;
-        }
-        return 1;
-    }
-    0
-}
+// ⚠️⚠️ rb_contact_get（旧 op 12）**已删除**。
+//    它只取 manifolds().first() 的 points.first() 作**位置**，却用 pair.total_impulse()
+//    作**冲量** —— 整个面的冲量被附在一个代表点上，宽面撞击照着它打洞就是一次尖刺。
+//    而且实测它在项目里静默返回全 0（tests/diag_contact_points4.gd 有记录）。
+//    替代品是 rb_contact_get_points（op 35）：全部流形 × 全部点，每点带**自己的**冲量。
 
 /// 读第 i 个接触对的**全部接触点**：out 至少 4 + 6*n 个 f64 ——
 /// id_a, id_b, n_points, total_impulse，然后每个点 nx, ny, px, py, dist, impulse。

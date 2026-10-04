@@ -88,7 +88,9 @@ var ccd_substep_budget := 600
 ## ⚠️ 迟滞**只在抓着东西时**生效：不抓时保持原来的行为（need 是多少就多少），
 ##    否则 dump_state 的 sleep_frag 会变（实测 -35.696264844083 -> -35.760093441963）——
 ##    那是把"拖动时的稳定性"和"基准不动"这两件事分开的唯一办法。
-var ccd_substep_hold := 0.25
+# ⚠️ 这里曾经有个 ccd_substep_hold := 0.25（"保持期"开关），但**代码从没读过它** ——
+#    迟滞实际由 _compute_substeps 里的 grabs.is_empty() 实现（见那里的说明）。
+#    我在提交 0e26d1c 的信息里写过"把它删掉"，其实没删；现在真删了，别再让它假装是个开关。
 
 ## 抓取时子步的**代价上限**（微秒）。抓着东西时，子步数还要再按**世界大小**压一遍。
 ##
@@ -99,7 +101,7 @@ var ccd_substep_hold := 0.25
 ##    一次快速拖动 = 25 子步 x 每个子步都要步进 1000 个矩形 = 125 ms/帧。
 ##
 ## ⚠️ 只在**抓取时**生效 —— 不抓时完全走原来的行为，所以 8 条基准**逐位不变**
-##    （它们不抓东西）。这和 ccd_substep_hold 的取舍是同一条：
+##    （它们不抓东西）。这和迟滞（_compute_substeps 里 grabs.is_empty() 那一段）的取舍同源：
 ##    把"拖动时的可用性"和"基准不动"这两件事分开。
 ##
 ## ⚠️ 代价：重场景里子步变少 -> 每子步位移变大 -> 被 ccd_clamp_motion 钳住 ->
@@ -1090,7 +1092,13 @@ func _contact_fetch(idx: int) -> Dictionary:
 			"impulse": res.decode_double(o + 40),
 		})
 	# ⚠️ total_impulse 在 payload 的最后一个 f64：res 头(4) + i32 n(4) + id_a,id_b,n_points(24)
-	return {"ok": true, "points": out, "total_impulse": res.decode_double(32)}
+	return {
+		"ok": true,
+		"points": out,
+		"total_impulse": res.decode_double(32),
+		"id_a": int(res.decode_double(8)),
+		"id_b": int(res.decode_double(16)),
+	}
 
 
 ## 第 idx 个接触对的**几何摘要** —— 宽度 / 穿透深度 / "相互进入的面积"估计。
@@ -1124,6 +1132,8 @@ func contact_geometry(idx: int) -> Dictionary:
 	return {
 		"points": pts,
 		"total_impulse": float(r.get("total_impulse", 0.0)),
+		"id_a": int(r.get("id_a", 0)),
+		"id_b": int(r.get("id_b", 0)),
 		"width": width,
 		"depth": depth,
 		"area": width * depth,
@@ -1153,33 +1163,30 @@ func _collect_contacts_rapier() -> void:
 		return
 	var seen := {}
 	if n > 0:
-		var cmds := PackedByteArray()
+		# ⚠️⚠️ 这里以前用 **op 12**：它只给"第一个流形的第一个点"作位置，却给整对的总冲量
+		#    —— 整个面的冲量被附在一个代表点上。现在改用 **op 35**（全部点 + 各自冲量 +
+		#    整对总冲量），于是 Contact 带上完整的接触面。
+		# ⚠️ op 12 已删除（它在本项目里静默返回全 0，留着只会误导）。
 		for i in n:
-			_rp_u8(cmds, 12)
-			_rp_i32(cmds, i)
-		var res := _rp_send(cmds, n * 64)
-		var off := 4
-		for i in n:
-			var ida := int(res.decode_double(off))
-			var idb := int(res.decode_double(off + 8))
-			var nx := res.decode_double(off + 16)
-			var ny := res.decode_double(off + 24)
-			var px := res.decode_double(off + 32)
-			var py := res.decode_double(off + 40)
-			var imp := res.decode_double(off + 56)
-			off += 64
-			var a: PBody = _rp_by_id.get(ida)
-			var b: PBody = _rp_by_id.get(idb)
+			var g := contact_geometry(i)
+			var pts: Array = g["points"]
+			if pts.is_empty():
+				continue
+			var a: PBody = _rp_by_id.get(int(g["id_a"]))
+			var b: PBody = _rp_by_id.get(int(g["id_b"]))
 			if a == null or b == null:
 				continue
-			_contact_add_rapier(a, b, Vector2(px, py), Vector2(nx, ny), imp)
+			var p0: Dictionary = pts[0]
+			_contact_add_rapier(a, b, p0["position"], p0["normal"],
+				float(g["total_impulse"]), pts, g)
 			var ka := a.id
 			var kb := b.id
 			seen[(ka << 32) | (kb & 0xFFFFFFFF) if ka < kb else (kb << 32) | (ka & 0xFFFFFFFF)] = true
 	_contact_prev = seen
 
 
-func _contact_add_rapier(a: PBody, b: PBody, point: Vector2, normal: Vector2, impulse: float) -> void:
+func _contact_add_rapier(a: PBody, b: PBody, point: Vector2, normal: Vector2, impulse: float,
+		pts: Array = [], geo: Dictionary = {}) -> void:
 	if contacts.size() >= max_contacts:
 		return
 	var c := Contact.new()
@@ -1193,6 +1200,14 @@ func _contact_add_rapier(a: PBody, b: PBody, point: Vector2, normal: Vector2, im
 	# 下面立刻用 Rapier 的真值覆盖它。contact_width / shear_ratio 仍然要它算。
 	_fill_contact_stress(c, a, b, rel, 0.0)
 	c.impulse = impulse
+	# ⚠️ 增量数据（来自 op 35，见 _collect_contacts_rapier）：
+	#    ⚠️ **不要**拿它们去改 contact_width / stress —— 那会改动物理可见的量，
+	#    8 条逐位基准立刻就不再成立。这里只是把数据摆出来给游戏层用。
+	c.points = pts
+	c.total_impulse = impulse
+	c.width = float(geo.get("width", 0.0))
+	c.depth = float(geo.get("depth", 0.0))
+	c.area = float(geo.get("area", 0.0))
 	var ka := a.id
 	var kb := b.id
 	var key := (ka << 32) | (kb & 0xFFFFFFFF) if ka < kb else (kb << 32) | (ka & 0xFFFFFFFF)
@@ -1372,6 +1387,20 @@ class Contact:
 	var normal := Vector2.ZERO
 	## 沿法向的接近速度：**正 = 正在靠近**，单位 px/s。这就是"撞得多猛"。
 	var approach := 0.0
+	## 这一步该配对的**全部**接触点，每个点 {position, normal, dist, impulse}。
+	##
+	## ⚠️⚠️ 为什么需要它：面-面接触通常有 **2 个**接触点（60 Hz 是**更新时间**，
+	##    不是接触数量限制）。只用 point 会在宽面撞击时把**整个面**的冲量集中到一处 ——
+	##    照着那个点打洞就是"一次尖刺攻击"。多点伤害要把入口铺在这上面。
+	var points: Array = []
+	## 整对的总冲量 —— 这次碰撞的**预算**。多个入口要**共同分配**它
+	## （每个入口按自己的 impulse 占比领，份额之和 = 1），而不是各自领走一整份。
+	var total_impulse := 0.0
+	## 接触宽度（接触段两端点距离，2D 里是一条**线**）/ 最大穿透深度 / 相互进入的**面积**估计。
+	## ⚠️ 宽度 != 面积：宽面浅碰 -> 宽度大、面积小；角部深插 -> 宽度小、面积可能不小。
+	var width := 0.0
+	var depth := 0.0
+	var area := 0.0
 	## 这一步才接触上（上一步不在这对里）。做"首次撞击"触发用。
 	var is_new := false
 

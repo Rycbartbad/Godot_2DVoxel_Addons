@@ -102,10 +102,8 @@ alignas(16) static unsigned char g_str_empty_hint[64];
 //   9  body_is_sleeping(u32 id)                   -> i32
 //  10  body_wake(u32 id)
 //  11  contact_count()                            -> i32
-//  12  contact_get(i32 idx)                       -> f64 id_a, id_b, nx, ny, px, py, dist, impulse
-//                                                    （法向与点都是**世界系**）
-//                                                    ⚠️ 只给**一个代表点 + 整对的总冲量**，
-//                                                    宽面撞击会被压成一次尖刺，见 op 35
+//  ⚠️ op 12（contact_get）**已删除**：它只给"一个代表点 + 整对总冲量"，
+//     宽面撞击会被压成一次尖刺；而且实测静默返回全 0。替代品是 op 35。
 //  35  contact_get_points(u32 idx, i32 cap)       -> i32 n_points，然后（cap 够时）
 //                                                    f64 id_a, id_b, n_points, total_impulse,
 //                                                    每个点 nx, ny, px, py, dist, impulse
@@ -159,7 +157,7 @@ struct RapierApi {
 	int32_t (*body_is_sleeping)(RPWorld, uint32_t) = nullptr;
 	void (*body_wake)(RPWorld, uint32_t) = nullptr;
 	int32_t (*contact_count)(RPWorld) = nullptr;
-	int32_t (*contact_get)(RPWorld, int32_t, double *) = nullptr;
+	// ⚠️ contact_get / op 12 已删除（静默返回全 0，替代品是 op 35）
 	// ⚠️ 与 contact_get 的区别：导出**全部**接触点及**各自的**冲量（见 op 35 的说明）
 	int32_t (*contact_get_points)(RPWorld, int32_t, double *, int32_t) = nullptr;
 	int32_t (*body_count)(RPWorld) = nullptr;
@@ -236,7 +234,7 @@ static bool load_rapier() {
 	RP_GET(body_is_sleeping, "rb_body_is_sleeping")
 	RP_GET(body_wake, "rb_body_wake")
 	RP_GET(contact_count, "rb_contact_count")
-	RP_GET(contact_get, "rb_contact_get")
+	// ⚠️ RP_GET(contact_get, "rb_contact_get") 已删除 —— 符号在 Rust 侧也删了，留着会加载失败
 	RP_GET(body_count, "rb_body_count")
 	RP_GET(body_add_force, "rb_body_add_force")
 	RP_GET(body_set_type, "rb_body_set_type")
@@ -352,13 +350,11 @@ static void run_rapier_cmd(RapierInstance *inst, const uint8_t *in, size_t in_n,
 			case 9: { uint32_t id = r.u32(); w.i32(g_rap.body_is_sleeping(W, id)); break; }
 			case 10: { uint32_t id = r.u32(); g_rap.body_wake(W, id); break; }
 			case 11: { w.i32(g_rap.contact_count(W)); break; }
-			case 12: {
-				int32_t idx = r.i32();
-				for (int k = 0; k < 8; ++k) buf[k] = 0.0;
-				g_rap.contact_get(W, idx, buf);
-				for (int k = 0; k < 8; ++k) w.f64(buf[k]);
-				break;
-			}
+			// ⚠️⚠️ **op 12 已删除**（连同 rb_contact_get / contact_get 指针 / RP_GET 绑定）。
+			//    原因：它只取"第一个流形的第一个点"作位置，却给整对的**总冲量**
+			//    —— 整个面的冲量被附在一个代表点上，宽面撞击照着它打洞就是一次尖刺。
+			//    而且它在我的探针里静默返回全 0（tests/diag_contact_points4.gd 记录），
+			//    留着只会让下一个人以为它可用。替代品是 op 35。
 			case 13: { w.i32(g_rap.body_count(W)); break; }
 			case 14: { uint32_t id = r.u32(); double fx = r.f64(), fy = r.f64(), tq = r.f64();
 				g_rap.body_add_force(W, id, fx, fy, tq); break; }
