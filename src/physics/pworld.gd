@@ -1025,6 +1025,72 @@ func _vel_at_pre(b: PBody, p: Vector2) -> Vector2:
 ## 与手写路径的区别：冲量**直接用 Rapier 的**（pair.total_impulse()），
 ## 不再靠"求解前后的速度差 × 有效质量"去估 —— 那是拿不到真值时的替代品。
 ## 但 approach 仍然必须用**求解前**的速度算（求解后接触点相对速度已归零）。
+## 读取第 idx 个接触对的**全部**接触点及各自的冲量。
+##
+## ⚠️⚠️ 为什么需要它（旧接口的缺陷）：旧的接触导出只取**第一个流形的第一个点**作位置，
+##    却用整对的**总冲量**作冲量 —— 一个点背着整个面的冲量。宽面撞击（面-面接触通常
+##    2 个点）如果照着这个点打洞，就会集中成一次尖刺攻击。
+##
+##    实测（tests/diag_contact_points4.gd：32 宽的方块平放落在静态地面上）：
+##      点数 = 2，位置 (50,100) 与 (82,100) —— 正是接触段的**两端**
+##      各点冲量 1280.0001 + 1280.0001 = 2560.0002 = 整对总冲量（比值 **1.000**）
+##    => 多点导出**天然满足**"一个面的多个入口共同分配这次碰撞的预算"。
+##
+## ⚠️ 调用方要注意的两条：
+##   1. dist < 0 才是**真穿透**；推测接触（dist > 0）虽然也有冲量，但那是在**阻止接近**，
+##      不是发生了撞击 —— 伤害判据不能只看冲量，否则擦身而过也会打洞。
+##   2. 每个点带 feature id（op 35 没导出，warm start 用的那个）—— 多点伤害需要
+##      "跨帧稳定身份"来避免同一特征被重复领取预算，将来要用就一起导出。
+##
+## ⚠️⚠️ 协议照 _rp_send 抄，别手搓：inp = i32 out_cap + i32 cmds.size() + 命令流；
+##    res 的头 4 字节是**实际写入字节数**（不是数据！），数据从**偏移 4** 开始。
+##    这两条我都踩过：漏头 -> "未知操作码 247（命令流错位）"；把头当数据读 -> "数量 = 0"。
+func contact_points(idx: int) -> Array:
+	var head := PackedByteArray()
+	_rp_u8(head, 35)
+	_rp_u32(head, idx)
+	_rp_i32(head, 0)
+	var hres := _rp_send(head, 4)
+	if hres.decode_s32(0) < 4:
+		return []
+	var np: int = hres.decode_s32(4)
+	if np <= 0:
+		return []
+	var cap := 4 + np * 6
+	var cmds := PackedByteArray()
+	_rp_u8(cmds, 35)
+	_rp_u32(cmds, idx)
+	_rp_i32(cmds, cap)
+	# ⚠️ 两个"cap"单位不同，别混：op 35 的 cap 参数是**double 个数**（= 4 + 6n），
+	#    而协议头里的 out_cap 是**字节数**（= 4 + cap*8，前面还有那个 i32 n）。
+	#    我第一版写成 cap*8、并把判据写成 (4+cap)*8 —— 差 4 字节，于是每次都被
+	#    "写入字节数不足"挡掉、返回空数组（而 op 35 本身是好的）。
+	var res := _rp_send(cmds, 4 + cap * 8)
+	if res.decode_s32(0) < 4 + cap * 8:
+		return []
+	var out: Array = []
+	for i in np:
+		# 跳过 res 头(4) + payload 头(i32 n + id_a,id_b,n_points,total 共 4 个 f64 = 36 字节)
+		var o := 40 + i * 48
+		out.append({
+			"normal": Vector2(res.decode_double(o), res.decode_double(o + 8)),
+			"position": Vector2(res.decode_double(o + 16), res.decode_double(o + 24)),
+			"dist": res.decode_double(o + 32),
+			"impulse": res.decode_double(o + 40),
+		})
+	return out
+
+
+## 本步的接触对数量（只数有流形点的）。
+func contact_pair_count() -> int:
+	var cmds := PackedByteArray()
+	_rp_u8(cmds, 11)
+	var res := _rp_send(cmds, 4)
+	if res.decode_s32(0) < 4:
+		return 0
+	return res.decode_s32(4)
+
+
 func _collect_contacts_rapier() -> void:
 	if _rp == null:
 		return
