@@ -23,6 +23,9 @@ func _call(rp, idx: int, cap: int) -> PackedByteArray:
 
 func _initialize() -> void:
 	var w := PWorld.new()
+	# ⚠️ PWorld.new() 的默认重力是 0 —— 不设它方块根本不会落下来，
+	#    表现是"跑了 60 帧一个接触对都没有"（第二版踩的坑）。
+	w.gravity = Vector2(0, 600)
 	var ground := PBody.new()
 	ground.position = Vector2(0, 100)
 	ground.make_static()
