@@ -504,7 +504,7 @@ func _apply_impact_damage() -> void:
 				if body == null or body.shapes.is_empty():
 					continue
 				var dmg = Destruction.Damage.circle(body.to_local(e["point"]), e["radius"])
-				for frag in world.detach(body, dmg):
+				for frag in world.fracture(body, dmg):
 					renderer.sync(frag)
 				renderer.sync(body)
 				renderer.sync(body)
