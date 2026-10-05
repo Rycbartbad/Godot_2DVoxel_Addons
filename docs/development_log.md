@@ -4288,3 +4288,22 @@ friction 直接变 0）；ink-2 因此必须自己补一次 `refresh_mass()`，�
 （另外 `_compute_substeps` 顺手拆成了 `_fastest_motion_plain` / `_fastest_motion_grouped`
 两条路，默认那条与原实现逐字等价。）
 
+
+## 表 ⑤ 的收尾 —— detach 的"贴边界小洞"走**局部连通判据**（已实施）
+
+detach 以前只要 `was_boundary` 就无条件 `ensure_connected`（**全量连通分量标注**，
+768x100 实测 13.5 ms），而"贴着边界挖个小洞"恰恰是绝大多数笔画的形态。
+现在先试**可证明的局部判据**（`Destruction.local_connectivity`，与 fracture 那条同源）：
+证明仍连通 -> 不分裂、原对象、按 shape 的脏矩形（只重画脏块）；判不出来才退回全量
+（**宁可慢，不能错**）。
+
+⚠️ 只在**单 shape** 上走这条：局部判据一次只回答一个 shape，多 shape 各自坐标系不同，
+保守退回 `ensure_connected`。
+
+**A/B 实测**（768x100 静态底板、左上角一笔 9x9 的 detach，min of 5）：
+**23.130 ms -> 7.506 ms（3.1x）**。
+
+**闸门**：`tests/validation_local_repaint.gd` 扩到 12 项，新增那组的判据是
+**形状对象没被换掉**（= 没做全量分裂/重组）+ 只重建 1 块 + 贴图与形状逐像素一致 ——
+前两条只有"真的走了局部判据"才同时成立。
+

@@ -2559,9 +2559,22 @@ func detach(body: PBody, damage, burst_speed: float = 40.0) -> Array:
 	#   · 脏标记也是 PBody.rebuild() 里统一做的（见它的注释），不需要手动标。
 	#   （我第一版写了 body.rebuild() -> "Too few arguments"，白跑一轮。）
 	if was_boundary:
-		# 断开的连通分量各自成体（引擎本来就有的机制）
-		# ⚠️ 把伤害范围传下去：不然渲染器判 untracked -> 整张贴图重画（768x100 约 44 ms）
-		out.append_array(ensure_connected(body, min_fragment_pixels, dmg_rect))
+		# ⚠️ 先试**便宜且可证明**的局部判据（与 fracture 那条同源，见 Destruction.local_connectivity）：
+		#    "贴着边界挖个小洞"以前一律跑全量连通分量标注（768x100 实测 13.5 ms），
+		#    而那一笔本身只要几毫秒。判不出来才退回全量 —— **宁可慢，不能错**。
+		#    ⚠️ 只在**单 shape** 上走这条：局部判据一次只回答一个 shape；多 shape 时
+		#    各自坐标系不同，保守退回 ensure_connected（它逐个 shape 处理）。
+		var lc := Destruction.LOCAL_UNKNOWN
+		if body.shapes.size() == 1:
+			lc = Destruction.local_connectivity(body.shapes[0], dmg_rect, min_fragment_pixels)
+		if lc == Destruction.LOCAL_CONNECTED:
+			# 证明还连通 -> 不分裂、原对象、按 shape 的脏矩形 -> 只重画脏块
+			body.rebuild(body.shapes, density_callable(), max_rects_per_shape, dmg_rect,
+				friction_callable(), restitution_callable())
+		else:
+			# 断开的连通分量各自成体（引擎本来就有的机制）
+			# ⚠️ 把伤害范围传下去：不然渲染器判 untracked -> 整张贴图重画（768x100 约 44 ms）
+			out.append_array(ensure_connected(body, min_fragment_pixels, dmg_rect))
 	else:
 		# 没碰边界 -> 一定没断 -> 只重建（形状数据 + 质量/碰撞体 + 脏标记）
 		# ⚠️ 三个 Callable + dmg_rect 都要传：见 PBody.rebuild 的说明（不传 = 母体变轻变滑）

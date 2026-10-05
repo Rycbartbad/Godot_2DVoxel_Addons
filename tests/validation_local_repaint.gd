@@ -129,6 +129,19 @@ func _initialize() -> void:
 	_c("detach：贴图与形状逐像素一致", _pixel_mismatch(pw, gb) == 0,
 		"不一致 %d 像素" % _pixel_mismatch(pw, gb))
 
+	# ---- ③b detach **贴着边界**的小洞：局部判据证明还连通 -> 不分裂、不换形状 ----
+	var f3b := await _fresh()
+	pw = f3b[0]
+	w = pw.world
+	gb = f3b[1]
+	var shape_before = gb.shapes[0]
+	w.detach(gb, Destruction.Damage.rect(Vector2(6, 6), Vector2(4, 4)))     # 贴左上角，但很小
+	var e := _sync_and_report(pw, gb, "detach 贴边界小洞")
+	_c("detach 贴边界小洞：形状对象没被换掉（没做全量分裂）", gb.shapes.size() == 1 and gb.shapes[0] == shape_before)
+	_c("detach 贴边界小洞：只重建脏块（<= 2）", e[0] <= 2, "%d/%d" % [e[0], e[1]])
+	_c("detach 贴边界小洞：贴图与形状逐像素一致", _pixel_mismatch(pw, gb) == 0,
+		"不一致 %d 像素" % _pixel_mismatch(pw, gb))
+
 	# ---- ④ 对照：**跨到边界**的一笔（新世界） ----
 	var f4 := await _fresh()
 	pw = f4[0]
