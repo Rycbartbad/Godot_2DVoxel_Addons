@@ -4091,3 +4091,121 @@ op 35 是**两步式**的（先问点数、再取数据），也就是每对接�
 - `tests/validation_grab_budget.gd` 改成调引擎的 `grab_substep_cap()`，并加"帧时间在预算内"；
 - `tests/bench_contact_light.gd`：上面两张表的探针（`bench_*` 不是闸门，不参与全绿）。
 
+
+---
+
+# ink-2 的新一批 Request：R1 渲染归属（已修）、R2 核验（已量）、R3 诊断（已交付）
+
+## R1：`sync_world_bodies` 必须沿用 `has_own_sprite` 策略 —— **已修**
+
+**症状（甲方）**：破坏瞬间多出一张**矩形手**，而且它**停在旧位置**。
+
+**根因**：判据只在 `rebuild()` / `bake_node()` 里过滤（`has_own_sprite`），而**每帧同步**
+（`_physics_process`）与**破坏后的同步**（`sync_world_bodies`）**不过滤** ——
+于是自带视觉的刚体被内部渲染器画了一张矩形；游戏层又跳过自有视觉的同步，那张矩形就永远停在原地。
+
+**修法**：
+- 判据收敛成**一个** `PixelWorld.uses_internal_render(node)`，四条同步路径共用
+  （`rebuild` / `bake_node` / `_physics_process` / `sync_world_bodies`）；
+- 不该画的刚体在同步时走 `renderer.forget()` —— **把以前画出来的那张回收**（甲方要的"旧 holder 回收"）；
+- 新增 `PixelBody2D.internal_render`（默认 true）：不可见的臂/手**不再需要透明精灵占位**。
+
+**闸门**：`tests/validation_node_render_policy.gd`（18 项：归属、回收、连续固定步无残影、
+破坏后碎片照画而这两类不画、以及"该画的仍然画着"的反向对照）。
+
+⚠️ 判据的参数**故意不加 `: Node` 类型标注**：`_body_nodes` 里允许**鸭子类型替身** ——
+`tests/validation_node_sync.gd` 用的就是 RefCounted stub。加了标注会在**调用点**抛类型错误，
+那条老闸门当场变红（实测：静态 Ground 不再被同步）。非 Node 的替身按"要画"处理 = 老行为。
+
+## 顺带挖出两个**一直红着**的闸门问题（都不是这批 Request 引入的）
+
+1. **addon 副本的 const 压不住 src/ 的全局 class_name**（`tools/build_addon.py`）。
+   addon 副本里 `const PixelBody2D := preload(...)` 在**类型位置**（`node: PixelBody2D`、
+   `c is PixelBody2D`）解析到的是 **src/ 那一份**脚本 —— 于是 `rebuild()` 里
+   `c is PixelBody2D` 全为假，**烘焙出 0 个刚体**（静默），`add_body_node` 抛类型错误。
+   症状：`tests/validation_fusion.gd` 2 条 FAIL **且卡死不退出**（跑全量闸门必须给它超时）。
+   **修法**：生成时把"与 src/ 的 class_name 同名的 const"改名（`_PixelBody2D`），
+   连带它在**同一文件**里的用法 —— 跳过注释与字符串（那里是给人看的文字）。
+   ⚠️ 逐行扫描的前提是"没有跨行字符串"，所以构建前**核对** `"""`，有就吵闹地失败。
+   实测：13/14（剩下的那条见下）。只影响 addon 内部；用户项目里没有 src/，本来解析到的就是那句 const。
+2. **`_body_nodes` 与 `world.bodies` 的下标错位**。门面 spawn 的刚体、破坏产生的碎片
+   都**只进 `world.bodies`**，而 `bake_node` 直接 `append` —— 错位之后
+   `add_body_node` 的幂等分支返回了**别人的刚体**（静默）。
+   症状：`validation_fusion` 第 14 条 "add_body_node 幂等" FAIL。
+   **修法**：`bake_node` 先用 **null 占位**补齐（与 `sync_world_bodies` 同源：不删项、只补位）。
+   实测：**14/14** —— 至此 **62 个闸门脚本全绿**（这是本项目第一次）。
+
+## R2：破坏瞬间的插值历史核验 —— **三条实测都没问题**，只有一条没法在本机验证
+
+探针 `tests/diag_render_handoff.gd`（诊断用，不是闸门）实测：
+
+| 核验项 | 结果 |
+|---|---|
+| ① 新建 holder 的**同一帧**变换 | 位置/旋转与刚体一致（取 `(-13, 100)`，故意不是 64 的倍数） |
+| ① 新建块 sprite 的 `offset` | == 区域原点（独立公式算的期望），0 处不一致 |
+| ② `forget()` 之后旧节点还在画吗 | `queue_free` 后**立刻脱离树**（`is_inside_tree=false`、`queued_free=true`），下一帧已释放 -> **不会残留一帧** |
+| ③ 形状/贴图边界变化的 offset | 已有闸门 `tests/validation_sprite_offset.gd`（像素级独立参照，2/2）+ 探针 ① 第二行 |
+
+**唯一没能验证的**：**消费方项目开了物理插值**（`physics/common/physics_interpolation`）时，
+新建 holder/tile 的**插值历史**。本项目这个开关是 **false**（探针打印），而 `PixelRenderer`
+的 `physics_interpolation_mode` 是 `0`（Inherit）—— 引擎既没 opt-in 也没 opt-out，跟着项目设置走。
+要确认只能在 ink-2 那边开着插值复现一次。引擎侧的一行防御性写法是
+`holder.reset_physics_interpolation()`，但**没有证据之前不写**（甲方自己说了"不能直接把这三项当作已确认根因"）。
+
+## R3：约束误差诊断 —— **已交付**（零原生改动）；原生精度旋钮 **未做，等决策**
+
+**诊断（已交付）**：`PJoint` 加三个只读方法，纯 GDScript、**零原生调用**（每次 ~5~10 us）：
+`anchor_error()` / `anchor_error_len()`（锚点世界坐标差）、`angle_error()`（WELD/HINGE 锁住的那一行）、
+`lateral_error()`（滑轨被锁住的 LinY 行）。
+⚠️ `angle_error()` **不能**用 `movement()` 代替 —— WELD 的 `movement()` 恒为 0。
+⚠️ Rapier **不暴露**内部约束误差（`ImpulseJoint` 只有 `impulses`，误差只作为 `rhs` 活在求解器里）；
+这些量是**位姿级**的答案（"约束到底把两端按住了吗"），与求解器同源但不是同一个数学对象。
+**闸门**：`tests/validation_joint_error.gd`（14 项）。判据是"人为瞬移/转一个**已知量**，读到的误差必须等于它"。
+⚠️ 写这个测试时踩了一次**自己的**错：第一版把"瞬移 + 转"一起做，然后期望"误差 == 位移" ——
+错了：锚点是**刚体局部**坐标，转刚体会让锚点绕原点划一段弧。实测 `(0.836838, -6.784912)`，
+正是 `位移 + (局部锚点转过来的那一段)`。改成两段各自给预期之后吻合（容差 1e-4，
+因为 `to_world` 走 Vector2 = **float32**）。
+
+**原生精度旋钮（未做）**：Rapier 2D 0.36 里最对症 R3 的两个旋钮是
+`IntegrationParameters::warmstart_joints`（**默认 false**，Rapier 原话 "noticeably improves
+convergence of stiff joint assemblies"）与每关节的 `GenericJoint::softness`（默认 1e6 Hz / ζ=1）。
+两者都要**重编两个 DLL**；做成"默认 = 现状"的 op（40/41）则逐位基准不动，但**重编 DLL 本身**
+需要重新核对 8 条基准（不同编译器/优化下的浮点代码生成）。**这条留给人决定**：
+先拿上面那三个诊断量量出"哪个关节在漂、漂多少"，再决定要不要动求解器精度。
+
+## 下一批（表 ① ②）的调研结论 —— **本轮未改代码**
+
+调研已完成（只读，未改任何文件）。两条都**不影响 8 条基准**（`dump_state.gd` 里没有任何
+fracture/detach，只 add_body —— 已核）。
+
+### ① `fracture_pixels` 的贴图是**全量失效**（其他三个原语同病）
+
+`fracture_pixels`（pworld.gd:2502）调 `body.rebuild(kept, density_callable(), max_rects_per_shape)` ——
+**第 4 个参数 `dirty_rect` 没传**，于是 pbody.gd:369-375 走 `touch()`（只 `revision+1`、
+不动 `range_revision`），渲染器判 `untracked=true` -> **该刚体所有贴图块重画**。
+而脏信息**本来就是全的**（`clear_pixel` 已经逐块记过脏）。
+对照：`fracture()` 传了 `dmg_rect` 并显式 `mark_dirty_range` -> 只重建 1~2/24 块。
+
+实测（现成探针）：局部更新 **0.370~0.40 ms/笔**；单块 64x64 实心重画 **2.513 ms**；
+768x100 实心底板整块重建 ≈ **44~48 ms**（24 块 x 2.513 + 零头，与仓库历史记录的 44 ms 吻合）。
+⚠️ 你说的 "~20 ms" 对应约 3.3 万像素的底板（512x64）；768x100 会到 44 ms 以上。
+
+### ② 破坏之后**母体**的 mass / friction / restitution 是**错的**（游戏才必须补一次 refresh_mass）
+
+| 入口 | density_of | friction/restitution | 结果 |
+|---|---|---|---|
+| `add_body` | 兜底 `density_callable()` | ✓ | **对**（碎片走这条，所以碎片是对的）|
+| `fracture` 母体（pworld.gd:1887）| **`Callable()`（无效）** | ✗ | mass=像素数、density=1.0、**friction=0、restitution=0** |
+| `detach`(2402) / `fracture_pixels`(2502) / `ensure_connected`(473) | ✓ | ✗ | mass 对，**friction/restitution 被写成 0** |
+| `PixelEditor.paint_into` / `ShapeOps.attach_to` | ✗ | ✗ | 同上（mass 也错）|
+
+也就是说：**打一次洞，那块石头就变轻、变滑**（demo 材质表 [0, 2.5, 0.6, 7.8, 2.0]，
+friction 直接变 0）。ink-2 调了 `refresh_mass()` 所以质量对，代价是**同一趟逐像素扫描 +
+贪心分解 + 碰撞体重推 + 整张贴图重建再付一遍**（200x200 体实测 rebuild 7.335 ms；
+768x100 静态体纯分解 5.26 ms；贴图那笔见 ①）。
+Rapier 侧的搬运机制是对的（pworld.gd:874-895 会重推），坏的是**源头字段已经被写坏**。
+
+**拟定的实施顺序**（5 步，见下一条提交）：`PBody.rebuild` 扩参（按 shape 的 `dirty_rects` +
+"无效 Callable 不写 0"）-> 四个破坏调用点补齐三个 Callable + 删除包围盒 -> 编辑路径 ->
+两条新闸门（局部重绘块数、破坏后质量/摩擦）-> 量一遍并记账。
+

@@ -99,6 +99,34 @@ func build_shape() -> PixelShape:
 > `m*g/刚度` 处。Demo 里那个 16x16 木箱（m≈154、g=600）用 `stiffness=10000` 得到 9 px 垂度；
 > 用 200 会直接坠到地上（垂度 462 px），再往上调则 `ω*dt > 1` 会把求解器炸掉。
 
+### 约束误差：怎么知道"哪个关节在漂"
+
+`PJoint` 有三个**只读**诊断量（纯 GDScript 算，**零原生调用**，每次约 5~10 µs）：
+
+| 方法 | 量 | 用途 |
+|---|---|---|
+| `anchor_error()` / `anchor_error_len()` | 两个锚点的世界坐标差（px） | 约束有没有把两端按在一起 |
+| `angle_error()` | 相对转角相对创建时刻的变化（弧度） | **WELD / HINGE 锁住的那一行** |
+| `lateral_error()` | 滑轨**垂直于轴**的漂移（世界向量） | SLIDER 锁住的 LinY 那一行 |
+
+```gdscript
+# 按**步**采样（不是每帧 —— 一帧可能补多个 step，那样会漏掉中间的振动）
+func _on_step(w) -> void:
+    for j in w.joints:
+        if j.anchor_error_len() > 0.25:
+            print("关节 %d 锚点漂了 %.3f px，角差 %.4f rad" % [
+                j.rapier_id, j.anchor_error_len(), j.angle_error()])
+```
+
+> ⚠️ 它**不是** Rapier 内部那个速度级约束误差（那个不对外暴露，只作为 rhs 活在求解器里），
+> 而是**位姿级**的答案："约束到底把两个锚点 / 朝向按住了吗"。两者同源（位姿是约束的积分结果），
+> 但不是同一个数学对象 —— 别拿它当求解器残差用。
+> ⚠️ `angle_error()` **不能**用 `movement()` 代替：WELD 的 `movement()` 恒为 0（它没有自由度），
+> 而那正是"焊接被拉歪多少"最需要看的地方。
+> ⚠️ 容差里的坑：锚点走 `body.to_world()`，而 **Vector2 是 float32**（GDScript 标量才是 float64）——
+> 自己算预期值时容差别小于 1e-4。
+> 闸门：`tests/validation_joint_error.gd`（14 项，判据是"人为瞬移/转一个已知量，读到的误差必须等于它"）。
+
 ## 材质是资源
 
 `PixelMaterial` 是一个 `Resource`：颜色 / 密度 / 摩擦 / 恢复系数 / 抗压 / 抗剪在**同一个资源**里。
@@ -341,6 +369,30 @@ var body = pw.add_body_node(node)
 > 正好各多 3 px = 半个线宽）。改细之后还必须画在**像素精灵之上**（`z_index`），
 > 否则 1 px 的线有一半被精灵盖掉，看起来像"叠加层消失了"。
 
+## 渲染归属：谁画这个刚体
+
+内部渲染器（`PixelRenderer`）只画**该由它画**的刚体。判据只有一个：
+`PixelWorld.uses_internal_render(node)`，四条同步路径共用（`rebuild` / `bake_node` /
+每帧的 `_physics_process` / 破坏后的 `sync_world_bodies`）。
+
+| 刚体 | 谁画 | 怎么配 |
+|---|---|---|
+| 普通刚体 | 内部渲染器 | 默认 |
+| 有自定义视觉（子节点 `PixelSprite2D`、自绘 `Polygon2D`） | **它自己** | 挂 `PixelSprite2D` 即可（引擎自动让位）|
+| 不该被看见（玩家内部的"手/臂"：只有碰撞和骨骼） | **谁也不画** | `PixelBody2D.internal_render = false` |
+| 破坏产生的碎片 | 内部渲染器 | 它们没有节点，自动归内部渲染器 |
+
+两条"不要画"的理由**任一成立**就不画；刚体**后来**才拿到自有视觉（或改成 `internal_render=false`）时，
+**下一次同步就会把旧贴图回收**（`renderer.forget`）—— 所以"破坏之后调一次 `sync_world_bodies()`"
+不会给它补出一张矩形残影。
+
+> ⚠️ 为什么这条要单独写：以前只有 `rebuild` / `add_body_node` 过滤，**每帧同步**和**破坏后的同步**
+> 不过滤 —— 症状是破坏瞬间多出一张**矩形手**，而且它**停在旧位置**（游戏层跳过自有视觉的同步，
+> 那张矩形就永远留在原地）。闸门：`tests/validation_node_render_policy.gd`（18 项）。
+>
+> ⚠️ `internal_render = false` 只影响**画**：像素照样参与物理、破坏、质量、连通性，
+> 刚体也不会被摘出世界。它的用途是"不可见的臂/手"，**不是**"隐藏物体"（要隐藏用 `visible` 或层级）。
+
 ## 破坏之后：节点层怎么跟世界对齐
 
 破坏（`fracture` / `detach` / `fracture_pixels`）会**增删刚体**：碎片是新刚体、被全删的刚体消失。
@@ -375,7 +427,8 @@ func _on_step(w) -> void:
 - **按下标重建 `_body_nodes`**，碎片/未节点化的刚体用 **null 占位**（**不删项** —— 删了会让下标整体错位，
   症状是"节点索引串位"）；
 - **全量 `renderer.sync`（含静态地形）** —— 每帧的自动同步只同步动态体（静态体像素不变、sync 又贵），
-  但破坏之后静态地形的像素**真的变了**；
+  但破坏之后静态地形的像素**真的变了**。⚠️ **自带视觉 / `internal_render=false` 的刚体除外**：
+  它们不画，而且会在这里把**以前画出来的**旧贴图回收（见下"渲染归属"）；
 - `renderer.prune(...)` 清掉已经不存在的刚体；
 - **清掉锚点已不存在的关节** —— ⚠️ `body_a`/`body_b` 为 `null` 表示"锚在静态世界"，
   那是**合法**的，必须保留。

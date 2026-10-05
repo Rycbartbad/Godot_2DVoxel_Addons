@@ -178,6 +178,48 @@ func speed() -> float:
 			return 0.0
 
 
+# ============================================================ 约束误差（诊断）
+
+## ⚠️ 这些量**不是** Rapier 内部那个速度级约束误差 —— 那个不对外暴露（只作为 rhs 活在求解器里，
+##    每步重建，见 rapier_bridge/src/lib.rs 的 op 30 说明）。它们回答的是**位姿级**的问题：
+##    "约束到底把两个锚点 / 两个朝向按住了吗"。也就是 R3 里那个"锚点误差 / 角差"，与求解器同源
+##    （位姿就是约束的积分结果），只是**不是**同一个数学对象 —— 别拿它当求解器的内部残差用。
+##
+## ⚠️ 采样时机决定你看到什么：子步末读一次只看到"步末"值；要刻画**振动**请按**步**采样
+##    （PWorld.step() 之后，或节点层的 PixelWorld.physics_step_finished 信号里）。
+##
+## ⚠️ 代价：每关节每次约 10 次 GDScript 操作（项目经验值 ~5~10 us），**零原生调用**。
+##    所以别把它塞进每子步的热循环 —— 需要时再读。
+##
+## ⚠️ 为什么不做成原生 op：Rapier 每关节每子步一次往返实测 ~2.8 us（见 dd8682d），
+##    10 个关节 x 29 子步 = 0.8 ms/步，而这里 0 次调用就拿到了同一个量。
+
+## 锚点误差（世界向量，px）：约束有没有把两个锚点按在一起。
+## 静态端（body == null）用的是世界坐标锚点，公式照样成立。
+func anchor_error() -> Vector2:
+	return anchor_b_world() - anchor_a_world()
+
+
+func anchor_error_len() -> float:
+	return anchor_b_world().distance_to(anchor_a_world())
+
+
+## 角度误差（弧度）：WELD / HINGE 锁住的那一行。
+##
+## ⚠️ **不能复用 movement()**：WELD 的 movement() 恒为 0（它没有自由度），
+##    而那恰恰是"焊接被拉开多少角度"最需要看的地方。
+func angle_error() -> float:
+	return wrapf((_rot_b() - _rot_b0) - (_rot_a() - _rot_a0), -PI, PI)
+
+
+## 滑轨专用：**垂直于轴**的漂移（被锁住的 LinY 那一行）。
+## 沿轴的分量是 movement()（那是它的自由自由度），这里只给被锁住的那部分。
+func lateral_error() -> Vector2:
+	var d := anchor_b_world() - anchor_a_world()
+	var ax := world_axis()
+	return d - ax * d.dot(ax)
+
+
 # ============================================================ 参数
 
 ## 限位。铰链是角度（弧度），滑轨是距离（沿轴，创建时为 0）。

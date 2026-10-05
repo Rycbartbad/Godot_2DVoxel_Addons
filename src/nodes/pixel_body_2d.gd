@@ -339,6 +339,20 @@ func invalidate_gizmo() -> void:
 ##    对不齐（表现为"画面上和碰撞形状差半个像素"，很难看出但很烦人）。
 @export var snap_to_pixel := true
 
+@export_group("渲染")
+## 这个刚体**要不要由引擎的内部渲染器画**。
+##
+## ⚠️ 什么时候要关掉它（两种，都是真实需求）：
+##   · 刚体**有自己的视觉**（子节点 PixelSprite2D / 自绘的 Polygon2D）——
+##     开着的话引擎会再画一份矩形贴图，两份精灵重叠（半透明时尤其明显）；
+##   · 刚体**根本不该被看见**（比如玩家角色内部的"手/臂"：只有碰撞和骨骼，没有像素画）——
+##     以前这种情况只能塞一个**透明精灵**去绕开内部渲染器，那是拿占位去满足实现细节。
+##
+## ⚠️ 关掉只影响**画**：像素照样参与物理、破坏、质量、连通性，刚体也不会被摘出世界。
+## ⚠️ 它和"自带 PixelSprite2D"是**同一件事的两个入口**（判据在
+##    PixelWorld.uses_internal_render()，四个同步路径共用），两者任一成立就不画。
+@export var internal_render := true
+
 ## 烘焙出来的 PBody（RefCounted）。编辑器里是 null，运行时才有值。
 ##
 ## ⚠️ 这里**不能**加 @export：Godot 的 @export 只允许内置类型 / Resource / Node / enum，

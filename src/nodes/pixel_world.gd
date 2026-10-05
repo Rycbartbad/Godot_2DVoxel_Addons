@@ -292,7 +292,7 @@ func rebuild() -> void:
 		var internal: Array = []
 		for i in world.bodies.size():
 			var b = world.bodies[i]
-			if i < _body_nodes.size() and _body_nodes[i] != null 					and has_own_sprite(_body_nodes[i]):
+			if i < _body_nodes.size() and not uses_internal_render(_body_nodes[i]):
 				continue
 			internal.append(b)
 		renderer.sync_all(internal)
@@ -355,8 +355,18 @@ func bake_node(node: PixelBody2D) -> PBody:
 	var b: PBody = world.add_body(node.bake(), shapes, Callable(self, "_density_of"))
 	# ⚠️ _body_nodes 与 world.bodies **按下标一一对应**（rebuild 末尾和
 	#    has_own_sprite 的过滤都依赖这个不变量）。两边必须同时 append/remove_at。
+	#
+	# ⚠️⚠️ 但"同时 append"这件事**在别人也往世界里加刚体时不成立**：
+	#    门面（pixel_physics.gd）的 spawn_*、以及破坏产生的碎片，都只进 world.bodies，
+	#    不进 _body_nodes。这时直接 append 会让下标整体错位 ——
+	#    症状是 add_body_node() 第二次调用**返回了别人的刚体**（幂等那条断言就是这么挂的：
+	#    tests/validation_fusion.gd "add_body_node 幂等"，13/14）。
+	#    修法：先用 **null 占位**补齐（与 sync_world_bodies 的做法同源：不删项，只补位），
+	#    这样 append 出来的节点与刚体又对上了。
+	while _body_nodes.size() < world.bodies.size() - 1:
+		_body_nodes.append(null)
 	_body_nodes.append(node)
-	if auto_render and renderer != null and not has_own_sprite(node):
+	if auto_render and renderer != null and uses_internal_render(node):
 		renderer.sync(b)
 	_sync_overlays()
 	return b
@@ -415,10 +425,41 @@ func palette_for_render() -> Array:
 
 ## 这个刚体是否自带 PixelSprite2D —— 自带的话就不进内部渲染器，避免画两遍。
 static func has_own_sprite(node: Node) -> bool:
+	if node == null or not is_instance_valid(node):
+		return false
 	for c in node.get_children():
 		if c is PixelSprite2D:
 			return true
 	return false
+
+
+## 这个刚体**要不要由内部渲染器画**。
+##
+## ⚠️⚠️ 判据**只能有这一个**：rebuild() / bake_node() / _physics_process() /
+##    sync_world_bodies() 四处共用。以前只有前两处过滤（has_own_sprite），于是
+##    "破坏之后调一次 sync_world_bodies()"就给自带视觉的刚体补画了一张**矩形贴图** ——
+##    甲方在 ink-2 的手/臂上实测到：破坏瞬间多出一张矩形手，而且它**停在旧位置**
+##    （游戏那边跳过自有视觉的同步，那张矩形就永远留在原地）。
+##
+## 两条"不要画"的理由（任一成立就不画）：
+##   · 它有 PixelSprite2D（自己的视觉）—— 引擎再画一份就是两份精灵重叠；
+##   · 它显式关了 internal_render（仅物理：不可见的臂/手，只有碰撞和骨骼）。
+##
+## ⚠️ 传 null（没有节点对应的刚体，比如破坏产生的碎片）-> **要画**。
+##
+## ⚠️ 参数**故意不加类型标注**：`_body_nodes` 里允许放"鸭子类型替身" ——
+##    tests/validation_node_sync.gd 用的就是 **RefCounted stub**（真 PixelBody2D 进树会触发
+##    _ready -> rebuild()，那条路在 headless 下会中止）。加了 `: Node` 的话，传替身会**在调用点**
+##    抛类型错误，而那条闸门当场变红（实测：静态 Ground 不再被同步）。
+##    所以：拿不到 get_children 的（非 Node）按"要画"处理 = 老行为。
+static func uses_internal_render(node) -> bool:
+	if node == null or not is_instance_valid(node):
+		return true
+	if not (node is Node):
+		return true                      # 替身（不是节点）-> 当作普通刚体：要画
+	if node is PixelBody2D and not node.internal_render:
+		return false
+	return not has_own_sprite(node)
 
 
 func _density_of(material: int) -> float:
@@ -461,9 +502,16 @@ func _physics_process(delta: float) -> void:
 		#
 		#    实测（tests/bench_fusion.gd）：601 个刚体时 sync 占 17 ms/帧，
 		#    而其中一半是静态的地形。
-		for b in world.bodies:
-			if not b.is_static:
-				renderer.sync(b)
+		# ⚠️ 自带视觉（PixelSprite2D）/ 显式 internal_render=false 的刚体**不进内部渲染器**，
+		#    而且要把可能已经建出来的旧贴图**回收**（判据与 rebuild / sync_world_bodies 同一个）。
+		for i in world.bodies.size():
+			var b = world.bodies[i]
+			if b.is_static:
+				continue
+			if i < _body_nodes.size() and not uses_internal_render(_body_nodes[i]):
+				renderer.forget(b.id)
+				continue
+			renderer.sync(b)
 
 
 func _live_ids() -> Dictionary:
@@ -627,7 +675,16 @@ func sync_world_bodies() -> void:
 	_body_nodes = out
 
 	# ② 渲染：全量 sync（含静态地形）+ 清理已经不存在的刚体
-	for b in world.bodies:
+	#
+	# ⚠️⚠️ 自带视觉 / internal_render=false 的刚体**不画**，而且要把**以前画出来的那张回收**
+	#    （forget）—— 否则"破坏之后同步一次"就会给它们补出一张矩形残影，而那张残影
+	#    还会停在旧位置（游戏层跳过自有视觉的同步）。判据与 rebuild / _physics_process 同一个。
+	#    ⚠️ 必须在 ① 之后做：① 刚把 _body_nodes 按身份重建好，下标才是对的。
+	for i in world.bodies.size():
+		var b = world.bodies[i]
+		if i < _body_nodes.size() and not uses_internal_render(_body_nodes[i]):
+			renderer.forget(b.id)
+			continue
 		renderer.sync(b)
 	renderer.prune(_live_ids())
 
