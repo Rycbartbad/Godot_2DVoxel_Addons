@@ -121,6 +121,27 @@ var ccd_substep_budget := 600
 ##    ~240 px/s 就会被钳（旧标定下是 11 子步、~1320 px/s 才碰到）。觉得拖不动就把
 ##    本值调大 —— 那是"用帧时间换手感"的旋钮。但**别把 CCD_RECT_COST_US 改小来
 ##    假装保护还在**：它量的是真实代价，改它只是让上限说谎。
+## 关节感知的 CCD 子步（表 ③）：把**焊接组件**当成一个整体估运动，而不是逐刚体取最快。
+##
+## ⚠️ 为什么需要：子步数是按"全世界最快的那个刚体"算的，而焊接组件里的**轻质件**在关节
+##    求解之前的**瞬态**速度可以非常大 —— 它不是真的在飞，是求解器还没把它按住。
+##    甲方在 ink-2 实测：轻手焊在地面上被拖动时子步数峰值 **53**，而帧时间随
+##    "子步数 x 世界大小" 涨（子步是全局的）。
+##
+## 判据（三种情况）：
+##   · 组件**被静态世界焊住**（直接或间接、且焊接**断不开**）-> 它整体动不了 -> 记 0；
+##   · 组件里有多个动态刚体 -> 记**质量加权**的整体运动（质心速度 + 角速度 x 组半径），
+##     轻质件的瞬态被重的那些压下去；
+##   · 其余 -> 和以前一样，记自己的运动。
+##
+## ⚠️⚠️ 为什么默认**关**：它拿掉了"瞬态速度"这道安全余量。
+##    能用它的理由是：关节求解器**在同一步内**就把速度纠正回来（位置积分用的是纠正后的
+##    速度），所以"瞬态"不会变成真实位移。但**薄壁防穿必须自己验过**再开 ——
+##    闸门 tests/validation_ccd_joint_aware.gd 里有"焊在静态世界 + 瞬态冲向 2 像素薄墙"那一组。
+## ⚠️ 安全阀：只要组里有**断得开**的焊接（`break_impulse` 有限），这个组就**不摊平**
+##    （退回逐刚体最大）—— 焊接断掉那一帧刚体是真在飞，摊平它等于放松防穿。
+var ccd_joint_aware := false
+
 var ccd_grab_substep_cost_budget_us := 6000
 ## 每个**矩形每子步**的实测代价（微秒）。抓取时的子步上限按它换算成时间。
 ##
@@ -1294,6 +1315,115 @@ func grab_substep_cap(total_rects: int) -> int:
 	return maxi(1, int(float(ccd_grab_substep_cost_budget_us) / (float(total_rects) * CCD_RECT_COST_US)))
 
 
+## 单个刚体的"运动"：线速度 + 角速度 x 外接半径（表面最快点）。
+func _motion_of(b: PBody) -> float:
+	return b.linear_velocity.length() + absf(b.angular_velocity) * b.bounding_radius()
+
+
+## 全世界最快的运动 —— **逐刚体**（老行为，默认走这条）。
+func _fastest_motion_plain() -> float:
+	var fastest := 0.0
+	for b: PBody in bodies:
+		if b.is_static or not b.awake:
+			continue
+		fastest = maxf(fastest, _motion_of(b))
+	return fastest
+
+
+## 全世界最快的运动 —— **关节感知**版本（见 ccd_joint_aware）：焊接组件当一个整体。
+##
+## ⚠️ 组内轻质件的瞬态速度被**质量加权**摊平 —— 这正是"轻手挂在重臂/地面上"的解药。
+func _fastest_motion_grouped() -> float:
+	var seen := {}
+	var fastest := 0.0
+	for b: PBody in bodies:
+		if b.is_static or not b.awake or seen.has(b):
+			continue
+		var grp := weld_group(b)
+		seen[b] = true
+		for g in grp:
+			seen[g] = true
+		if grp.size() <= 1:
+			# 单体：只有"焊死在静态世界"上才当 0（它整体动不了），否则照旧。
+			fastest = maxf(fastest, 0.0 if _anchored_unbreakable(b) else _motion_of(b))
+			continue
+		fastest = maxf(fastest, _group_motion(grp))
+	return fastest
+
+
+## 这个刚体是否被**不可断的焊接**直接钉在静态世界上（世界锚或静态刚体）。
+##
+## ⚠️ 判据只认 **WELD**：铰链/滑轨允许运动，绳/弹簧更软 —— 它们连着的刚体该动还是动。
+## ⚠️ 断得开的焊接**不算**：焊接可能在这一步里断掉，那时刚体是真在飞 ——
+##    那种情况必须按它自己的速度算子步（宁可多算，不能少算）。
+func _anchored_unbreakable(b: PBody) -> bool:
+	for j in joints:
+		if not j.active or j.kind != PJoint.WELD:
+			continue
+		if is_finite(j.break_impulse):
+			continue
+		var a_static: bool = j.body_a == null or j.body_a.is_static
+		var b_static: bool = j.body_b == null or j.body_b.is_static
+		if (j.body_a == b and b_static) or (j.body_b == b and a_static):
+			return true
+	return false
+
+
+## 一个焊接组（动态成员）的整体运动估计：质量加权质心速度 + 角速度 x 组半径。
+##
+## ⚠️ 组被静态世界锚住 -> **0**（整体动不了）。
+## ⚠️ 组里有**断得开**的焊接 -> 退回逐刚体的最大值（保守）：焊接可能在这一步断掉，
+##    那时组内某个刚体是真在飞，摊平它就等于放松防穿。
+func _group_motion(grp: Array) -> float:
+	# ① 先看这个组的焊接都是什么性质：**断得开**的 -> 保守退回逐刚体最大；
+	#    **锚在静态世界**上 -> 0（整体动不了）。
+	var anchored := false
+	var breakable := false
+	for j in joints:
+		if not j.active or j.kind != PJoint.WELD:
+			continue
+		var in_a: bool = grp.has(j.body_a)
+		var in_b: bool = grp.has(j.body_b)
+		if not in_a and not in_b:
+			continue
+		if is_finite(j.break_impulse):
+			breakable = true
+		var a_static: bool = j.body_a == null or j.body_a.is_static
+		var b_static: bool = j.body_b == null or j.body_b.is_static
+		if (in_a and b_static) or (in_b and a_static):
+			anchored = true
+	if breakable:
+		var mx := 0.0
+		for b: PBody in grp:
+			if not b.is_static:
+				mx = maxf(mx, _motion_of(b))
+		return mx
+	if anchored:
+		return 0.0
+	var m_sum := 0.0
+	var v_sum := Vector2.ZERO
+	var w_sum := 0.0
+	var c := Vector2.ZERO
+	for b: PBody in grp:
+		if b.is_static:
+			continue
+		m_sum += b.mass
+		v_sum += b.linear_velocity * b.mass
+		w_sum += b.angular_velocity * b.mass
+		c += b.com_world() * b.mass
+	if m_sum <= 0.0:
+		return 0.0
+	c /= m_sum
+	var r_max := 0.0
+	for b: PBody in grp:
+		if b.is_static:
+			continue
+		r_max = maxf(r_max, (b.com_world() - c).length() + b.bounding_radius())
+	var v := v_sum / m_sum
+	var w := w_sum / m_sum
+	return v.length() + absf(w) * r_max
+
+
 ## 本步需要切成几个子步。判据是"最快的物体一步能走多远"：
 ## 只要每个子步的位移都小于最薄障碍物的厚度，就不可能穿过去。
 ##
@@ -1306,14 +1436,12 @@ func _compute_substeps(dt: float) -> int:
 	#    3 个零点）子步数照样掉回 1 —— 实测"回落 3 次"，抖动依旧。
 	var need := 1
 	if ccd_enabled and dt > 0.0:
-		var fastest := 0.0
 		var total_rects := 0
 		for b: PBody in bodies:
 			total_rects += b.rects.size()
-			if b.is_static or not b.awake:
-				continue
-			var v := b.linear_velocity.length() + absf(b.angular_velocity) * b.bounding_radius()
-			fastest = maxf(fastest, v)
+		# ⚠️ 取"最快运动"的两条路：默认逐刚体（老行为），可选的**关节感知**版本见
+		#    ccd_joint_aware 的说明（焊接组件当整体估运动）。
+		var fastest := _fastest_motion_grouped() if ccd_joint_aware else _fastest_motion_plain()
 		if fastest > 0.0:
 			var motion := fastest * dt
 			if motion > ccd_max_motion:
