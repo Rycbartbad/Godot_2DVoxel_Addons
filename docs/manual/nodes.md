@@ -318,3 +318,54 @@ var body = pw.add_body_node(node)
 > 看起来就是"碰撞框比像素图大一圈"（实测：墙的像素在 x=948..1667、叠加层外沿在 x=945..1670，
 > 正好各多 3 px = 半个线宽）。改细之后还必须画在**像素精灵之上**（`z_index`），
 > 否则 1 px 的线有一半被精灵盖掉，看起来像"叠加层消失了"。
+
+## 破坏之后：节点层怎么跟世界对齐
+
+破坏（`fracture` / `detach` / `fracture_pixels`）会**增删刚体**：碎片是新刚体、被全删的刚体消失。
+节点层有两件事必须跟着做，否则症状是"碎片没有贴图""消失的刚体留下悬空引用""关节指向不存在的刚体"。
+
+### `physics_step_finished(world)`
+
+**每个固定步**走完时发出。信号发在 `_physics_process` 的 while 循环**内部**，所以三条契约是
+**按构造成立**的，不靠调用方自觉：
+
+1. **恰好一次** —— 一帧补多个 step 就发多次，不漏不重；
+2. **零 step 帧不发**；
+3. **同步回调** —— 这里读到的 `world.contacts` 是**本次 step 的完整结果**，可以当场提交破坏。
+
+```gdscript
+func _ready() -> void:
+    $PixelWorld.physics_step_finished.connect(_on_step)
+
+func _on_step(w) -> void:
+    # 游戏规则在这里读接触数据、算删除计划、提交破坏
+    for i in w.contact_pair_count():
+        var info: Dictionary = w.contact_info(i)
+        # ...
+```
+
+⚠️ 一帧可能补多个 step，所以**不要**在 `_process` 里读接触 —— 那样会漏掉中间的步。
+
+### `sync_world_bodies()`
+
+破坏之后把节点层与 `world.bodies` 对齐：
+
+- **按下标重建 `_body_nodes`**，碎片/未节点化的刚体用 **null 占位**（**不删项** —— 删了会让下标整体错位，
+  症状是"节点索引串位"）；
+- **全量 `renderer.sync`（含静态地形）** —— 每帧的自动同步只同步动态体（静态体像素不变、sync 又贵），
+  但破坏之后静态地形的像素**真的变了**；
+- `renderer.prune(...)` 清掉已经不存在的刚体；
+- **清掉锚点已不存在的关节** —— ⚠️ `body_a`/`body_b` 为 `null` 表示"锚在静态世界"，
+  那是**合法**的，必须保留。
+
+### `fracture_pixels_and_sync(body, removals, burst_speed := 0.0)`
+
+`world.fracture_pixels(...)` + `sync_world_bodies()` 一步到位 —— **推荐用这个**，
+忘了调同步的症状是"碎片没有贴图"。
+
+```gdscript
+# removals = {PixelShape: {Vector2i: true}}（该 shape 的局部像素坐标）
+var res: Dictionary = px.fracture_pixels_and_sync(body, {body.shapes[0]: mask})
+# res = {removed: int, body_alive: bool, fragments: Array}
+```
+
