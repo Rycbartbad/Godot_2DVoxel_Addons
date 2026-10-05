@@ -2357,3 +2357,96 @@ func detach(body: PBody, damage, burst_speed: float = 40.0) -> Array:
 			add_body(nb, [piece], Callable(), true)
 			out.append(nb)
 	return out
+
+
+## **批量像素破坏**（接口请求）：按显式删除掩码一次性破坏。
+##
+## ⚠️ 三个破坏原语的分工：
+##   · fracture(body, damage)          —— 按几何伤害**挖掉**（笔刷擦除）
+##   · detach(body, damage)            —— 按几何伤害**摘下来**（像素变碎片，体素守恒）
+##   · fracture_pixels(body, removals) —— 按**显式像素掩码**破坏（游戏层自己算好了删除计划）
+##
+## ⚠️ 四条契约（接口请求里写死的，改动前先读）：
+##   1. **一次应用所有掩码，再分裂一次** —— 不要每个 shape 各分一次（断杆会被分多次）；
+##   2. 同像素不会重复删除（掩码是 Dictionary，天然去重；且只在 get_pixel != 0 时计数）；
+##   3. 只动 body **自己**的 shape（removals 里不属于它的键直接忽略，不串删）；
+##   4. **不能**用"凸伤害严格在内部就一定不断裂"的优化 —— 掩码是任意的，内部也可能断。
+##
+## ⚠️ 速度场继承（与 fracture 的"原样拷贝"不同，这是本接口的要求）：
+##    存活原块和新碎片都按刚体运动学继承删除**前**的速度场：
+##        v_new = v_old + omega x (com_new - com_old)
+##    角速度直接继承。被删掉的像素和剔除的最小碎片**带着自己的动量离开模拟**，
+##    不补偿给存活块（所以总动量会少一点 —— 这是有意的）。
+##
+## removals = {PixelShape: {Vector2i: true}}，坐标是该 shape 的**局部像素坐标**。
+## 返回 {removed: int, body_alive: bool, fragments: Array}。
+func fracture_pixels(body: PBody, removals: Dictionary, burst_speed: float = 0.0) -> Dictionary:
+	# ① 删除**前**的速度场与质心（下面要用它给存活块和碎片定速度）
+	var old_com := body.com_world()
+	var v_old := body.linear_velocity
+	var w_old := body.angular_velocity
+
+	# ② 删除：只动 body 自己的 shape，只删掩码里列出的像素
+	var removed := 0
+	for s in body.shapes:
+		var mask: Dictionary = removals.get(s, {})
+		if mask.is_empty():
+			continue
+		for px in mask:
+			var p: Vector2i = px
+			if s.get_pixel(p.x, p.y) != 0:
+				s.clear_pixel(p.x, p.y)
+				removed += 1
+	if removed == 0:
+		return {"removed": 0, "body_alive": true, "fragments": []}
+
+	# ③ 分裂：每个 shape 一次，**最大块留在原 body**（与 fracture / ensure_connected 一致）
+	var kept: Array = []
+	var loose: Array = []
+	for s in body.shapes:
+		var parts: Array = Destruction.split(s, min_fragment_pixels)
+		if parts.size() <= 1:
+			kept.append(s)
+			continue
+		var best := 0
+		var best_n := -1
+		for i in parts.size():
+			var cnt: int = parts[i].pixel_count()
+			if cnt > best_n:
+				best_n = cnt
+				best = i
+		kept.append(parts[best])
+		for i2 in parts.size():
+			if i2 != best:
+				loose.append(parts[i2])
+
+	# ④ 全删光 -> 原体消失
+	if kept.is_empty():
+		remove_body(body)
+		return {"removed": removed, "body_alive": false, "fragments": []}
+
+	# ⑤ 原体重建 + 按**新质心**修正速度（质心动了，速度场要跟着走）
+	body.rebuild(kept, density_callable(), max_rects_per_shape)
+	var r_keep := body.com_world() - old_com
+	body.linear_velocity = v_old + w_old * Vector2(-r_keep.y, r_keep.x)
+	body.angular_velocity = w_old
+	body.awake = true
+	body.sleep_timer = 0.0
+
+	# ⑥ 碎片各自成体，同样继承速度场
+	var spawned: Array = []
+	for piece in loose:
+		var frag := PBody.new()
+		frag.position = body.position
+		frag.rotation = body.rotation
+		frag.is_static = body.is_static
+		frag.awake = body.awake
+		add_body(frag, [piece], Callable(), true)
+		var r := frag.com_world() - old_com
+		frag.linear_velocity = v_old + w_old * Vector2(-r.y, r.x)
+		frag.angular_velocity = w_old
+		if burst_speed > 0.0 and r.length() > 1e-6:
+			# 可选的爆炸速度：从**原质心**向外。默认 0 = 不加（契约要求默认不产生爆炸速度）
+			frag.linear_velocity += r.normalized() * burst_speed
+		spawned.append(frag)
+	return {"removed": removed, "body_alive": true, "fragments": spawned}
