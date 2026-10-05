@@ -32,6 +32,20 @@ const PixelSprite2D := preload("res://src/nodes/pixel_sprite_2d.gd")
 const PixelJoint2D := preload("res://src/nodes/pixel_joint_2d.gd")
 const PixelScale := preload("res://src/core/pixel_scale.gd")
 
+
+## **每个固定步**走完时发出，参数就是这个世界。
+##
+## ⚠️ 三条契约（按接口请求实现，改动前先读这里）：
+##   1. **恰好一次**：发在 _physics_process 的 while 循环**内部**、world.step() 之后 ——
+##      所以"一帧补多个 step"就会发多次，不会漏也不会重；
+##   2. **零 step 帧不发**（累加器不够一个 fixed_dt 时循环体根本不执行）；
+##   3. **同步回调**：消费者在这里读的 world.contacts 是**本次 step 的完整结果**，
+##      可以当场提交破坏（改完形状/刚体后，下一次 step 前不会再有别的 step 插进来）。
+##
+## ⚠️ 为什么需要它：接触事件（world.contacts）**每步开头清空**，而一帧可能补多个 step ——
+##    不挂在"步完成"上就没法保证"每次 step 的接触都被消费一次"。
+signal physics_step_finished(world)
+
 @export_group("物理")
 @export var gravity := Vector2(0, 600)
 @export var fixed_dt := 1.0 / 60.0
@@ -430,6 +444,10 @@ func _physics_process(delta: float) -> void:
 	var steps := 0
 	while _accum >= fixed_dt and steps < max_substeps:
 		world.step(fixed_dt)
+		# ⚠️ 必须发在**循环内部**：发在循环外面就变成"每帧一次"，
+		#    一帧补两个 step 时会丢掉一次接触（消费者只看到最后一次的 world.contacts）。
+		#    发在这里则"每个 fixed step 恰好一次"是**按构造成立**的。
+		physics_step_finished.emit(world)
 		_accum -= fixed_dt
 		steps += 1
 	if _accum > fixed_dt * float(max_substeps):
