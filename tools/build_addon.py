@@ -19,6 +19,7 @@
     python tools/build_addon.py --out DIR  # 生成到别处
 """
 import argparse
+import re
 import subprocess
 import os
 import shutil
@@ -79,6 +80,88 @@ linux.release.x86_64 = "res://addons/pixel_destruction/native/fastphys.so"
 """
 
 
+## src/ 里声明过的 class_name（全局类名）。
+##
+## ⚠️ 这些名字在**开发仓库**里是全局注册的，而 addon 副本里可能有同名的 const ——
+##    见 unshadow_consts()。
+def src_class_names() -> set:
+    out = set()
+    for root, _dirs, files in os.walk(SRC):
+        for name in sorted(files):
+            if not name.endswith(".gd"):
+                continue
+            with open(os.path.join(root, name), encoding="utf-8") as f:
+                for m in re.finditer(r"^class_name\s+([A-Za-z_][A-Za-z0-9_]*)", f.read(), re.M):
+                    out.add(m.group(1))
+    return out
+
+
+## 把**标识符** name 改名成 _name（跳过注释与字符串字面量 —— 那里是给人看的文字）。
+##
+## ⚠️ 只逐行扫描：GDScript 的字符串可以跨行（"""..."""），但这个仓库里一处都没有
+##    （构建时会核对），所以逐行是精确的。
+def rename_identifier(text: str, name: str) -> str:
+    out = []
+    for line in text.split("\n"):
+        res = []
+        i = 0
+        n = len(line)
+        quote = ""
+        while i < n:
+            ch = line[i]
+            if quote:
+                res.append(ch)
+                if ch == "\\" and i + 1 < n:
+                    res.append(line[i + 1])
+                    i += 2
+                    continue
+                if ch == quote:
+                    quote = ""
+                i += 1
+                continue
+            if ch in "\"'":
+                quote = ch
+                res.append(ch)
+                i += 1
+                continue
+            if ch == "#":
+                res.append(line[i:])
+                break
+            if ch.isalpha() or ch == "_":
+                j = i
+                while j < n and (line[j].isalnum() or line[j] == "_"):
+                    j += 1
+                word = line[i:j]
+                res.append("_" + word if word == name else word)
+                i = j
+                continue
+            res.append(ch)
+            i += 1
+        out.append("".join(res))
+    return "\n".join(out)
+
+
+## 把 addon 副本里**与 src/ 的 class_name 同名的 const** 改名（连带它在同一文件里的用法）。
+##
+## ⚠️⚠️ 为什么必须改：addon 与 src/ 同处一棵项目树时（开发仓库就是这样），
+##    src/ 声明的 class_name 是**全局**的，而副本里那句
+##        const PixelBody2D := preload("res://addons/pixel_destruction/nodes/pixel_body_2d.gd")
+##    在**类型位置**（`node: PixelBody2D`、`c is PixelBody2D`）**压不住全局名** ——
+##    解析到的是 src/ 那一份脚本。于是 addon 自己的节点不被认成 PixelBody2D：
+##      · rebuild() 里 `c is PixelBody2D` 全为假 -> **烘焙出 0 个刚体**（静默，不报错）
+##      · add_body_node(node) 直接报 "argument 1 ... is not a subclass of the expected class"
+##    实测（tests/validation_fusion.gd）：改名前"2 个刚体"变成 0 个、测试卡死；
+##    改名后 14 条过 13 条（剩下那条是节点层的既有问题，与生成规则无关）。
+##
+## ⚠️ 改名只影响 addon **内部**：用户项目里没有 src/，本来解析到的就是这句 const，
+##    所以对外接口（类名 / 方法签名 / 文档）一个字没变。
+def unshadow_consts(text: str, names: set) -> str:
+    for n in sorted(names):
+        if re.search(r"^const\s+%s\s*:=" % re.escape(n), text, re.M):
+            text = rename_identifier(text, n)
+    return text
+
+
 ## 去掉 class_name 声明。
 ##
 ## ⚠️ 为什么必须去：addon 与 src/ 同处一棵 Godot 项目树时（开发仓库就是这样），
@@ -125,6 +208,22 @@ def main() -> int:
         print("缺少 src/ 或 addon_src/")
         return 1
 
+    # ⚠️ rename_identifier 是**逐行**扫描的（它假设字符串不跨行）。这个仓库里确实没有
+    #    多行字符串 —— 但那是"当前恰好没有"，所以在这里**核对**：一旦有人写了 `"""`，
+    #    改名就可能把字符串里的内容当成代码，必须立刻吵闹地失败，而不是悄悄改错。
+    for root, _dirs, files in os.walk(SRC):
+        for name in sorted(files):
+            if not name.endswith(".gd"):
+                continue
+            p = os.path.join(root, name)
+            with open(p, encoding="utf-8") as f:
+                if '"""' in f.read():
+                    print("src/%s 里有跨行字符串 —— rename_identifier 的逐行扫描不再安全。" % name)
+                    print("先把 unshadow_consts 换成真正的词法扫描，再构建。")
+                    return 1
+
+    shadowed = src_class_names()
+
     # 整个输出目录重建：不留上一次的残留（残留正是"看起来对但其实没更新"的来源）
     if os.path.isdir(out):
         shutil.rmtree(out)
@@ -148,8 +247,11 @@ def main() -> int:
                 continue
             with open(os.path.join(sd, name), encoding="utf-8") as f:
                 body = f.read()
+            # 顺序要紧：先去掉 class_name、把路径改写成 addon 的，**最后**再处理同名 const
+            # （改名要在副本自己的文本上做，见 unshadow_consts 的说明）。
+            body = unshadow_consts(strip_class_name(rewrite(body)), shadowed)
             with open(os.path.join(dd, name), "w", encoding="utf-8", newline="\n") as f:
-                f.write(strip_class_name(rewrite(body)))
+                f.write(body)
             # ⚠️ **不要**把 src/ 的 .uid 复制过来。
             #
             # 曾经复制过，理由是"场景按 UID 引用脚本"。但那个理由在本项目不成立：
