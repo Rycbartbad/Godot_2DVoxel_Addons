@@ -233,11 +233,24 @@ func sync(body) -> void:
 	#    这是我把"只重建脏块"上线后引入的回归：fracture 先 mark_dirty_range，
 	#    紧接着 PBody.rebuild 又 touch()（split 换了 shape 对象、碎片搬走了像素），
 	#    渲染器看到脏集合非空就只重建那几块 —— touch() 那部分改动全丢了。
-	# ⚠️ 比的是**差值**，不是绝对值 —— 见 _rev_offset 的说明。
-	var offset_now := 0
+	# ⚠️⚠️ 判据必须**按 shape 身份**比，不能比求和。
+	#
+	#    旧实现是 `Σ (revision - range_revision)` 与上次存的和比较。而破坏会**换掉
+	#    shape 对象**（split/_assemble 产出新对象），新对象带着自己的 revision 进来 ——
+	#    和一变就判 untracked -> **整张重建**。实测（tests/validation_local_repaint.gd）：
+	#    detach 内部挖 20x20 -> 24/24 块、sync 56 ms，而同样条件下 fracture_pixels
+	#    只要 2/24 块、0.35 ms —— 差别全在这个假阳性上。
+	#
+	#    现在：已知 shape 的差值**变了**才算 untracked；**新** shape 只在它自己
+	#    已经不平衡（> 0，说明有人对它 touch 过）时才保守全量。
+	#    ⚠️ 安全网一个字没动：content_changed 且**没有任何脏标记** -> 仍然全量重建
+	#    （见 rebuild_all 的最后一项）；touch() 之后差值 > 0 -> 仍然全量。
+	var prev_off: Dictionary = _rev_offset.get(body.id, {})
+	var untracked := false
 	for s2: PixelShape in body.shapes:
-		offset_now += s2.revision - s2.range_revision
-	var untracked: bool = _rev_offset.get(body.id, offset_now) != offset_now
+		var off2 := s2.revision - s2.range_revision
+		if off2 > 0 and (not prev_off.has(s2) or prev_off[s2] != off2):
+			untracked = true
 	var rebuild_all: bool = size_changed or tiles.is_empty() or untracked 			or (content_changed and dirty.size.x <= 0)
 	var revinfo := ""
 	for s3: PixelShape in body.shapes:
@@ -245,7 +258,12 @@ func sync(body) -> void:
 	last_debug = "size=%s untracked=%s dirty=%s%s" % [
 		str(size_changed), str(untracked), str(dirty), revinfo]
 	if content_changed or size_changed:
-		_rev_offset[body.id] = offset_now
+		# 快照：**按 shape 身份**记"未记录改动数"（见上面 untracked 的说明）。
+		# ⚠️ 它持有 shape 的引用直到下一次快照（很短），不会长期留着旧 shape。
+		var snap := {}
+		for s4: PixelShape in body.shapes:
+			snap[s4] = s4.revision - s4.range_revision
+		_rev_offset[body.id] = snap
 		last_tiles_rebuilt = 0
 		last_tiles_total = 0
 		var live := {}

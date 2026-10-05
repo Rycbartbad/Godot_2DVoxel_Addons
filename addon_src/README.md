@@ -90,8 +90,10 @@ rock.mass                                        # -> 250
 rock.inertia                                     # -> 自动算好
 rock.local_com                                   # -> 质心（局部像素坐标）
 
-# 改了材质/像素之后重算：
+# 改了**材质**（或绕过引擎直接改像素）之后重算质量：
 px.world.refresh_mass(rock)
+# ⚠️ 破坏（fracture / detach / fracture_pixels）之后**不需要**再调一次 ——
+#    引擎在破坏里就把密度/摩擦/恢复系数一起重算好了。
 ```
 
 ### 对某一点施加力

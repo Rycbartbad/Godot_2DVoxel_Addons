@@ -418,6 +418,11 @@ func density_callable() -> Callable:
 
 
 ## 已建好的刚体在质量变了之后重算：改密度表、或者在形状上加了像素之后调用。
+##
+## ⚠️ **破坏之后不需要它**（fracture / detach / fracture_pixels 在破坏里就把密度/摩擦/恢复
+##    一起重算了）。它现在的用途是：换了材质表、或绕过引擎直接改像素之后重算一次。
+##    以前破坏路径不传 Callable，母体的质量/摩擦是错的，游戏层只能自己补一次 —— 代价是
+##    逐像素扫描 + 贪心分解 + 碰撞体重推 + 整张贴图重建**再付一遍**。见 PBody.rebuild 的说明。
 func refresh_mass(body: PBody, density_of: Callable = Callable()) -> void:
 	body.rebuild(body.shapes, density_of if density_of.is_valid() else density_callable(),
 		max_rects_per_shape, Rect2i(), friction_callable(), restitution_callable())
@@ -439,7 +444,9 @@ func refresh_mass(body: PBody, density_of: Callable = Callable()) -> void:
 ##
 ## ⚠️ 拆出来的岛**继承 is_static**（地形拆出来还是地形），
 ##    而 fracture 的碎片刻意是动态的（崩下来的料要会掉）—— 两者语义不同，别合并。
-func ensure_connected(body: PBody, min_pixels: int = 1) -> Array:
+## dirty_rect：本次改动的**局部像素范围**（可选的性能提示，见 PBody.rebuild 的 dirty_rects）。
+## 破坏路径（detach）知道自己的伤害范围，顺手传进来 -> 渲染器只重建脏块而不是整张。
+func ensure_connected(body: PBody, min_pixels: int = 1, dirty_rect: Rect2i = Rect2i()) -> Array:
 	var spawned: Array = []
 	var kept: Array = []
 	var changed := false
@@ -470,7 +477,10 @@ func ensure_connected(body: PBody, min_pixels: int = 1) -> Array:
 			frag.awake = body.awake
 			spawned.append(add_body(frag, [parts[i2]], Callable(), true))
 	if changed:
-		body.rebuild(kept, density_callable(), max_rects_per_shape)
+		# ⚠️ 摩擦/恢复系数也要传：不传的话 PBody.rebuild 会**保持原值**（它不再写 0），
+		#    但**质量**会按"像素数"算错 —— 破坏之后必须重算，且要按材质密度算。
+		body.rebuild(kept, density_callable(), max_rects_per_shape, dirty_rect,
+			friction_callable(), restitution_callable())
 	return spawned
 
 
@@ -1884,7 +1894,14 @@ func fracture(body: PBody, damage, burst_speed: float = 40.0) -> Array:
 
 	var parent_vel := body.linear_velocity
 	var parent_ang := body.angular_velocity
-	body.rebuild([parts[best]], Callable(), max_rects_per_shape, dmg_rect)
+	# ⚠️⚠️ 这里曾经传的是 `Callable()`（没有密度回调）—— 后果是**母体**被打完洞之后
+	#    质量变成"像素数"（密度 1.0）、摩擦/恢复系数被写成 0，而碎片反而是对的（走 add_body）。
+	#    游戏层因此**必须**自己再调一次 refresh_mass()，把逐像素扫描 + 贪心分解 +
+	#    碰撞体重推 + 整张贴图重建**再付一遍**（768x100 约 44 ms）。
+	#    现在三个 Callable 都传（见 PBody.rebuild 的说明）—— 那次 refresh_mass 可以删了。
+	#    闸门：tests/validation_mass_after_destruction.gd。
+	body.rebuild([parts[best]], density_callable(), max_rects_per_shape, dmg_rect,
+		friction_callable(), restitution_callable())
 	# ⚠️ 现在才标 —— parts[best] 是 split 产出的**新** shape，是 body.shapes 里
 	#    真正留下的那个。见本函数开头关于"标记打早了会被丢掉"的说明。
 	#    split 保持局部坐标系，所以伤害的局部范围可以直接用。
@@ -2364,6 +2381,41 @@ func detach(body: PBody, damage, burst_speed: float = 40.0) -> Array:
 	#    想靠"让两边的边界行为一致"来修是死路（我先试了按 chunk 对齐，反而捡到 464 个）。
 	#    正解是**只算一次**：extract 出来的集合就是被摘下来的集合，
 	#    碎片从它来、洞也从它来 -> 守恒是**恒等式**，不是需要验证的性质。
+	# ② **先**判"这一笔贴不贴边界"，再删 —— 顺序是判据能不能成立的全部。
+	#
+	# ⚠️⚠️ 这个坑 fracture 那边早就记过（见它里面"判据必须在 apply_damage **之前**取"），
+	#    而 detach 一直是**删完再判**：挖出来的洞，边缘像素天然邻接空像素 ->
+	#    touches_boundary 恒为 true -> "内部摘除不用查连通性"这条早退**从来没生效过**。
+	#    实测（tests/validation_local_repaint.gd / 探针）：内部摘 20x20，
+	#    touches_boundary=true -> 走 ensure_connected -> split 把形状**换成新对象**
+	#    （新对象的脏集合是"整块都是新的"）-> 渲染器整张贴图重画（768x100 约 52 ms）。
+	#    改成删除之前判之后：内部摘除走 else 分支 -> 原对象 + 按 shape 的脏矩形 ->
+	#    只重建 1~2/24 块、0.2~0.4 ms，而且省掉一趟全量连通分量标注。
+	#
+	# ⚠️ 探测框要覆盖**实际被摘下来的范围**，不能只用 dmg_rect：extract 是按 chunk
+	#    对齐拷贝的，它的包围盒可能比伤害大一圈（最多 7 像素）。判漏的后果是
+	#    "该 split 却没 split"（形状数据断了、rects 没重算 -> 画面与碰撞体不一致）。
+	#    宁可多查，不能漏判。
+	var dmg_bounds: Rect2 = damage.bounds()
+	var dmg_rect := Rect2i(
+		floori(dmg_bounds.position.x), floori(dmg_bounds.position.y),
+		ceili(dmg_bounds.size.x) + 1, ceili(dmg_bounds.size.y) + 1)
+	var probe := Rect2i(dmg_rect.position - Vector2i(2, 2), dmg_rect.size + Vector2i(4, 4))
+	for ex0 in extracted:
+		probe = probe.merge((ex0.local_aabb() as Rect2i).grow(2))
+	var was_boundary := false
+	for s in body.shapes:
+		if Destruction.touches_boundary(s, probe):
+			was_boundary = true
+			break
+	# ③ 挖：**从同一个集合里删**，而不是再让 fracture 自己判一次。
+	#
+	# ⚠️⚠️ 这是守恒能成立的关键，也是我踩过的坑：
+	#    fracture 内部会**重算一遍**伤害判据，而任何两次独立计算都会在边界上差一点
+	#    （实测：extract 捡到 113 个像素，fracture 只删了 112 个 -> 总数 1601，多 1）。
+	#    想靠"让两边的边界行为一致"来修是死路（我先试了按 chunk 对齐，反而捡到 464 个）。
+	#    正解是**只算一次**：extract 出来的集合就是被摘下来的集合，
+	#    碎片从它来、洞也从它来 -> 守恒是**恒等式**，不是需要验证的性质。
 	var out: Array = []
 	for s in body.shapes:
 		for ex in extracted:
@@ -2373,33 +2425,20 @@ func detach(body: PBody, damage, burst_speed: float = 40.0) -> Array:
 					if ex.get_pixel(x, y) != 0 and s.get_pixel(x, y) != 0:
 						s.clear_pixel(x, y)
 	# ⚠️ 这里**不要**自己调 body.rebuild()：
-	#   · 它的签名是 rebuild(shape_list, density_of, max_rects_per_shape, dirty_rect)，
-	#     参数从 PWorld 里来（density_callable() / max_rects_per_shape）；
-	#   · 而且 ensure_connected() 内部已经用正确的参数 rebuild 了（见它里面的
-	#     body.rebuild(kept, density_callable(), max_rects_per_shape)）；
+	#   · 它的参数从 PWorld 里来（density_callable() / friction_callable() /
+	#     restitution_callable() / max_rects_per_shape）；
+	#   · 而且 ensure_connected() 内部已经用正确的参数 rebuild 了；
 	#   · 脏标记也是 PBody.rebuild() 里统一做的（见它的注释），不需要手动标。
 	#   （我第一版写了 body.rebuild() -> "Too few arguments"，白跑一轮。）
-	# ⚠️ 便宜的**必要条件**（与 fracture 里那条同源）：
-	#    凸的伤害集**严格在形状内部**时不可能把刚体弄断，而 ensure_connected 要跑
-	#    全量连通分量标记 —— 实测 200x200 形状：detach 一次 15.5 ms，
-	#    对照 fracture 的内部挖洞只要 9.1 ms，**差额就是它**（fracture 有这条跳过）。
-	#    绝大多数撞击都是内部摘除，不需要查连通性。
-	var dmg_bounds: Rect2 = damage.bounds()
-	var dmg_rect := Rect2i(
-		floori(dmg_bounds.position.x), floori(dmg_bounds.position.y),
-		ceili(dmg_bounds.size.x) + 1, ceili(dmg_bounds.size.y) + 1)
-	var probe := Rect2i(dmg_rect.position - Vector2i(2, 2), dmg_rect.size + Vector2i(4, 4))
-	var was_boundary := false
-	for s in body.shapes:
-		if Destruction.touches_boundary(s, probe):
-			was_boundary = true
-			break
 	if was_boundary:
 		# 断开的连通分量各自成体（引擎本来就有的机制）
-		out.append_array(ensure_connected(body, min_fragment_pixels))
+		# ⚠️ 把伤害范围传下去：不然渲染器判 untracked -> 整张贴图重画（768x100 约 44 ms）
+		out.append_array(ensure_connected(body, min_fragment_pixels, dmg_rect))
 	else:
 		# 没碰边界 -> 一定没断 -> 只重建（形状数据 + 质量/碰撞体 + 脏标记）
-		body.rebuild(body.shapes, density_callable(), max_rects_per_shape)
+		# ⚠️ 三个 Callable + dmg_rect 都要传：见 PBody.rebuild 的说明（不传 = 母体变轻变滑）
+		body.rebuild(body.shapes, density_callable(), max_rects_per_shape, dmg_rect,
+			friction_callable(), restitution_callable())
 	# ⚠️⚠️ 这里曾经有一段"按结果对齐"的修正：遍历 extract 捡到的像素，
 	#    凡**仍然留在原刚体里**的就从碎片里去掉。**已删除** —— 它是错的：
 	#    fracture 会 rebuild/平移形状的局部坐标（split -> _assemble），
@@ -2455,16 +2494,32 @@ func fracture_pixels(body: PBody, removals: Dictionary, burst_speed: float = 0.0
 	var w_old := body.angular_velocity
 
 	# ② 删除：只动 body 自己的 shape，只删掩码里列出的像素
+	#
+	# ⚠️ 顺手算**每个 shape 的删除包围盒**（+1 余量，与 fracture 的 dmg_rect 同口径）——
+	#    它下面要交给 rebuild 当脏范围。不传的话 rebuild 走 touch()（"不知道改了哪里"），
+	#    渲染器判 untracked -> 该刚体**所有**贴图块重画（768x100 实测 44 ms/笔），
+	#    而删除掩码本来就带着范围信息（clear_pixel 也已经逐块记过脏）。
 	var removed := 0
+	var dirty := {}
 	for s in body.shapes:
 		var mask: Dictionary = removals.get(s, {})
 		if mask.is_empty():
 			continue
+		var x0 := 1 << 30
+		var y0 := 1 << 30
+		var x1 := -(1 << 30)
+		var y1 := -(1 << 30)
 		for px in mask:
 			var p: Vector2i = px
 			if s.get_pixel(p.x, p.y) != 0:
 				s.clear_pixel(p.x, p.y)
 				removed += 1
+			x0 = mini(x0, p.x)
+			y0 = mini(y0, p.y)
+			x1 = maxi(x1, p.x)
+			y1 = maxi(y1, p.y)
+		if x1 >= x0:
+			dirty[s] = Rect2i(x0, y0, x1 - x0 + 2, y1 - y0 + 2)
 	if removed == 0:
 		return {"removed": 0, "body_alive": true, "fragments": []}
 
@@ -2499,7 +2554,13 @@ func fracture_pixels(body: PBody, removals: Dictionary, burst_speed: float = 0.0
 		return {"removed": removed, "body_alive": false, "fragments": []}
 
 	# ⑤ 原体重建 + 按**新质心**修正速度（质心动了，速度场要跟着走）
-	body.rebuild(kept, density_callable(), max_rects_per_shape)
+	#
+	# ⚠️ dirty 是**按 shape** 的（键是删除时那些旧 shape 对象）：split 产出的新 shape
+	#    查不到 -> 回落空 dirty_rect -> touch() -> 保守全量（新 shape 本来就整块是新的）。
+	#    单 shape、内部挖洞这条常见路径（split 返回原对象）因此只重建脏块。
+	# ⚠️ 三个 Callable 都要传：不传 -> 母体质量按"像素数"算错、摩擦/恢复被清成 0。
+	body.rebuild(kept, density_callable(), max_rects_per_shape, Rect2i(),
+		friction_callable(), restitution_callable(), dirty)
 	var r_keep := body.com_world() - old_com
 	body.linear_velocity = v_old + w_old * Vector2(-r_keep.y, r_keep.x)
 	body.angular_velocity = w_old

@@ -341,9 +341,17 @@ static func _first_material(shape_list: Array) -> int:
 	return -1
 
 
+## dirty_rects：**按 shape** 的脏范围（shape -> Rect2i）。给了它就用它，没给的 shape
+## 回落 `dirty_rect`（再没有就 touch() = 全量）。
+##
+## ⚠️ 为什么需要"按 shape"：`dirty_rect` 是**一个**矩形，而它会套给 shape_list 里**所有**
+##    shape —— 不同 shape 的局部坐标系不同，一个矩形不可能同时是它们各自的正确范围。
+##    单 shape 的刚体（绝大多数）用 dirty_rect 就够了；多 shape 只能给脏矩形，或者保守退回
+##    touch()。契约不变：**矩形必须覆盖该 shape 本次改动的全部像素**（可以更大，不能更小）。
 func rebuild(shape_list: Array, density_of: Callable = Callable(),
 		max_rects: int = 64, dirty_rect: Rect2i = Rect2i(),
-		friction_of: Callable = Callable(), restitution_of: Callable = Callable()) -> void:
+		friction_of: Callable = Callable(), restitution_of: Callable = Callable(),
+		dirty_rects: Dictionary = {}) -> void:
 	# 几何变了 —— Rapier 后端据此决定要不要重建碰撞体（见 _rp_rects_rev）。
 	# 放在 rebuild() 里是**源头修**：破坏 / 擦除 / 绘制 / 分裂全都走这里。
 	rects_rev += 1
@@ -369,8 +377,9 @@ func rebuild(shape_list: Array, density_of: Callable = Callable(),
 	for s1 in shape_list:
 		if s1 == null:
 			continue
-		if dirty_rect.size.x > 0 and dirty_rect.size.y > 0:
-			s1.mark_dirty_range(dirty_rect)   # 已知范围 -> 渲染器可只重建脏块
+		var dr: Rect2i = dirty_rects.get(s1, dirty_rect)
+		if dr.size.x > 0 and dr.size.y > 0:
+			s1.mark_dirty_range(dr)           # 已知范围 -> 渲染器可只重建脏块
 		else:
 			s1.touch()                        # 不知道范围 -> 渲染器只能全量
 	rects.clear()
@@ -439,9 +448,22 @@ func rebuild(shape_list: Array, density_of: Callable = Callable(),
 	# 均匀的，用平均值能让**总质量**精确对上，惯量分布的差异可以忽略）。
 	density = m_total / float(n_px) if n_px > 0 else 1.0
 	# 摩擦/恢复系数：同样是**逐像素加权平均**（与密度一个口径）。
+	#
+	# ⚠️⚠️ **没给 Callable 时不能写 0** —— 这条是踩过的坑：
+	#    MassProps 在没给摩擦/恢复 Callable 时 f_sum/r_sum 恒为 0，而这里以前**无条件**
+	#    写 `friction = f_sum / n_px` -> 摩擦与恢复系数被**静默清成 0**。
+	#    破坏路径里 detach / fracture_pixels / ensure_connected 都没传这两个 Callable，
+	#    于是"打一次洞，那块石头就变滑"（demo 材质表的石头 friction 0.5 -> 0）。
+	#    现在：没给 = **保持原值**（"我不知道"≠"它是 0"）。
+	#    ⚠️ 密度那一半不是同一个问题：`density_of` 无效时的语义是"全部按 1.0 算"
+	#    （文档写明了"质量 == 像素数"），所以那里照旧。
+	var has_fric := friction_of.is_valid()
+	var has_rest := restitution_of.is_valid()
 	if n_px > 0:
-		friction = f_sum / float(n_px)
-		restitution = r_sum / float(n_px)
+		if has_fric:
+			friction = f_sum / float(n_px)
+		if has_rest:
+			restitution = r_sum / float(n_px)
 	local_com = com if had_mass else Vector2.ZERO
 	if is_static:
 		inv_mass = 0.0

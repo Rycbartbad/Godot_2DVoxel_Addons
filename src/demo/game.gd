@@ -513,13 +513,14 @@ func _apply_impact_damage() -> void:
 func _paint(from: Vector2, to: Vector2) -> void:
 	if _stroke_body != null:
 		if Editor.paint_into(_stroke_body, from - _stroke_body.position, to - _stroke_body.position,
-				brush_radius, material_id) > 0:
+				brush_radius, material_id, Rect2i(), world) > 0:
 			renderer.sync(_stroke_body)
 		return
 	# 画在已有的可动体上（给它"补肉"）
 	var hit := Editor.body_at(world.bodies, to, true)
 	if hit != null:
-		if Editor.paint_into(hit, hit.to_local(from), hit.to_local(to), brush_radius, material_id) > 0:
+		if Editor.paint_into(hit, hit.to_local(from), hit.to_local(to), brush_radius, material_id,
+				Rect2i(), world) > 0:
 			renderer.sync(hit)
 		return
 	# 否则画成地形（静态画布瓦片）

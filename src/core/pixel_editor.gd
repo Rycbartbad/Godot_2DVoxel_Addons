@@ -42,13 +42,30 @@ static func body_at(bodies: Array, world_point: Vector2, dynamic_only: bool) -> 
 
 
 ## 往一个 Body 的所有 Shape 上落笔（局部坐标）。返回新增像素数。
+##
+## ⚠️ world 是**可选但强烈建议传**：不传的话新像素的**质量**按"1 像素 1 质量"算
+##    （世界的密度表用不上）—— 画上去的重物会轻得不对。传了就用世界的密度/摩擦/恢复三个表。
+##    （摩擦/恢复不传也**不会**再被清成 0 了 —— 见 PBody.rebuild 的说明。）
+##
+## ⚠️ 笔触的脏范围是**算出来的**（线段包围盒 + 半径 + 2 余量），所以贴图只重画脏块。
+##    刷子的判据是"像素中心到线段的距离 <= radius"（见 Brush.stroke_circle），
+##    候选范围 = 线段包围盒外扩 r，所以这个矩形**可证**覆盖全部改动像素
+##    （mark_dirty_range 的契约是"可以更大，不能更小"）。
 static func paint_into(body: PBody, local_from: Vector2, local_to: Vector2, radius: float, material: int,
-		clip: Rect2i = Rect2i()) -> int:
+		clip: Rect2i = Rect2i(), world = null) -> int:
 	var added := 0
 	for s: PixelShape in body.shapes:
 		added += Brush.stroke_circle(s, local_from, local_to, radius, material, clip)
 	if added > 0:
-		body.rebuild(body.shapes)
+		var pad := int(ceil(radius)) + 2
+		var lo := Vector2i(floori(minf(local_from.x, local_to.x)), floori(minf(local_from.y, local_to.y))) - Vector2i(pad, pad)
+		var hi := Vector2i(ceili(maxf(local_from.x, local_to.x)), ceili(maxf(local_from.y, local_to.y))) + Vector2i(pad, pad)
+		var dr := Rect2i(lo, hi - lo)
+		if world != null:
+			body.rebuild(body.shapes, world.density_callable(), world.max_rects_per_shape, dr,
+				world.friction_callable(), world.restitution_callable())
+		else:
+			body.rebuild(body.shapes, Callable(), 64, dr)
 	return added
 
 
@@ -91,7 +108,7 @@ static func paint_canvas(world, tiles: Dictionary, from: Vector2, to: Vector2,
 			# 以前没有裁剪，等于把**整笔**画进了每一个重叠瓦片里 ——
 			# 一笔下去会多出好几份重叠的像素和好几个 Body（实测一笔变 4 块）。
 			var clip := Rect2i(0, 0, tile_size, tile_size)
-			if paint_into(body, from - origin, to - origin, radius, material, clip) > 0:
+			if paint_into(body, from - origin, to - origin, radius, material, clip, world) > 0:
 				touched.append(body)
 	return touched
 

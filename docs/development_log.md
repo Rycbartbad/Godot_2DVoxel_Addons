@@ -4173,39 +4173,79 @@ convergence of stiff joint assemblies"）与每关节的 `GenericJoint::softness
 需要重新核对 8 条基准（不同编译器/优化下的浮点代码生成）。**这条留给人决定**：
 先拿上面那三个诊断量量出"哪个关节在漂、漂多少"，再决定要不要动求解器精度。
 
-## 下一批（表 ① ②）的调研结论 —— **本轮未改代码**
+## 表 ① ② —— **已实施**（局部贴图更新 + 破坏后材质属性）
 
-调研已完成（只读，未改任何文件）。两条都**不影响 8 条基准**（`dump_state.gd` 里没有任何
-fracture/detach，只 add_body —— 已核）。
+两条都**不影响 8 条基准**（`dump_state.gd` 里没有任何 fracture/detach，只 add_body —— 已核）。
 
-### ① `fracture_pixels` 的贴图是**全量失效**（其他三个原语同病）
+### ① 局部贴图更新：`fracture_pixels` / `fracture` / `detach` 内部挖洞只重画 1~2/24 块
 
-`fracture_pixels`（pworld.gd:2502）调 `body.rebuild(kept, density_callable(), max_rects_per_shape)` ——
-**第 4 个参数 `dirty_rect` 没传**，于是 pbody.gd:369-375 走 `touch()`（只 `revision+1`、
-不动 `range_revision`），渲染器判 `untracked=true` -> **该刚体所有贴图块重画**。
-而脏信息**本来就是全的**（`clear_pixel` 已经逐块记过脏）。
-对照：`fracture()` 传了 `dmg_rect` 并显式 `mark_dirty_range` -> 只重建 1~2/24 块。
+**改法**：
+- `PBody.rebuild` 多接一个 `dirty_rects: Dictionary`（**按 shape** 的脏范围）——
+  `dirty_rect` 是**一个**矩形，而它会被套给 shape_list 里**所有** shape，
+  多 shape 的局部坐标系不同，一个矩形不可能同时正确。没给的 shape 回落 `dirty_rect`；
+- `fracture_pixels`：删除掩码本来就带范围（`clear_pixel` 也已经逐块记过脏），
+  顺手算每个 shape 的删除包围盒（+1 余量，与 fracture 的 dmg_rect 同口径）传下去；
+- `detach` / `ensure_connected`：把 `dmg_rect` 一路传下去；
+- **渲染器的 `untracked` 判据改成按 shape 身份比**（见下）；
+- `PixelEditor.paint_into`：笔触脏范围是**算出来的**（线段包围盒 + 半径 + 2 余量，
+  与 `Brush.stroke_circle` 的候选范围同口径），并且多了可选的 `world` 参数。
 
-实测（现成探针）：局部更新 **0.370~0.40 ms/笔**；单块 64x64 实心重画 **2.513 ms**；
-768x100 实心底板整块重建 ≈ **44~48 ms**（24 块 x 2.513 + 零头，与仓库历史记录的 44 ms 吻合）。
-⚠️ 你说的 "~20 ms" 对应约 3.3 万像素的底板（512x64）；768x100 会到 44 ms 以上。
+**实测**（`tests/validation_local_repaint.gd`，768x100 底板 = 24 块，内部挖 20x20）：
 
-### ② 破坏之后**母体**的 mass / friction / restitution 是**错的**（游戏才必须补一次 refresh_mass）
+| 原语 | 改前 | 改后 |
+|---|---|---|
+| `fracture_pixels` | 24/24 块、~52 ms | **2/24 块、0.27 ms** |
+| `fracture` | 1/24（本来就有 dmg_rect）| **1/24、0.19 ms** |
+| `detach` | 24/24 块、51.7 ms | **1/24 块、0.67 ms** |
 
-| 入口 | density_of | friction/restitution | 结果 |
-|---|---|---|---|
-| `add_body` | 兜底 `density_callable()` | ✓ | **对**（碎片走这条，所以碎片是对的）|
-| `fracture` 母体（pworld.gd:1887）| **`Callable()`（无效）** | ✗ | mass=像素数、density=1.0、**friction=0、restitution=0** |
-| `detach`(2402) / `fracture_pixels`(2502) / `ensure_connected`(473) | ✓ | ✗ | mass 对，**friction/restitution 被写成 0** |
-| `PixelEditor.paint_into` / `ShapeOps.attach_to` | ✗ | ✗ | 同上（mass 也错）|
+### 顺带修掉两个真 bug（都是"判据/缓存自己骗自己"那一类）
 
-也就是说：**打一次洞，那块石头就变轻、变滑**（demo 材质表 [0, 2.5, 0.6, 7.8, 2.0]，
-friction 直接变 0）。ink-2 调了 `refresh_mass()` 所以质量对，代价是**同一趟逐像素扫描 +
-贪心分解 + 碰撞体重推 + 整张贴图重建再付一遍**（200x200 体实测 rebuild 7.335 ms；
-768x100 静态体纯分解 5.26 ms；贴图那笔见 ①）。
-Rapier 侧的搬运机制是对的（pworld.gd:874-895 会重推），坏的是**源头字段已经被写坏**。
+**（a）`detach` 的"贴边界"早退从来没生效过。** 它在**删除之后**才判
+`Destruction.touches_boundary`，而挖出来的洞边缘天然邻接空像素 -> 恒为 true ->
+每次摘除都白跑一趟全量连通分量标注，而且 `ensure_connected` -> `split` 把形状**换成新对象**
+（新对象的脏集合是"整块都是新的"）-> 整张贴图重画。`fracture` 那边早就把这条坑写在注释里
+（"判据必须在 apply_damage **之前**取"，实测内部擦除仍是 107 ms、一点没省），detach 一直是反的。
+**修法**：把 `dmg_rect`/`probe`/`was_boundary` 挪到删除**之前**，探测框还要 merge
+`extracted` 的包围盒（extract 按 chunk 对齐拷贝，可能比伤害大一圈；判漏的后果是
+"该 split 却没 split" -> 画面与碰撞体不一致）。
 
-**拟定的实施顺序**（5 步，见下一条提交）：`PBody.rebuild` 扩参（按 shape 的 `dirty_rects` +
-"无效 Callable 不写 0"）-> 四个破坏调用点补齐三个 Callable + 删除包围盒 -> 编辑路径 ->
-两条新闸门（局部重绘块数、破坏后质量/摩擦）-> 量一遍并记账。
+**（b）渲染器的 `untracked` 判据比的是**求和**，破坏换掉 shape 对象就假阳性。**
+`Σ (revision - range_revision)` 与上次存的和比较：新 shape 带着自己的 revision 进来，
+和一变就判 untracked -> 整张重建。**修法**：按 **shape 身份**比 —— 已知 shape 的差值**变了**
+才算 untracked；**新** shape 只在它自己已经不平衡（> 0，说明有人 touch 过）时才保守全量。
+⚠️ 安全网一个字没动：`content_changed` 且**没有任何脏标记** -> 仍然全量重建。
+
+### 物理侧的代价：A/B 实测（同机同条件，200x200 动态体内部挖 40x40，min of 5，**不含渲染同步**）
+
+| | 改前（HEAD~1）| 改后 |
+|---|---|---|
+| `fracture` | 4.840 ms | **5.203 ms**（+7%）|
+| `detach` | **20.767 ms** | **12.769 ms**（1.63x）|
+
+- `detach` 快的是那趟**全量连通分量标注**（早退终于生效，见下面的 (a)）；
+- `fracture` 慢了 7% 是**故意的代价**：它现在真的去算密度/摩擦/恢复（以前传 `Callable()`，
+  连密度都不查）—— 换来的是母体质量正确，而且**省掉了游戏层那次 `refresh_mass()`**
+  （那一次要把逐像素扫描 + 贪心分解 + 碰撞体重推 + 整张贴图重建全付一遍，7 ms 起步）。
+  净账是省的，但"单看 fracture 这一下"确实多了 0.36 ms —— 记在这里免得以后有人当成回归。
+
+### ② 破坏之后母体的 mass / friction / restitution 不再错
+
+| 入口 | 改前 | 改后 |
+|---|---|---|
+| `fracture` 母体 | mass=像素数、density=1.0、**friction=0、restitution=0** | 全部按材质表重算 |
+| `detach` / `fracture_pixels` / `ensure_connected` | mass 对，**friction/restitution 被写成 0** | 全部对 |
+| `PBody.rebuild`（不传 Callable 时）| 无条件写 `friction = f_sum / n_px` -> **清成 0** | **保持原值**（"我不知道" ≠ "它是 0"）|
+
+也就是说：以前**打一次洞，那块石头就变轻、变滑**（demo 材质表 [0, 2.5, 0.6, 7.8, 2.0]，
+friction 直接变 0）；ink-2 因此必须自己补一次 `refresh_mass()`，代价是同一趟逐像素扫描
++ 贪心分解 + 碰撞体重推 + 整张贴图重建**再付一遍**。现在**那次调用可以删了**
+（`refresh_mass` 仍然留给"换材质表 / 绕过引擎直接改像素"）。
+
+**闸门**：`tests/validation_mass_after_destruction.gd`（17 项）。判据是**独立的**：
+像素数用 `shape.pixel_count()` 数、密度/摩擦用配置值，不拿引擎算出来的值自己跟自己比；
+另有一条**真的把碎片像素加起来**的体素守恒断言（我第一版写成了恒真表达式 —— 项目里栽过
+"恒真断言"，所以这条专门核对过）。
+⚠️ 还有一条没覆盖：`ShapeOps.attach_to` 仍然没有世界引用（它只拿到 PBody），
+所以那条路上质量仍按"像素数"算；摩擦/恢复已经不会被清 0 了。要修得给 `ShapeOps.create` /
+`split` 加世界参数，等有真实需求再说。
 
