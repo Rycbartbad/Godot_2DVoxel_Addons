@@ -8,8 +8,11 @@ extends SceneTree
 ##   · MassProps.compute（质量属性）与 GreedyRects.decompose（矩形分解）。
 ##
 ## 实测（2026-10，本机）：
+##   ⚠️ _assemble 分两条：默认（逐块 blit，公开的 ShapeOps.split 走这条）与
+##     adopt（破坏路径走这条 —— 母形状会被丢掉，整块直接搬 PixelChunk 对象）。
 ##   768x100 静态底板（76400 像素 / 1248 块）：
 ##     _components_cpu 1.79 | _group 接缝 4.74 + 归组 1.00 | _assemble blit 7.27
+##     （adopt 之后端到端 fracture 30.9 -> 23.6 ms）
 ##     MassProps 6.43 | decompose 0.48 | 端到端 fracture 31.3 / detach 12.0
 ##   200x200 动态体（39200 像素 / 625 块）：
 ##     _components_cpu 0.56 | _group ~2.7 | _assemble ~3 | MassProps 2.84
@@ -54,7 +57,9 @@ func _stages(w: int, h: int) -> void:
 	print("=== %dx%d（%d 块，%d 像素，%d 个分量）===" % [w, h, keys.size(), s.pixel_count(), groups.size()])
 	print("  _components_cpu（每块泛洪 + 节点表）  = %7.3f ms" % _best(func(): return Destruction._components_cpu(s, keys).size(), 5))
 	print("  _group（接缝 union-find + 归组）      = %7.3f ms" % _best(func(): return Destruction._group(s, keys, parts).size(), 5))
-	print("  _assemble（逐块 blit + 组装）        = %7.3f ms" % _best(func(): return Destruction._assemble(s, keys, parts, 4).size(), 5))
+	print("  _assemble（默认：逐块 blit + 组装）  = %7.3f ms" % _best(func(): return Destruction._assemble(s, keys, parts, 4).size(), 5))
+	# adopt=true（破坏路径用的那条：母形状会被丢掉 -> 整块直接搬对象）
+	print("  _assemble（adopt：整块搬对象）       = %7.3f ms" % _best(func(): return Destruction._assemble(s, keys, parts, 4, true).size(), 5))
 	print("  split（= 上面三段）                  = %7.3f ms" % _best(func(): return Destruction.split(s, 4).size(), 5))
 	print("  MassProps.compute（质量属性）        = %7.3f ms" % _best(func(): return MassProps.compute(s, Callable(), Callable(), Callable()).pixel_count, 5))
 	print("  GreedyRects.decompose（矩形分解）    = %7.3f ms" % _best(func(): return GreedyRects.decompose(s, 64).rects.size(), 5))

@@ -472,7 +472,7 @@ func ensure_connected(body: PBody, min_pixels: int = 1, dirty_rect: Rect2i = Rec
 	var kept: Array = []
 	var changed := false
 	for s in body.shapes:
-		var parts: Array = Destruction.split(s, min_pixels)
+		var parts: Array = Destruction.split(s, min_pixels, true)
 		if parts.size() <= 1:
 			kept.append(s)
 			continue
@@ -2212,7 +2212,7 @@ func fracture(body: PBody, damage, burst_speed: float = 40.0) -> Array:
 			elif lc == Destruction.LOCAL_DROPPED:
 				pass
 			else:
-				for p in Destruction.split(s, min_fragment_pixels):
+				for p in Destruction.split(s, min_fragment_pixels, true):
 					parts.append(p)
 		else:
 			parts.append(s)   # 内部挖洞 -> 必然仍连通，原样留下
@@ -2821,7 +2821,7 @@ func detach(body: PBody, damage, burst_speed: float = 40.0) -> Array:
 	var pos := body.position
 	var rot := body.rotation
 	for ex in extracted:
-		for piece in Destruction.split(ex, min_fragment_pixels):
+		for piece in Destruction.split(ex, min_fragment_pixels, true):
 			if piece.pixel_count() <= 0:
 				continue
 			var nb := PBody.new()
@@ -2900,7 +2900,7 @@ func fracture_pixels(body: PBody, removals: Dictionary, burst_speed: float = 0.0
 		#    body_alive 仍然是 true（闸门 ② 抓到的）。
 		if s.pixel_count() <= 0:
 			continue
-		var parts: Array = Destruction.split(s, min_fragment_pixels)
+		var parts: Array = Destruction.split(s, min_fragment_pixels, true)
 		if parts.size() <= 1:
 			kept.append(s)
 			continue

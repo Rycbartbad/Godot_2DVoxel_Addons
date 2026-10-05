@@ -269,12 +269,21 @@ static func touches_boundary(shape: PixelShape, rect: Rect2i) -> bool:
 	return false
 
 
-static func split(shape: PixelShape, min_pixels: int = 1) -> Array:
+## adopt：调用方**保证母形状会被丢掉**（fracture / detach / fracture_pixels / ensure_connected
+## 都是"用分片替换母形状"的语义）—— 那时整块拷贝可以**直接搬 PixelChunk 对象**，
+## 不分配、不拷表。实测（768x100 一刀两半）：_assemble 的拷贝 7.3 -> 2.5 ms。
+##
+## ⚠️⚠️ adopt 是**所有权转移**的声明，不是优化开关：传 true 之后母形状**不能再被使用**
+##    （它的 chunk 对象现在同时挂在分片上）。`ShapeOps.split` 那条公开路径**必须传 false**
+##    （它要保留母形状的残余内容）。
+## ⚠️ 逐块 mark_dirty_key **故意保留**（实测 1.27 ms / 1248 块）：那是给游戏层
+##    `take_dirty_keys` 用的，省掉它会变成静默的行为变化。
+static func split(shape: PixelShape, min_pixels: int = 1, adopt := false) -> Array:
 	var keys: Array = shape.chunks.keys()
 	if keys.is_empty():
 		return []
 	var parts := _components_cpu(shape, keys)
-	return _assemble(shape, keys, parts, min_pixels)
+	return _assemble(shape, keys, parts, min_pixels, adopt)
 
 
 
@@ -484,7 +493,8 @@ static func apply_damage_and_split_gpu(shape: PixelShape, damage: Damage, min_pi
 		node_of[k4] = nodes
 	if node_chunk.is_empty():
 		return {"removed": removed_total, "parts": []}
-	return {"removed": removed_total, "parts": _assemble(shape, keys, parts, min_pixels)}
+	# adopt=true：调用方（fracture）会用 parts 替换母形状 —— 见 split() 的说明。
+	return {"removed": removed_total, "parts": _assemble(shape, keys, parts, min_pixels, true)}
 
 
 const GpuOverflowFlag := 0x80000000
@@ -719,7 +729,8 @@ static func components(shape: PixelShape) -> Dictionary:
 	return out
 
 
-static func _assemble(shape: PixelShape, keys: Array, parts: Dictionary, min_pixels: int) -> Array:
+static func _assemble(shape: PixelShape, keys: Array, parts: Dictionary, min_pixels: int,
+		adopt := false) -> Array:
 	var groups := _group(shape, keys, parts)
 
 
@@ -767,6 +778,13 @@ static func _assemble(shape: PixelShape, keys: Array, parts: Dictionary, min_pix
 				continue
 			total += n
 			var src_chunk: PixelChunk = shape.chunks[k3]
+			# adopt 且这一块**整块属于本分片**（mask 覆盖了它的全部占用）-> 直接搬对象。
+			# ⚠️ 判据是 mask == src_chunk.occ（不是 mask == -1）：占用不满的块只要
+			#    "本分片拿走了它的全部像素"，搬对象同样是精确的。
+			if adopt and mask == src_chunk.occ:
+				s.chunks[k3] = src_chunk
+				s.mark_dirty_key(k3)
+				continue
 			s.blit_mask_from(src_chunk, k3, mask)
 		if total >= min_pixels and total > 0:
 			out.append(s)
