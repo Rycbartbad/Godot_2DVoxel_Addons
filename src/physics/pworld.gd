@@ -906,11 +906,21 @@ func _substep_rapier(dt: float) -> void:
 			_rp_u8(cmds, 5)
 			_rp_u32(cmds, b.rapier_id)
 			_rp_i32(cmds, b.rects.size())
+			# ⚠️ 整段**先 resize 一次**，再逐字段 encode_float —— 不要每个字段都走 _rp_f32。
+			#    _rp_f32 每次都 `resize(size+4)` + `encode_float`：1200 个矩形 = 4800 次
+			#    resize（每次都动整个缓冲区）+ 4800 次编码。实测（1200 / 4000 个矩形）：
+			#    0.215 / 0.725 ms -> **0.107 / 0.365 ms（2x）**，而且**逐字节完全一致**
+			#    （同样的 encode_float、同样的偏移、同样的值 —— 探针里比过 A=B:true）。
+			#    位置/速度那些只有几个字段的推送不值得改，就这条循环是 N 个矩形。
+			var n0 := cmds.size()
+			cmds.resize(n0 + b.rects.size() * 16)
+			var off := n0
 			for r: Rect2 in b.rects:
-				_rp_f32(cmds, r.position.x)
-				_rp_f32(cmds, r.position.y)
-				_rp_f32(cmds, r.size.x)
-				_rp_f32(cmds, r.size.y)
+				cmds.encode_float(off, r.position.x)
+				cmds.encode_float(off + 4, r.position.y)
+				cmds.encode_float(off + 8, r.size.x)
+				cmds.encode_float(off + 12, r.size.y)
+				off += 16
 			_rp_f64(cmds, solver.global_friction)
 			b._rp_rects_rev = b.rects_rev
 			# ⚠️ 重建碰撞体 = Rapier 侧的分组回到**默认全 1**（新碰撞体不会继承旧分组）。
