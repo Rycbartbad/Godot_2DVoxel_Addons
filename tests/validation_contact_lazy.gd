@@ -1,9 +1,11 @@
 extends SceneTree
-## 接触事件的**两条性能约定**的闸门（2026-10 加）：
+## 接触事件的**三条性能约定**的闸门（2026-10 加）：
 ##
 ##   1. Contact.contact_width 是**惰性**的 —— 采集时不算，**读它的时候**才算，算完缓存；
 ##   2. contact_stress_enabled = false（轻量模式）不填应力场：shear_ratio 恒 0，
-##      但事件本身（点/法向/接近速度/冲量）一个不少，contact_width 读的时候照样算。
+##      但事件本身（点/法向/接近速度/冲量）一个不少，contact_width 读的时候照样算；
+##   3. op 35 的 cap **猜值**（_contact_fetch 拿上一次的点数当猜值，省一次协议往返）——
+##      猜大猜小都必须读到**逐位相同**的数据。
 ##
 ## ⚠️ 为什么这两条值得一个闸门：它们都是**性能**约定，而性能约定的"实现"错了
 ##    不会报错 —— 只会让"引擎无条件付钱"偷偷回来（这个项目在 AABB 缓存 /
@@ -86,6 +88,16 @@ func _contact_of(w: PWorld, a, b):
 ##    注释里**的机制（点在一端、窗口半径的算法），不依赖任何缓存/惰性的实现细节。
 func _expect_width(w: int) -> float:
 	return minf(float(w), float(w) * 0.5 + 4.0)
+
+
+## 两份接触点数组是否逐位相同（位置 + 冲量）。
+func _same_points(a: Array, b: Array) -> bool:
+	if a.size() != b.size():
+		return false
+	for i in a.size():
+		if a[i]["position"] != b[i]["position"] or a[i]["impulse"] != b[i]["impulse"]:
+			return false
+	return true
 
 
 ## 把形状挖空（不走 destruction，直接改像素：本测试只关心"几何变了"）。
@@ -172,6 +184,30 @@ func _initialize() -> void:
 		return
 	print("  shear_ratio = %.4f（宽度 %.1f）" % [cs.shear_ratio, cs.contact_width])
 	_c("全量模式 shear_ratio > 0（厚度扫描真的跑了）", cs.shear_ratio > 0.0, "%.4f" % cs.shear_ratio)
+
+	print("=== 6. op 35 的 cap 猜值：猜错也必须读到一模一样的数据 ===")
+	#
+	# ⚠️ _contact_fetch 现在拿"上一次的点数"当 cap 猜值（猜对省一次协议往返）。
+	#    猜错**不能**改变读到的数据 —— 这里把猜值故意改成 1（太小）和 8（太大）各读一次，
+	#    与正常路径逐点比对。太大/太小都必须走回"按真实点数重发"那条路。
+	var rh := _rest(20, true)
+	var wh: PWorld = rh[0]
+	var ch = _settle_and_grab(wh, rh[1], rh[2], 120)
+	_c("猜值那一段有接触可读", ch != null)
+	if ch == null:
+		quit(1)
+		return
+	var ref: Array = wh.contact_points(0)
+	_c("正常路径读到接触点", ref.size() > 0, "%d 个点" % ref.size())
+	wh._contact_point_hint.resize(1)
+	wh._contact_point_hint[0] = 1                      # 猜小：cap 不够 -> 重发精确的
+	var small: Array = wh.contact_points(0)
+	_c("猜小了点数一样", small.size() == ref.size(), "%d vs %d" % [small.size(), ref.size()])
+	_c("猜小了每个点的位置/冲量逐位相同", _same_points(ref, small))
+	wh._contact_point_hint[0] = 8                      # 猜大：cap 够，只是缓冲区大一点
+	var big: Array = wh.contact_points(0)
+	_c("猜大了点数一样", big.size() == ref.size(), "%d vs %d" % [big.size(), ref.size()])
+	_c("猜大了每个点的位置/冲量逐位相同", _same_points(ref, big))
 
 	print("---")
 	if _fail == 0:

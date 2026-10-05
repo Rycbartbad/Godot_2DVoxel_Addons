@@ -109,6 +109,29 @@ func _time_rects(total: int, dyn: int, steps: int) -> Dictionary:
 	var per := best * 1000.0 / maxf(0.001, subs_avg)
 	return {"ms": best, "rects": rects, "subs": subs_avg, "us_per_sub": per}
 
+## 取一对接触的**纯协议**成本：同一个世界、同一批接触对，反复调 contact_info。
+## force_two = true 时把猜值改成 1（必然不够）-> 逼它走"两步式"，差值就是一次 _rp_send。
+func _fetch_cost(n: int, ground_w: int, reps: int, force_two: bool) -> float:
+	var w := _pile(n, 2, ground_w)
+	# ⚠️ 要等它们真的落在地上：40 步时还在半空 -> 接触对 0（第一次跑就是这么拿到 0.000 的）
+	for i in 120:
+		w.step(1.0 / 60.0)
+	var pairs := w.contact_pair_count()
+	if pairs <= 0:
+		return 0.0
+	var sink := 0
+	var t0 := Time.get_ticks_usec()
+	for r in reps:
+		for i in pairs:
+			if force_two:
+				w._contact_point_hint.resize(i + 1)
+				w._contact_point_hint[i] = 1
+			var info: Dictionary = w.contact_info(i)
+			sink += info["points"].size()
+	_sink += float(sink)
+	return float(Time.get_ticks_usec() - t0) / float(reps) / float(pairs)
+
+
 func _initialize() -> void:
 	await process_frame
 	print("=== 1. 接触事件的四种用法（材质强度已配；40 步热身 + 计时，min-of-2）===")
@@ -127,6 +150,14 @@ func _initialize() -> void:
 			% [(on["ms"] - off["ms"]) * 1000.0 / maxf(0.001, on["cons"]),
 			   (light["ms"] - off["ms"]) * 1000.0 / maxf(0.001, light["cons"]),
 			   (read["ms"] - off["ms"]) * 1000.0 / maxf(0.001, read["cons"])])
+	print("=== 1b. 取一对接触的协议成本：一次调用 vs 两步式（op 35 的 cap 猜值）===")
+	for cfg in [[120, 400], [240, 400]]:
+		var n: int = cfg[0]
+		var gw: int = cfg[1]
+		var one := _fetch_cost(n, gw, 60, false)
+		var two := _fetch_cost(n, gw, 60, true)
+		print("  %4d 体: 猜值命中 %6.3f us/对 | 逼成两步 %6.3f us/对 -> 一次 _rp_send = %.3f us"
+			% [n, one, two, maxf(0.0, two - one)])
 	print("=== 2. 每矩形每子步成本（抓取预算的标定）===")
 	var prev_n := 0
 	var prev_us := 0.0

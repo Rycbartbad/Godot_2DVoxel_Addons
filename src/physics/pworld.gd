@@ -1090,37 +1090,53 @@ func contact_points(idx: int) -> Array:
 	return _contact_fetch(idx).get("points", [])
 
 
+## 取第 idx 对接触：cap 是 **double 个数**（= 4 + 点数*9），协议头的 out_cap 是**字节数**。
+## 抽出来是因为 `_contact_fetch` 现在会**发两次不同 cap 的请求**（猜值 + 精确值）。
+func _fetch_pair(idx: int, cap: int) -> PackedByteArray:
+	var cmds := PackedByteArray()
+	_rp_u8(cmds, 35)
+	_rp_u32(cmds, idx)
+	_rp_i32(cmds, cap)
+	return _rp_send(cmds, 4 + cap * 8)
+
+
 ## 一次调用取回第 idx 对的**全部**数据（点 + 整对总冲量）。两个公开接口都走它。
 ##
 ## ⚠️⚠️ 协议坑（我连踩两次，别再踩）：
 ##   1. `inp` 必须带 **8 字节头**：`i32 out_cap + i32 cmds.size()`，然后才是命令流
 ##      —— 漏了会报 "未知操作码 247（命令流错位）"；
 ##   2. 返回值的**头 4 字节是"实际写入字节数"**（不是数据！），数据从**偏移 4** 开始；
-##   3. op 35 的 `cap` 参数单位是 **double 个数**（= 4 + 6n），协议头的 `out_cap` 是
+##   3. op 35 的 `cap` 参数单位是 **double 个数**（= 4 + 9n），协议头的 `out_cap` 是
 ##      **字节数**（= 4 + cap*8）。差 4 字节就会被"写入字节数不足"挡掉、返回空数组。
+##   4. **cap 不够时它只写 i32 点数**（绝不写半截数据）—— 所以"猜一个 cap"是安全的：
+##      猜对了省一次调用，猜小了照样拿得到点数、按它重发一次精确的。
 ##   生产者是 `_rp_send`（645 行）—— 动协议前先读它。
 func _contact_fetch(idx: int) -> Dictionary:
-	# 第一次：只问点数（cap = 0，扩展不会写数据）
-	var head := PackedByteArray()
-	_rp_u8(head, 35)
-	_rp_u32(head, idx)
-	_rp_i32(head, 0)
-	var hres := _rp_send(head, 4)
-	if hres.decode_s32(0) < 4:
-		return {"ok": false}
-	var np: int = hres.decode_s32(4)
-	if np <= 0:
-		return {"ok": false}
-	# 第二次：取全部
-	# 每点 9 个 f64：nx, ny, px, py, dist, impulse, tangent, fid1, fid2
-	var cap := 4 + np * 9
-	var cmds := PackedByteArray()
-	_rp_u8(cmds, 35)
-	_rp_u32(cmds, idx)
-	_rp_i32(cmds, cap)
-	var res := _rp_send(cmds, 4 + cap * 8)
-	if res.decode_s32(0) < 4 + cap * 8:
-		return {"ok": false}
+	# ⚠️⚠️ 这里曾经**固定两次** _rp_send（先问点数、再取数据），每次都有固定的协议开销
+	#    （实测 ~3.3 us/次）。而点数在相邻子步之间几乎不变，所以拿上一次的当**猜值**：
+	#    猜对 -> **一次**调用；猜小了 -> 退回原来的两步（不多付）。猜错**不会**少读数据
+	#    （见上面第 4 条）。实测**一次 _rp_send ≈ 2.8 us**（tests/bench_contact_light.gd 的
+	#    1b 段：猜值命中 6.6~7.5 us/对，逼成两步 9.5~10.3 us/对），所以省下的是
+	#    "每对每子步 2.8 us" —— 子步多的场景乘子步数（29 子步 x 25 对/子步 = 725 次取回/步
+	#    -> ~2 ms/步），而本探针那种 2.5 子步的场景只占 ~7%（淹没在场景 1 的散布里）。
+	var guess := 2
+	if idx < _contact_point_hint.size() and _contact_point_hint[idx] > 0:
+		guess = _contact_point_hint[idx]
+	var cap := 4 + guess * 9
+	var res := _fetch_pair(idx, cap)
+	var np: int = res.decode_s32(4)
+	if res.decode_s32(0) < 4 + (4 + np * 9) * 8:
+		# cap 不够（这时 op 35 只写了 i32 点数），或者这个下标压根没有接触对
+		if np <= 0:
+			return {"ok": false}
+		cap = 4 + np * 9
+		res = _fetch_pair(idx, cap)
+		np = res.decode_s32(4)
+		if res.decode_s32(0) < 4 + (4 + np * 9) * 8:
+			return {"ok": false}
+	if idx >= _contact_point_hint.size():
+		_contact_point_hint.resize(idx + 1)
+	_contact_point_hint[idx] = np
 	var out: Array = []
 	for i in np:
 		# 跳过 res 头(4) + payload 头(i32 n + id_a,id_b,n_points,total 共 4 个 f64 = 36 字节)
@@ -1460,6 +1476,12 @@ var max_contacts := 512
 var contacts: Array = []
 
 var _contact_prev := {}
+
+## 上一次取回时**每个接触对**的点数（op 35 的 cap 猜值，见 _contact_fetch）。
+##
+## ⚠️ 下标是"这一步的第几个接触对"，跨步会变（配对来去）—— 所以它**只是猜值**：
+##    猜错无非是退回两步式，绝不影响读到的数据。
+var _contact_point_hint := PackedInt32Array()
 
 
 ## 一次接触。字段都是**求解前**的状态。
