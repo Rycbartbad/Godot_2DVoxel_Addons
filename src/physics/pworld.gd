@@ -745,6 +745,16 @@ func _rp_ensure() -> bool:
 	if _rp != null:
 		return true
 	_rp = ClassDB.instantiate("RapierPhys")
+	# ⚠️⚠️ 绕开 Godot 的一个已知问题（issue #111075，标签 bug：
+	#    "Issues related to initializing new instance in GDExtension/Godot modules"）。
+	#    维护者原话：RefCounted 在实例化时应当只带 1 份引用并把它交给调用方，
+	#    "This fix is highly complex and will likely take a while"。
+	#    实测（tests/diag_unreference.gd）：RapierPhys 创建后 get_reference_count() == 2
+	#    （普通 RefCounted 是 1），那份多出来的引用没人还 -> 退出时报 1 个实例泄漏。
+	#    unreference() 是引擎暴露的方法：计数 2 时调一次回到 1，**不会**误释放。
+	#    ⚠️ 必须判 > 1 再调 —— 计数 1 时调会真的把对象释放掉。
+	if _rp.get_reference_count() > 1:
+		_rp.unreference()
 	if _rp == null:
 		# ⚠️ 这里必须**吵闹地**失败。扩展加载失败时 ClassDB.instantiate 返回 null，
 		#    而如果放任下去，报错会是 "Nonexistent function 'cmd' in base 'Nil'" ——
