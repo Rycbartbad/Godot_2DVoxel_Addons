@@ -2404,6 +2404,11 @@ func fracture_pixels(body: PBody, removals: Dictionary, burst_speed: float = 0.0
 	var kept: Array = []
 	var loose: Array = []
 	for s in body.shapes:
+		# ⚠️⚠️ 被删光的 shape **不能留下**：split() 对空 shape 会返回 1 个空块，
+		#    于是 kept 非空 -> 原体永远不会消失。实测：全删 1600 像素后
+		#    body_alive 仍然是 true（闸门 ② 抓到的）。
+		if s.pixel_count() <= 0:
+			continue
 		var parts: Array = Destruction.split(s, min_fragment_pixels)
 		if parts.size() <= 1:
 			kept.append(s)

@@ -599,3 +599,58 @@ func body_of(node: Node) -> PBody:
 	if node is PixelBody2D:
 		return (node as PixelBody2D).body
 	return null
+
+
+## 破坏之后把**节点层**与 world 对齐（新增碎片 / 消失的刚体 / 失效关节）。
+##
+## ⚠️ 为什么必须显式调：_body_nodes 与 world.bodies **按下标一一对应**（见 add_body_node），
+##    而破坏会**增删刚体**（碎片是新刚体、被全删的刚体消失）。不对齐的后果：
+##    碎片拿不到贴图、消失的刚体留下悬空节点引用、关节指向不存在的刚体。
+##
+## ⚠️ 碎片允许**只有 PBody**：这里用 **null 占位**，而不是把数组项删掉 ——
+##    删掉会让下标整体错位（接口请求点名的验证项："全删和多碎片时节点索引不串位"）。
+##
+## ⚠️ 渲染要**含静态地形**：_physics_process 只同步动态体（静态体像素不变、sync 又贵），
+##    但破坏之后静态 Ground 的像素**真的变了** —— 所以这里显式全量 sync 一次。
+##
+## ⚠️ 关节：body_a / body_b 为 null 表示"锚在静态世界"，那是**合法**的，
+##    不能和"锚点已被删除"一起清掉 —— 只清**非 null 且已不在 world.bodies 里**的。
+func sync_world_bodies() -> void:
+	# ① 节点数组按下标重建：能对上的节点保留，对不上的（碎片/未节点化）用 null 占位
+	var by_body := {}
+	for n in _body_nodes:
+		if n != null and is_instance_valid(n) and n.body != null:
+			by_body[n.body] = n
+	var out: Array = []
+	for b in world.bodies:
+		out.append(by_body.get(b, null))
+	_body_nodes = out
+
+	# ② 渲染：全量 sync（含静态地形）+ 清理已经不存在的刚体
+	for b in world.bodies:
+		renderer.sync(b)
+	renderer.prune(_live_ids())
+
+	# ③ 关节：锚点已经不存在的清掉，不留悬空引用
+	var alive := {}
+	for b in world.bodies:
+		alive[b] = true
+	for j in world.joints.duplicate():
+		var bad := (j.body_a != null and not alive.has(j.body_a)) 			or (j.body_b != null and not alive.has(j.body_b))
+		if bad:
+			world.remove_joint(j)
+
+	# ④ 关节节点同样清掉失效的（用 get("joint") 取值，不假设字段名）
+	var kept_j: Array = []
+	for c in _joint_nodes:
+		if c != null and is_instance_valid(c) and world.joints.has(c.get("joint")):
+			kept_j.append(c)
+	_joint_nodes = kept_j
+
+
+## 破坏的统一入口：调 fracture_pixels 之后**顺手**把节点层对齐。
+## ⚠️ 游戏层只要用这一个方法，就不会忘记 sync_world_bodies()（忘了的症状是碎片没有贴图）。
+func fracture_pixels_and_sync(body: PBody, removals: Dictionary, burst_speed: float = 0.0) -> Dictionary:
+	var res: Dictionary = world.fracture_pixels(body, removals, burst_speed)
+	sync_world_bodies()
+	return res
