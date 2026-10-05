@@ -512,6 +512,46 @@ func add_spring(a, b, world_anchor_a: Vector2, world_anchor_b: Vector2,
 	return world.add_spring(a, b, world_anchor_a, world_anchor_b, rest_length, stiffness, damping)
 
 
+## ---------- 冻结 / 恢复（可逆）----------
+##
+## ⚠️ 和 despawn() / cull_outside() 的区别：那些是**移除**（刚体没了，回来也回不来）；
+##    冻结是**暂停** —— 位置、速度、材质、关节全留着，解冻后接着跑。
+##    "相机外扩两个区块、超出冻结、回来恢复"要的是这一组。
+##
+## ⚠️ **隐藏节点不会停物理**（Visible=false / 移出视口都只是不画），要停就得冻。
+
+## 冻结一个刚体（位置/速度/材质/关节都留着，解冻后接着跑）。
+## ⚠️ 单冻一个是有意的能力（"把这块石头钉在空中"），但它会把关节另一头拽住；
+##    要连关节组一起冻用 freeze_component()，相机剔除用 cull_freeze()。
+func freeze(body) -> bool:
+	return world.freeze(body)
+
+
+## 解冻：恢复成动态并唤醒。
+func unfreeze(body) -> void:
+	world.unfreeze(body)
+
+
+func is_frozen(body) -> bool:
+	return world.is_frozen(body)
+
+
+## 冻结整个关节组件（铰链/滑轨/绳都算连通），返回冻住的数量。
+func freeze_component(body) -> int:
+	return world.freeze_component(body)
+
+
+## 相机剔除（**可逆**）：范围外冻结、范围内恢复。
+## keep 传"必须保持计算的刚体"（玩家、手上的东西）—— 它们所在的**整个关节组件**都不会被冻。
+## 返回 {"frozen": 本次冻住数, "unfrozen": 本次恢复数, "kept": 保持计算数}。
+##
+## 用法（区块外扩 2 格由游戏层算，引擎只认世界矩形）：
+##     var r := Rect2(cam_topleft - Vector2.ONE * 2 * chunk, cam_size + Vector2.ONE * 4 * chunk)
+##     px.cull_freeze(r, [player_body])
+func cull_freeze(rect: Rect2, keep: Array = []) -> Dictionary:
+	return world.cull_freeze(rect, keep)
+
+
 ## 断开一个关节。
 func remove_joint(j) -> void:
 	world.remove_joint(j)

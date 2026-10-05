@@ -39,6 +39,13 @@ var local_com := Vector2.ZERO     # 质心（Body 局部坐标，像素单位）
 var rects: Array = []             # Array[Rect2]，局部空间碰撞矩形（贪心分解结果）
 var shapes: Array = []            # Array[PixelShape]，局部空间像素数据
 var is_static := false
+## **冻结**（可逆）—— 与 is_static 的区别：静态是"天生不动"，冻结是"暂时不动，状态留着"。
+##
+## ⚠️ 冻结**不清速度**（linear/angular_velocity 原样留着），解冻后接着跑 ——
+##    这就是"相机外走出范围就冻、回来就恢复"的全部含义。见 PWorld.freeze() / cull_freeze()。
+## ⚠️ 冻结期间刚体按**静态**推给 Rapier：不积分、不参与静态-静态对（整片冻住几乎零成本），
+##    但碰撞体还在 —— 醒着的东西照样被它挡住。
+var frozen := false
 var awake := true
 var sleep_timer := 0.0
 var aabb := Rect2()
@@ -82,6 +89,8 @@ var _rp_vx := 0.0
 var _rp_vy := 0.0
 var _rp_w := 0.0
 var _rp_static := false
+## 解冻后要不要显式叫醒 Rapier 那边（见 PWorld.unfreeze 的说明）。
+var _rp_need_wake := false
 ## 上次推给 Rapier 的矩形版本号（-1 = 还没推过）
 var _rp_rects_rev := -1
 ## 上次推给 Rapier 的碰撞层/掩码（-1 = 还没推过）。

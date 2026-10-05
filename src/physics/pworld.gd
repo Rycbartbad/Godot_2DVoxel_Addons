@@ -887,11 +887,26 @@ func _substep_rapier(dt: float) -> void:
 		b.pre_vx = b.linear_velocity.x
 		b.pre_vy = b.linear_velocity.y
 		b.pre_w = b.angular_velocity
-		if b.is_static != b._rp_static:
+		# ⚠️ Rapier 侧的"静态" = is_static **或 frozen**：冻结就是把刚体暂时按静态推过去
+		#    （不积分、不参与静态-静态对，但碰撞体还在）。见 PBody.frozen 的说明。
+		var native_static: bool = b.is_static or b.frozen
+		if native_static != b._rp_static:
 			_rp_u8(cmds, 15)
 			_rp_u32(cmds, b.rapier_id)
-			_rp_i32(cmds, 1 if b.is_static else 0)
-			b._rp_static = b.is_static
+			_rp_i32(cmds, 1 if native_static else 0)
+			b._rp_static = native_static
+			# ⚠️⚠️ 刚体类型一变，Rapier 会**重算质量属性**（静态 = 无限质量）：解冻时必须把
+			#    密度/摩擦/恢复重推一遍，否则它们停在静态那一套上。
+			#    症状与破坏路径那个坑一模一样：**解冻后的石头变轻变滑**，而且不报任何错。
+			b._rp_density = -1.0
+			b._rp_friction = -1.0
+			b._rp_restitution = -1.0
+		# ⚠️ 解冻后要**显式叫醒** Rapier 那边（op 10）：它当了若干步的静态刚体，
+		#    岛管理器不会自己把它放回模拟里 —— 只把类型改回动态不够。
+		if b._rp_need_wake:
+			_rp_u8(cmds, 10)
+			_rp_u32(cmds, b.rapier_id)
+			b._rp_need_wake = false
 		if _rp_ccd_pushed != ccd_enabled:
 			_rp_u8(cmds, 19)
 			_rp_u32(cmds, b.rapier_id)
@@ -1030,6 +1045,20 @@ func _substep_rapier(dt: float) -> void:
 	for b4: PBody in bodies:
 		if b4.rapier_id <= 0 or b4.is_static:
 			continue
+		if b4.frozen:
+			# ⚠️⚠️ 冻着的刚体：Rapier 那边它是**静态**，读回来的是**零速度** —— 直接写进去就把
+			#    "留着解冻用的速度"抹掉了。症状：解冻后物体停在原地不动，速度凭空消失，
+			#    而且不报任何错（我第一版就是这么写的，闸门里"解冻后速度原样交回"当场抓到
+			#    283.02 -> 0.00）。位置/朝向照收（它本来就不动），**速度跳过**。
+			#    ⚠️ off 必须照常前进：结果段是**按请求顺序紧凑排列**的，跳过一个就整体错位
+			#    （那会把后面所有刚体的位置都读错，比速度丢失难查得多）。
+			b4.position = Vector2(res.decode_double(off), res.decode_double(off + 8))
+			b4.rotation = res.decode_double(off + 16)
+			b4._rp_x = b4.position.x
+			b4._rp_y = b4.position.y
+			b4._rp_rot = b4.rotation
+			off += 48
+			continue
 		b4.position = Vector2(res.decode_double(off), res.decode_double(off + 8))
 		b4.rotation = res.decode_double(off + 16)
 		b4.linear_velocity = Vector2(res.decode_double(off + 24), res.decode_double(off + 32))
@@ -1057,8 +1086,11 @@ func _substep_rapier(dt: float) -> void:
 	for b5: PBody in bodies:
 		if b5.rapier_id <= 0 or b5.is_static:
 			continue
-		b5.awake = (res.decode_s32(off) == 0)
+		var sleeping := res.decode_s32(off) == 0
 		off += 4
+		# ⚠️ 冻着的刚体固定记成"不参与积分"：Rapier 对 Fixed 刚体报的睡眠位不是这个意思
+		#    （它可能报"没在睡"），照抄会把 freeze() 设的 awake=false 又翻回来。
+		b5.awake = false if b5.frozen else sleeping
 	# ---- 关节冲量 -> 断裂 ----
 	if not breakables.is_empty():
 		for j in breakables:
@@ -1334,7 +1366,8 @@ func _motion_of(b: PBody) -> float:
 func _fastest_motion_plain() -> float:
 	var fastest := 0.0
 	for b: PBody in bodies:
-		if b.is_static or not b.awake:
+		# ⚠️ 冻结的刚体不参与：它不积分（速度是留着解冻用的），拿它算子步数纯属白算。
+		if b.is_static or not b.awake or b.frozen:
 			continue
 		fastest = maxf(fastest, _motion_of(b))
 	return fastest
@@ -1347,7 +1380,7 @@ func _fastest_motion_grouped() -> float:
 	var seen := {}
 	var fastest := 0.0
 	for b: PBody in bodies:
-		if b.is_static or not b.awake or seen.has(b):
+		if b.is_static or not b.awake or b.frozen or seen.has(b):
 			continue
 		var grp := weld_group(b)
 		seen[b] = true
@@ -1415,7 +1448,8 @@ func _group_motion(grp: Array) -> float:
 	var w_sum := 0.0
 	var c := Vector2.ZERO
 	for b: PBody in grp:
-		if b.is_static:
+		# ⚠️ 冻着的成员速度是**留着解冻用的旧值**，算进整体运动就把子步数又顶上去了。
+		if b.is_static or b.frozen:
 			continue
 		m_sum += b.mass
 		v_sum += b.linear_velocity * b.mass
@@ -1802,12 +1836,152 @@ func cull_outside(bounds: Rect2) -> int:
 	var removed := 0
 	for i in range(bodies.size() - 1, -1, -1):
 		var b: PBody = bodies[i]
-		if b.is_static:
+		# ⚠️ 冻着的**不移除**：那是"暂停"，回来还要用（要移除就先解冻，或者别用它）。
+		if b.is_static or b.frozen:
 			continue
 		if not bounds.intersects(b.aabb):
 			bodies.remove_at(i)
 			removed += 1
 	return removed
+
+
+## ---------- 冻结 / 恢复（**可逆**的"关掉物理"）----------
+##
+## ⚠️ 与 cull_outside() 的区别（这是两件事，别混）：
+##   · cull_outside = **移除** —— 刚体从世界里消失，回来也回不来（远处的地形碎片用得上）；
+##   · 冻结         = **暂停** —— 位置、速度、材质、关节全留着，解冻后接着跑。
+##     "相机外扩两个区块、超出冻结、回来恢复"要的是后者。
+##
+## 实现：把刚体**按静态推给 Rapier**（op 15）。它不积分、不参与静态-静态对（整片冻住几乎
+## 零成本），但碰撞体还在 —— 醒着的东西照样被它挡住。
+## ⚠️ 速度**不清零**（存在 PBody 上），解冻时原样交回去。
+## ⚠️ 解冻时必须重推密度/摩擦/恢复（Rapier 换刚体类型会重算质量属性）—— 见 step() 里那段。
+
+## 冻结**单个**刚体。要连关节组一起冻用 freeze_component()，相机剔除用 cull_freeze()。
+##
+## ⚠️ 单冻一个是**有意的**能力（"把这块石头钉在空中"），但它会把关节另一头拽住 ——
+##    半冻的关节组在游戏里看起来就是"机械臂被钉住了"，所以 cull_freeze 是按组件原子处理的。
+## ⚠️ 返回 false = 没冻（本来就是静态，或者已经冻着了）。
+func freeze(body: PBody) -> bool:
+	if body == null or body.is_static or body.frozen:
+		return false
+	body.frozen = true
+	body.awake = false          # 不参与积分/接触求解；Rapier 侧也按静态推（见 step）
+	body.sleep_timer = 0.0
+	return true
+
+
+## 解冻：恢复成动态 + **唤醒**（它要重新积分、重新参与接触）。
+##
+## ⚠️⚠️ 这里有两件"看起来多余、少一件就静默失效"的事：
+##   1. **强制重推速度**（镜像置 INF）：Rapier 把它当静态的这段时间里，它的内部速度
+##      已经被重算掉了，而"变了才推"的判断因为镜像还停在冻结前的值而认为无需推送。
+##      症状：**解冻后速度明明在（PBody 上），物体却一动不动**。
+##      闸门 tests/validation_freeze.gd 的"解冻后接着跑"当场抓到（x 停在 48.62 不动）。
+##   2. **显式叫醒**：它当了若干步的静态刚体，岛管理器不会自己把它放回模拟里 ——
+##      只把类型改回动态是不够的（op 10）。
+func unfreeze(body: PBody) -> void:
+	if body == null or not body.frozen:
+		return
+	body.frozen = false
+	body.awake = true
+	body.sleep_timer = 0.0
+	body._rp_vx = INF
+	body._rp_vy = INF
+	body._rp_w = INF
+	body._rp_need_wake = true
+
+
+func is_frozen(body) -> bool:
+	return body != null and body.frozen
+
+
+## 任意关节（WELD / HINGE / SLIDER / SPRING / ROPE）连通的**动态**刚体组件（含自己）。
+##
+## ⚠️ 与 weld_group() 的区别：那个只走 WELD（抓取的等效质量必须"真正刚性"）；
+##    剔除要的是"动一个就动一串"—— 铰链/滑轨/绳都会把运动传出去，所以都要算。
+func joint_component(body: PBody) -> Array:
+	var out: Array = []
+	if body == null or body.is_static:
+		return out
+	var seen := {body: true}
+	var stack: Array = [body]
+	while not stack.is_empty():
+		var cur: PBody = stack.pop_back()
+		out.append(cur)
+		for j in joints:
+			if not j.active:
+				continue
+			var other = null
+			if j.body_a == cur:
+				other = j.body_b
+			elif j.body_b == cur:
+				other = j.body_a
+			else:
+				continue
+			if other == null or other.is_static or seen.has(other):
+				continue
+			seen[other] = true
+			stack.append(other)
+	return out
+
+
+## 冻结**整个关节组件**（含自己）。返回本次冻住的刚体数。
+func freeze_component(body: PBody) -> int:
+	var n := 0
+	for b: PBody in joint_component(body):
+		if freeze(b):
+			n += 1
+	return n
+
+
+## **相机剔除**（可逆）：范围外冻结、范围内恢复。
+## 返回 {"frozen": 本次冻住数, "unfrozen": 本次恢复数, "kept": 保持计算的刚体数}。
+##
+## keep：必须保持计算的刚体（玩家、手上的东西）。**它们所在的整个关节组件**都不会被冻 ——
+##       这就是"与玩家关节连接的物体保持计算"。
+##
+## ⚠️ 关节组件是**原子**的：一个组件要么整组醒着、要么整组冻着。半冻会让关节把醒着那头
+##    钉住（玩家一走出范围，手上的机械臂就不动了 —— 而且不报任何错）。
+## ⚠️ 被抓着的刚体永远不冻：抓取是每子步施加的力，冻住它等于"抓着一块石头"。
+## ⚠️ 判据是世界 AABB 与 rect 相交（与 cull_outside 同口径；"外扩两个区块"由调用方
+##    把 rect 算好再传进来 —— 引擎不认识区块）。
+func cull_freeze(rect: Rect2, keep: Array = []) -> Dictionary:
+	# ① "必须醒着"的集合 = keep 的整个关节组件 + 被抓住的东西的整个关节组件
+	var must_awake := {}
+	for k in keep:
+		if k is PBody:
+			for m: PBody in joint_component(k):
+				must_awake[m] = true
+	for g in grabs:
+		if g.body != null:
+			for m2: PBody in joint_component(g.body):
+				must_awake[m2] = true
+	# ② 按组件逐个决定（visited 保证每个组件只处理一次）
+	var frozen_n := 0
+	var unfrozen_n := 0
+	var kept := 0
+	var visited := {}
+	for b: PBody in bodies:
+		if b.is_static or visited.has(b):
+			continue
+		var comp := joint_component(b)
+		var need_awake := false
+		for m3: PBody in comp:
+			visited[m3] = true
+			if must_awake.has(m3) or rect.intersects(m3.aabb):
+				need_awake = true
+		if need_awake:
+			kept += comp.size()
+			for m4: PBody in comp:
+				if m4.frozen:
+					unfreeze(m4)
+					unfrozen_n += 1
+		else:
+			for m5: PBody in comp:
+				if freeze(m5):
+					frozen_n += 1
+	return {"frozen": frozen_n, "unfrozen": unfrozen_n, "kept": kept}
 
 
 ## ---------- 程序化破坏（世界坐标）----------
@@ -2481,7 +2655,8 @@ func enforce_body_budget() -> int:
 			held[g.body.id] = true
 	var candidates: Array = []
 	for b2 in bodies:
-		if b2.is_static or b2.awake or held.has(b2.id):
+		# ⚠️ 冻着的碎片**不淘汰**：它是被故意停在那儿的（相机外），不是没人要的野碎片。
+		if b2.is_static or b2.awake or b2.frozen or held.has(b2.id):
 			continue
 		candidates.append(b2)
 	candidates.sort_custom(func(x: PBody, y: PBody) -> bool:

@@ -367,3 +367,30 @@ px.query_clear_filters()
 > ⚠️ 默认掩码是**全 1（谁都碰）**，所以"层不同"本身**不排斥** ——
 > 要"只碰某几层"必须显式写掩码。`layer = 0` 表示不在任何层：它碰不到任何东西，
 > 任何东西也碰不到它（这是"临时关掉一个刚体"的正当做法）。
+
+---
+
+## 14. 相机剔除：范围外冻结、回来恢复
+
+大世界（几百上千个刚体）里真正在动的只有相机附近那一片。远处的东西**冻住**就行 ——
+不积分、不参与求解，但碰撞体和像素都还在，走回去立刻接着跑。
+
+```gdscript
+const CHUNK := 64.0        # 你们的区块大小
+
+func _physics_process(_dt: float) -> void:
+    var cam := get_viewport().get_camera_2d()
+    var size := get_viewport().get_visible_rect().size / cam.zoom
+    var topleft := cam.get_screen_center_position() - size * 0.5
+    # 外扩两个区块：避免"走到边缘才解冻"造成进场那一下卡顿
+    var r := Rect2(topleft - Vector2.ONE * 2.0 * CHUNK, size + Vector2.ONE * 4.0 * CHUNK)
+    px.cull_freeze(r, [player_body])       # 与玩家关节连接的整组都不会被冻
+```
+
+- 返回值 `{"frozen", "unfrozen", "kept"}`：这次冻了几个 / 恢复了几个 / 保持计算几个。
+- 调用频率：每帧调没问题（只做 AABB 比较 + 状态翻转，**状态没变就什么都不发**）；
+  想更省可以每 0.2 秒调一次。
+- 手动控制单个或整组：`px.freeze(body)` / `px.unfreeze(body)` / `px.freeze_component(body)`。
+- ⚠️ **别用 `Visible = false` 代替它** —— 那只是不画，物理照跑（这是最常见的误解）。
+- ⚠️ `cull_outside()` 是**移除**，不可逆；要可逆就用 `cull_freeze()`。
+- ⚠️ 关节组件是**原子**的：半冻会把关节另一头钉住（玩家一走出范围，手上的机械臂就不动了）。
