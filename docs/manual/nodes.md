@@ -160,6 +160,24 @@ for c in world.contacts:
 
 `shear_ratio` 由 `Query.thickness_at` 算出：法向穿过的材料越薄，越是正面顶上去。
 
+### 性能：接触宽度是惰性的，应力场可以整体关掉
+
+`contact_width` 是**沿切向逐像素数**出来的（不能用 AABB 近似 —— 那样看不出矛是尖的），
+`shear_ratio` 还要再做两次 `Query.thickness_at`。这两样是接触事件里**最贵**的部分。
+实测（`tests/bench_contact_light.gd`：120 个方块落在地面上，62 接触/步）：
+
+| 你要什么 | 怎么配 | 每接触代价 |
+|---|---|---|
+| 撞了什么 / 撞在哪 / 撞得多猛 | `contact_events_enabled = true` + `contact_stress_enabled = false` | **~22 µs** |
+| 还要 σ = 冲量 / 宽度 | 同上，但 `contact_stress_enabled` 保持默认 `true`；宽度**读它的时候**才算 | ~185 µs（读宽度 ~77 + 两次厚度 ~108）|
+| 连事件都不要 | 查询路径 `contact_pair_count()` / `contact_info(i)`（**不用开事件**）| 0 |
+
+- **`Contact.contact_width` 是惰性的**：不读不算，第一次读之后缓存 ——
+  所以"只用冲量做判据"的代码不会为它付钱（轻量模式下再读它，照样算得出来）。
+- **`contact_stress_enabled = false`（轻量模式）**：点/法向/接近速度/冲量一个不少，
+  但 `shear_ratio` 恒为 0 —— 上面那半条"抗压远强于抗剪"的判据会失效
+  （`strength_for` 退化成纯抗压强度）。要那半个判据就别关。
+
 ## 蓝图：画完先不固化
 
 游戏层「画一笔」不应该立刻变成物理实体。蓝图就是这个中间态：

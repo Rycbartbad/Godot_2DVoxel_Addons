@@ -92,13 +92,24 @@ var ccd_substep_budget := 600
 #    迟滞实际由 _compute_substeps 里的 grabs.is_empty() 实现（见那里的说明）。
 #    我在提交 0e26d1c 的信息里写过"把它删掉"，其实没删；现在真删了，别再让它假装是个开关。
 
-## 抓取时子步的**代价上限**（微秒）。抓着东西时，子步数还要再按**世界大小**压一遍。
+## 抓取时**每个物理步**允许花在子步循环上的代价上限（微秒）。
+## 抓着东西时，子步数还要再按**世界大小**压一遍：need = 本值 / (总矩形数 x CCD_RECT_COST_US)。
 ##
 ## ⚠️⚠️ 为什么：子步是**全局**的 —— 每个子步都要把整个世界步进一遍，所以帧时间随
-##    "子步数 x 世界大小" 涨。实测每子步成本 ≈ **1 us/矩形**
-##    （1000 矩形 ≈ 1.0 ms/子步，100 矩形 ≈ 0.13 ms/子步）。
-##    用户报的"1000 矩形时按住 Ctrl 左键拖动掉到 8 帧"就是这条：
-##    一次快速拖动 = 25 子步 x 每个子步都要步进 1000 个矩形 = 125 ms/帧。
+##    "子步数 x 世界大小" 涨。用户报的"1000 矩形时按住 Ctrl 左键拖动掉到 8 帧"就是这条：
+##    一次快速拖动 = 25 子步 x 每个子步都要步进 1000 个矩形。
+##
+## ⚠️⚠️ 标定（2026-10 重测）：**每矩形每子步不是 1 us**。旧注释写 1 us 是在
+##    "单个静态刚体扛 1000 个矩形"的场景量的（tests/validation_grab_budget.gd：
+##    1001 矩形 / 5 子步 / 最坏一帧 5.66 ms = 1.13 us/矩形）。静态矩形只进宽相、
+##    不进求解器，那是**最便宜**的一头。
+##    碎块场景（动态刚体多、接触对多）实测 **2.8~4.9 us/矩形**
+##    （tests/bench_contact_light.gd：506/1006/2006/4006 矩形 -> 2.77/2.96/3.51/4.86 us，
+##    边际 3.15/4.07/6.21 us；两次独立跑动的散布约 ±0.3）—— 旧标定让这个保护上限
+##    在**它最该起作用的场景里松了 4 倍多**，所以常数取 4.4（见 CCD_RECT_COST_US）。
+##
+## ⚠️ 它仍然是"每帧 6 ms"这个量级的上限：6000 us / (4.4 us/矩形) ≈ 1364 个
+##    "矩形·子步"。510 矩形的场景 -> 2 子步；1000 矩形 -> 1 子步。
 ##
 ## ⚠️ 只在**抓取时**生效 —— 不抓时完全走原来的行为，所以 8 条基准**逐位不变**
 ##    （它们不抓东西）。这和迟滞（_compute_substeps 里 grabs.is_empty() 那一段）的取舍同源：
@@ -106,9 +117,23 @@ var ccd_substep_budget := 600
 ##
 ## ⚠️ 代价：重场景里子步变少 -> 每子步位移变大 -> 被 ccd_clamp_motion 钳住 ->
 ##    那一帧**变慢动作**（绝不穿模，和子步上限被顶满时同一个取舍）。
-##    ⚠️ 正常拖动速度（几百单位/秒 -> 每帧几像素）根本碰不到这个上限，
-##    只有"甩"这种极端速度才会被钳。
+##    ⚠️ 标定更正之后这个上限**更容易被碰到**：510 矩形 -> 2 子步，也就是拖动超过
+##    ~240 px/s 就会被钳（旧标定下是 11 子步、~1320 px/s 才碰到）。觉得拖不动就把
+##    本值调大 —— 那是"用帧时间换手感"的旋钮。但**别把 CCD_RECT_COST_US 改小来
+##    假装保护还在**：它量的是真实代价，改它只是让上限说谎。
 var ccd_grab_substep_cost_budget_us := 6000
+## 每个**矩形每子步**的实测代价（微秒）。抓取时的子步上限按它换算成时间。
+##
+## ⚠️⚠️ 旧注释写的是 **1**（"1000 矩形 ≈ 1.0 ms/子步"）—— 那是在**单个静态刚体**
+##    扛 1000 个矩形的场景量的，而静态矩形只进宽相、不进求解器，是最便宜的一头。
+##    碎块场景实测 2.8~4.9 us/矩形（数字与测法见上面 ccd_grab_substep_cost_budget_us
+##    的说明）。**保护上限必须按最坏场景标定** —— 按最便宜的场景标定，等于在
+##    需要它的地方恰好失效（旧值在碎块场景里松了 4 倍多）。
+##
+## ⚠️ 这个常数是**场景相关**的（静态多的场景实测能低到 1.1）：它是"保护上限"，
+##    宁可偏保守 —— 偏保守的代价是重场景里拖动变慢动作（见 ccd_clamp_motion），
+##    偏松的代价是掉帧。
+const CCD_RECT_COST_US := 4.4
 ## 子步上限被顶满时，位移会被**硬钳**在这个值上。
 ## 代价是超高速物体变成慢动作，换来的是"绝不可能穿模"的硬保证。
 var ccd_clamp_motion := true
@@ -1229,6 +1254,20 @@ func _contact_add_rapier(a: PBody, b: PBody, point: Vector2, normal: Vector2, im
 	contacts.append(c)
 
 
+## 抓取时的子步上限：预算(us) / (矩形数 x 每矩形每子步的**实测**代价)。
+##
+## ⚠️ 抽成函数是**为了让公式只有一个真源**：以前 tests/validation_grab_budget.gd
+##    自己抄了一遍 `budget / total_rects`，于是引擎改了标定（1 -> 4.4 us/矩形）
+##    而测试还在按旧公式算上限 —— 闸门会静默失效（它断言的是"子步 <= 上限"，
+##    上限算大了就永远通过）。现在两边都调这个函数。
+##
+## ⚠️ 只在抓取时用得上（见 ccd_grab_substep_cost_budget_us）。
+func grab_substep_cap(total_rects: int) -> int:
+	if total_rects <= 0:
+		return 1
+	return maxi(1, int(float(ccd_grab_substep_cost_budget_us) / (float(total_rects) * CCD_RECT_COST_US)))
+
+
 ## 本步需要切成几个子步。判据是"最快的物体一步能走多远"：
 ## 只要每个子步的位移都小于最薄障碍物的厚度，就不可能穿过去。
 ##
@@ -1256,7 +1295,7 @@ func _compute_substeps(dt: float) -> int:
 		# 抓取时再按**世界大小**压一遍：每个子步都要步进整个世界（见
 		# ccd_grab_substep_cost_budget_us 的说明）。⚠️ 只在抓取时生效 -> 基准逐位不变。
 		if not grabs.is_empty() and total_rects > 0:
-			need = mini(need, maxi(1, ccd_grab_substep_cost_budget_us / total_rects))
+			need = mini(need, grab_substep_cap(total_rects))
 	# 迟滞：**涨立刻涨**（CCD 是安全项）；**抓着东西时不许落**。
 	#
 	# ⚠️⚠️ 为什么"不许落"：子步数是按**全世界最快的那个刚体**算的，它一变，**所有**刚体
@@ -1374,12 +1413,22 @@ func center_of_mass_world() -> Vector2:
 ##
 ## ⚠️ 三点约定，用之前必须知道：
 ##
-## 1. **默认关闭**，而且开了**很贵** —— 实测（200 步、12 个刚体、7 对接触）：
+## 1. **默认关闭**，而且开了**有代价** —— 实测（200 步、12 个刚体、7 对接触）：
 ##    关 79.3 ms / 开 1125.1 ms，即**每帧多 5.2 ms**，摊到每对接触约 **0.74 ms/帧**。
-##    ⚠️ 开销大头**不是**对象分配，而是每对接触都要算的 contact_width
-##    （沿切向逐像素走，见 _contact_width 的说明）和 shear_ratio。
-##    => 只在真的需要"接触宽度/剪切比"时才开；只要接触点/冲量的话走
-##    **查询路径**（contact_pair_count / contact_points / contact_info），那条路**不需要**开事件。
+##    ⚠️ 开销大头**不是**对象分配，而是每对接触的**应力场**：contact_width
+##    （沿切向逐像素走）和 shear_ratio 的两次 thickness_at。
+##    => 三种用法，按需要选（代价从低到高）：
+##       · 只要接触点/冲量 -> 走**查询路径**
+##         （contact_pair_count / contact_points / contact_info），**不用开事件**；
+##       · 要事件、不要应力 -> 开事件 + @@contact_stress_enabled = false@@（轻量模式）；
+##       · 要应力（σ = 冲量/宽度）-> 两个都开。宽度是**惰性**的：读了才算。
+##    ⚠️⚠️ 实测（tests/bench_contact_light.gd：120 个方块落在地面上，62 接触/步，
+##    材质强度已配 —— 没配强度的话 thickness_at 那一段本来就不跑）：
+##      关事件 1.49 ms/步 | 开+应力 12.95 | 轻量 2.86 | 轻量+读宽度 6.27
+##      -> 每接触 185 us（旧行为）/ 22 us（轻量）/ 77 us（轻量但消费者读了宽度）。
+##    也就是说：**旧行为的大头是应力场**（宽度扫描 ~77 us + 两次厚度扫描 ~108 us），
+##    轻量模式把每接触从 185 us 压到 22 us（8.4x），而"要宽度、不要剪切比"的
+##    消费者靠惰性拿到 77 us（2.4x）。
 ##
 ## 2. 事件在**求解之前**采集，所以 approach 是"撞击前的接近速度" —— 它是"撞得多猛"的
 ##    直接量，而且不受质量和恢复系数影响。
@@ -1393,6 +1442,19 @@ func center_of_mass_world() -> Vector2:
 ##    引擎按步清空，不跨子步去重 —— 要"每步只触发一次"请游戏层自己按 is_new 过滤。
 ##    列表有上限（max_contacts），超了就不再记，避免子步多时爆内存。
 var contact_events_enabled := false
+## 接触事件的**应力场**（contact_width / shear_ratio）要不要在采集时填。
+##
+## ⚠️ 关掉 = **轻量模式**：事件照样给点/法向/接近速度/冲量（"撞了什么、撞得多猛、
+##    撞在哪"全都还在），只是**不做**逐像素的宽度扫描、也不做两次厚度扫描
+##    （见 _fill_contact_stress）—— 这两样是接触事件里最大的一项开销。
+##
+## ⚠️ 它不是"把 contact_width 变成 0"：那个属性本身是**惰性**的，关掉之后
+##    再读它仍然会算一次（那是消费者自己要的，不是引擎无条件付的）。
+##    真正被关掉的是 shear_ratio —— 它恒为 0。
+##
+## ⚠️ 代价：破坏判据里"抗压远强于抗剪"那一半会失效（strength_for 的插值退化成
+##    纯抗压强度）。要那半个判据就别关。默认 true = 老行为。
+var contact_stress_enabled := true
 var max_contacts := 512
 ## 本步的接触事件（Contact 数组）。step() 开头清空，各子步往里追加。
 var contacts: Array = []
@@ -1438,10 +1500,28 @@ class Contact:
 	##    读取方不需要关心这个区别，读到的要么是真值要么是合理的近似。
 	var impulse := 0.0
 
-	## 接触的**切向宽度**（像素）。用两刚体世界 AABB 在切向上的重叠近似。
+	## 接触的**切向宽度**（像素）：沿切向数「两个形状都实心」的像素数
+	## （算法在 Query.contact_width，那里的注释记着为什么不能用 AABB 近似）。
 	##
 	## 用途：算应力 σ = impulse / contact_width。矛尖宽度小 → 应力大 → 能破盾。
-	var contact_width := 0.0
+	##
+	## ⚠️⚠️ **惰性**：只有**读它**的消费者才付那次逐像素扫描（实测 60~110 us/接触，
+	##    窗口随两者 AABB 的重叠跨度涨）。以前是采集时无条件算 —— 那是接触事件里
+	##    最大的一项，而多数消费者（"撞得够狠吗""撞在哪"）根本不读它。
+	##    第一次读之后结果缓存，重复读零成本（缓存对不对由
+	##    tests/validation_contact_lazy.gd 用**几何预期**和**改像素**两条路钉住）。
+	##    ⚠️ 连这一次都不想付 -> contact_stress_enabled = false（轻量模式）。
+	var contact_width: float:
+		get:
+			if _width_cache < 0.0:
+				_width_cache = Query.contact_width(a, b, point, normal, _separation)
+			return _width_cache
+
+	## 惰性宽度的缓存（-1 = 还没量过）。**内部字段**，别当公开字段用。
+	var _width_cache := -1.0
+	## 采集时记下的分离距离（只有投机接触非 0）。惰性测量要用它，所以存下来 ——
+	## 它不是给消费者读的（要分离距离请读 points[i].dist）。
+	var _separation := 0.0
 
 	## **切向（摩擦）冲量**。求解之后的真值。
 	##
@@ -1461,62 +1541,11 @@ class Contact:
 	var shear_ratio := 0.0
 
 
-## **真实接触宽度**：沿接触切向从接触点向两侧走，数「两个形状都实心」的像素数。
-##
-## ⚠️ 不要用「两个刚体 AABB 在切向上的重叠」来近似 —— 我第一版就是这么写的，
-##    结果**看不出矛是尖的**：矛的 AABB 高 16、盾也是 16，算出来宽度相同，
-##    而宽体的质量大 16 倍，于是「盾的应力反而更大」，与物理完全相反。
-##
-##    这个量是破坏判据的分母，必须反映**真实接触面积**，所以直接数体素。
-##    矛尖只有几像素宽 → 应力大 → 破盾；盾面贴上来几十像素宽 → 应力小 → 不破。
-##
-## 代价是沿切向走 2*half+1 步、每步查两个形状的像素。只在开了接触事件时才算。
-func _contact_width(a: PBody, b: PBody, point: Vector2, normal: Vector2,
-		separation: float = 0.0) -> float:
-	var t := Vector2(-normal.y, normal.x)
-	# ⚠️⚠️ 采样要各自往自己身体里挪，而且挪的距离必须**大于分离距离**。
-	#
-	#    接触点恰好落在两者界面上时，floor() 会对两边都判"空" → 宽度恒 0。
-	#    更要命的是**投机接触**：那时两个刚体还没真正重叠（separation > 0），
-	#    接触点悬在空隙里，固定挪 0.5 根本够不着任何一侧 ——
-	#    于是"最狠的那一击"（第一次撞上、冲量最大的那一帧）宽度报 0，
-	#    σ = impulse/0 直接失效。实测验収：矛尖撞墙那帧 separation 0.73~1.44，
-	#    挪 0.5 → 宽度 0；挪 1.0/1.5 → 宽度 1，σ 立刻从 0 变成 1539133。
-	var push := maxf(0.5, separation + 0.5)
-	var ea := point - normal * push
-	var eb := point + normal * push
-	# ⚠️ 窗口不能写死：以前固定 ±24，于是 60 px 宽和 200 px 宽的接触都算出 49，
-	#    应力分别被高估 1.2 倍和 4 倍，"宽接触应力小"的分级整个失效。
-	#    改成覆盖两者 AABB 在切向上的**重叠跨度**（那才是宽度的物理上限）。
-	var sa := _project_span(a.aabb, t)
-	var sb := _project_span(b.aabb, t)
-	var overlap := maxf(0.0, minf(sa.y, sb.y) - maxf(sa.x, sb.x))
-	var half := clampi(int(ceil(overlap * 0.5)) + 4, 8, 4096)
-	var n := 0
-	for i in range(-half, half + 1):
-		var off := t * float(i)
-		if _solid_at(a, ea + off) and _solid_at(b, eb + off):
-			n += 1
-	return float(n)
-
-
-static func _solid_at(body: PBody, world_point: Vector2) -> bool:
-	var lp := body.to_local(world_point)
-	var x := int(floor(lp.x))
-	var y := int(floor(lp.y))
-	for s: PixelShape in body.shapes:
-		if s.get_pixel(x, y) != 0:
-			return true
-	return false
-
-
-## 把世界 AABB 投影到方向 t 上，返回 [min, max] 区间。
-static func _project_span(box: Rect2, t: Vector2) -> Vector2:
-	var c := box.get_center()
-	var e := box.size * 0.5
-	var h := absf(t.x) * e.x + absf(t.y) * e.y
-	var m := c.dot(t)
-	return Vector2(m - h, m + h)
+## ⚠️ 已搬走：接触宽度 / 实心判定 / AABB 投影三个函数在 **Query**（query.gd）。
+##    搬家的原因不是"分层好看"，而是 **Contact.contact_width 要惰性** ——
+##    惰性 getter 在内类里跑，内类看不见外层的实例方法，只能调**静态**函数。
+##    三个函数原本就是纯的（不读 PWorld 的任何字段），搬过去一行没改。
+##    墓碑都跟着搬了（为什么不能用 AABB 近似、采样为什么要挪过分离距离）。
 
 
 ## 用**求解前后的相对速度变化量**算出真实冲量，回填到本子步的接触事件上。
@@ -1569,7 +1598,11 @@ func _fill_contact_stress(c: Contact, a: PBody, b: PBody, rel: Vector2,
 	# 求解之后 _fill_contact_impulses 会用**实际动量变化**把它替换成真值。
 	# 保留这一步是为了让「求解器没跑到这一对」（被 sleep 掉）时仍有可用值。
 	c.impulse = m_eff * absf(c.approach)
-	c.contact_width = _contact_width(a, b, c.point, c.normal, separation)
+	# ⚠️ 宽度**不在这里算**了 —— 它是惰性的（见 Contact.contact_width）。
+	#    这里只把测量参数存下来：真去扫像素的是"第一个读它的人"。
+	c._separation = separation
+	if not contact_stress_enabled:
+		return
 	if material_compress.is_empty() and material_shear.is_empty():
 		return
 	# 剪切比：法向穿过多厚 = 压缩；法向几乎不穿过厚度 = 剪切。
@@ -1589,7 +1622,10 @@ func _fill_contact_stress(c: Contact, a: PBody, b: PBody, rel: Vector2,
 		return
 	# 法向"穿过"的厚度越薄，越是正面顶上去（压缩）；
 	# 用接触宽度 / 厚度 做剪切比的代理：宽而薄 = 弯曲/剪切。
-	c.shear_ratio = clampf(c.contact_width / (c.contact_width + thin), 0.0, 1.0)
+	# ⚠️ 这里**显式读一次** c.contact_width：它会触发那次惰性扫描并缓存下来，
+	#    所以"配了材质强度"的消费者仍然是老行为（宽度照算），只是算的位置挪到了这一行。
+	var width: float = c.contact_width
+	c.shear_ratio = clampf(width / (width + thin), 0.0, 1.0)
 
 
 func cull_outside(bounds: Rect2) -> int:

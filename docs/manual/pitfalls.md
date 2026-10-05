@@ -126,6 +126,13 @@ shape.clear_dirty()               # 但要在标记之后清
 **正确做法**：`c.approach` 已经是**接触点处**的速度（含转动）—— 实测一个旋转长条
 质心几乎不动，但边缘接近速度是 156 px/s。别自己算。
 
+> ⚠️ **反过来：开了接触事件之后很慢？**
+> 默认会把每对接触的**应力场**填好（接触宽度沿切向逐像素数，`shear_ratio` 再扫两次厚度）。
+> 只要"撞了什么 / 撞得多猛 / 撞在哪"，就把 `px.world.contact_stress_enabled = false`：
+> 实测每接触 **185 µs -> 22 µs**（120 个方块落在地面上，62 接触/步）。
+> 连事件都不需要的话走查询路径（`contact_pair_count` / `contact_info`），那就不用开事件。
+> 细节见 `docs/manual/nodes.md` 的「破坏判据 -> 性能」与 `tests/bench_contact_light.gd`。
+
 ---
 
 ## 参数耦合（改之前必须知道）

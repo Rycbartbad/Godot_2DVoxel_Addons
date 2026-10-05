@@ -116,6 +116,9 @@ px.explode(center, 80.0, 300.0, 4)
 
 ```gdscript
 px.world.contact_events_enabled = true        # 默认关（有分配开销）
+# 只要"撞得够狠"、不要 σ = 冲量/接触宽度 的话，再加这一行：
+# 省掉逐像素的宽度扫描和两次厚度扫描（实测每接触 185 us -> 22 us）。
+px.world.contact_stress_enabled = false
 
 func _physics_process(delta):
     px.step(delta)

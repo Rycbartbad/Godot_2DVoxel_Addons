@@ -351,6 +351,73 @@ static func thickness_at(body, world_point: Vector2, normal: Vector2,
 	return float(best)
 
 
+## **真实接触宽度**：沿接触切向从接触点向两侧走，数「两个形状都实心」的像素数。
+##
+## ⚠️ 不要用「两个刚体 AABB 在切向上的重叠」来近似 —— 我第一版就是这么写的，
+##    结果**看不出矛是尖的**：矛的 AABB 高 16、盾也是 16，算出来宽度相同，
+##    而宽体的质量大 16 倍，于是「盾的应力反而更大」，与物理完全相反。
+##
+##    这个量是破坏判据的分母，必须反映**真实接触面积**，所以直接数体素。
+##    矛尖只有几像素宽 → 应力大 → 破盾；盾面贴上来几十像素宽 → 应力小 → 不破。
+##
+## ⚠️ 代价：沿切向走 2*half+1 步、每步查两个形状的像素（实测 60~110 us/接触，
+##    窗口随两者 AABB 的重叠跨度涨）。所以**调用方必须惰性** ——
+##    PWorld.Contact.contact_width 就是惰性的：只有真去读它才算这一次。
+##
+## ⚠️ 它只喂 Contact 事件的应力（σ = impulse / width），**从不进求解器**
+##    （见 collide.gd 的同名说明）—— 改它不会影响物理结果。
+##
+## ⚠️ separation 是"两个刚体还没真正重叠"时的分离距离（投机接触）。当前唯一调用方
+##    （PWorld._fill_contact_stress）传的是 0 —— 见下面的 push 说明，那一支还没被接上。
+static func contact_width(a, b, world_point: Vector2, normal: Vector2,
+		separation: float = 0.0) -> float:
+	var t := Vector2(-normal.y, normal.x)
+	# ⚠️⚠️ 采样要各自往自己身体里挪，而且挪的距离必须**大于分离距离**。
+	#
+	#    接触点恰好落在两者界面上时，floor() 会对两边都判"空" → 宽度恒 0。
+	#    更要命的是**投机接触**：那时两个刚体还没真正重叠（separation > 0），
+	#    接触点悬在空隙里，固定挪 0.5 根本够不着任何一侧 ——
+	#    于是"最狠的那一击"（第一次撞上、冲量最大的那一帧）宽度报 0，
+	#    σ = impulse/0 直接失效。实测验収：矛尖撞墙那帧 separation 0.73~1.44，
+	#    挪 0.5 → 宽度 0；挪 1.0/1.5 → 宽度 1，σ 立刻从 0 变成 1539133。
+	var push := maxf(0.5, separation + 0.5)
+	var ea := world_point - normal * push
+	var eb := world_point + normal * push
+	# ⚠️ 窗口不能写死：以前固定 ±24，于是 60 px 宽和 200 px 宽的接触都算出 49，
+	#    应力分别被高估 1.2 倍和 4 倍，"宽接触应力小"的分级整个失效。
+	#    改成覆盖两者 AABB 在切向上的**重叠跨度**（那才是宽度的物理上限）。
+	var sa := project_span(a.aabb, t)
+	var sb := project_span(b.aabb, t)
+	var overlap := maxf(0.0, minf(sa.y, sb.y) - maxf(sa.x, sb.x))
+	var half := clampi(int(ceil(overlap * 0.5)) + 4, 8, 4096)
+	var n := 0
+	for i in range(-half, half + 1):
+		var off := t * float(i)
+		if solid_at(a, ea + off) and solid_at(b, eb + off):
+			n += 1
+	return float(n)
+
+
+## 世界坐标这一点在某刚体上是**实心像素**吗（不看碰撞层/掩码，也不看 Query 的过滤器）。
+static func solid_at(body, world_point: Vector2) -> bool:
+	var lp: Vector2 = body.to_local(world_point)
+	var x := int(floor(lp.x))
+	var y := int(floor(lp.y))
+	for s: PixelShape in body.shapes:
+		if s.get_pixel(x, y) != 0:
+			return true
+	return false
+
+
+## 把世界 AABB 投影到方向 t 上，返回 [min, max] 区间。
+static func project_span(box: Rect2, t: Vector2) -> Vector2:
+	var c := box.get_center()
+	var e := box.size * 0.5
+	var h := absf(t.x) * e.x + absf(t.y) * e.y
+	var m := c.dot(t)
+	return Vector2(m - h, m + h)
+
+
 static func closest_point_on_shape(shape: PixelShape, origin: Vector2) -> Hit:
 	var res := _hit_none()
 	var ob: PBody = shape.owner_body
