@@ -247,7 +247,7 @@ var _next_id := 1
 ## 默认空表 = 全部按 1.0 算，也就是**质量 == 像素数**（1 像素 1 单位质量）。
 ## 想让石头比木头重就 set_material_density(1, 2.5)。
 var material_density := PackedFloat32Array()
-var _density_fn: Callable = Callable()
+# ⚠️ 这里曾经有个 _density_fn 缓存字段，**已删除** —— 见 density_callable() 的说明。
 
 ## 材质 id -> 摩擦系数 / 碰撞恢复系数（与 material_density 同构）。
 ##
@@ -327,7 +327,7 @@ func set_material_density(material: int, density: float) -> void:
 	if material_density.size() <= material:
 		material_density.resize(material + 1)
 	material_density[material] = density
-	_density_fn = Callable()
+	# （这里原本要让密度回调的缓存失效 —— 现在不缓存了，不需要）
 
 
 func set_material_friction(material: int, v: float) -> void:
@@ -383,9 +383,14 @@ func density_of_material(material: int) -> float:
 
 ## 惰性构造一次密度函数并复用它 —— 每帧 add_body 时新建 lambda 是白烧。
 func density_callable() -> Callable:
-	if not _density_fn.is_valid():
-		_density_fn = func(m: int) -> float: return density_of_material(m)
-	return _density_fn
+	# ⚠️⚠️ **故意不缓存** —— 缓存它必然成环：把"捕获 self 的 lambda"存进 PWorld
+	#    **自己的字段**，就是 PWorld -> lambda -> PWorld，而 RefCounted 不回收环 -> 实例泄漏。
+	#    实测（tests/diag_leak_repro.gd，mode=body）：缓存 = 3 个实例泄漏；
+	#    缓存"weakref 绕一圈的版本" = **13 个**（更糟，weakref 解决不了，lambda 仍隐式捕获 self）；
+	#    不缓存 = 0（见 tests/validation_leak_clean.gd）。
+	#    代价只是每次调用新建一个 lambda，而它只在 add_body / rebuild / refresh_mass 里调，
+	#    **不是每帧路径**（原来那句"每帧 add_body 时新建 lambda 是白烧"高估了频率）。
+	return func(m: int) -> float: return density_of_material(m)
 
 
 ## 已建好的刚体在质量变了之后重算：改密度表、或者在形状上加了像素之后调用。
