@@ -255,8 +255,8 @@ var material_density := PackedFloat32Array()
 ##    地面 0.8 + 箱子 0.2 -> 接触处 0.5。所以"让某个材质说了算"要两边设同一个值。
 var material_friction := PackedFloat32Array()
 var material_restitution := PackedFloat32Array()
-var _friction_fn: Callable = Callable()
-var _restitution_fn: Callable = Callable()
+# ⚠️ 这里曾经有个 _friction_fn 缓存字段，**已删除** —— 见 friction_callable()。
+# ⚠️ 这里曾经有个 _restitution_fn 缓存字段，**已删除** —— 见 restitution_callable()。
 
 
 ## 世界自己登记到查询模块，销毁时自己注销。
@@ -336,7 +336,7 @@ func set_material_friction(material: int, v: float) -> void:
 	if material_friction.size() <= material:
 		material_friction.resize(material + 1)
 	material_friction[material] = v
-	_friction_fn = Callable()
+	# （这里原本要让摩擦回调的缓存失效 —— 现在不缓存了，不需要）
 
 
 func set_material_restitution(material: int, v: float) -> void:
@@ -345,7 +345,7 @@ func set_material_restitution(material: int, v: float) -> void:
 	if material_restitution.size() <= material:
 		material_restitution.resize(material + 1)
 	material_restitution[material] = v
-	_restitution_fn = Callable()
+	# （这里原本要让恢复系数回调的缓存失效 —— 现在不缓存了，不需要）
 
 
 func friction_of_material(material: int) -> float:
@@ -362,15 +362,14 @@ func restitution_of_material(material: int) -> float:
 
 ## 同 density_callable()：惰性构造一次并复用。
 func friction_callable() -> Callable:
-	if not _friction_fn.is_valid():
-		_friction_fn = func(m: int) -> float: return friction_of_material(m)
-	return _friction_fn
+	# ⚠️ 与 density_callable() 同一个坑：**不缓存**。缓存"捕获 self 的 lambda"
+	#    到自己的字段就是引用环（实测：清掉这两个缓存后退出泄漏从 12 降到 8）。
+	return func(m: int) -> float: return friction_of_material(m)
 
 
 func restitution_callable() -> Callable:
-	if not _restitution_fn.is_valid():
-		_restitution_fn = func(m: int) -> float: return restitution_of_material(m)
-	return _restitution_fn
+	# ⚠️ 同 density_callable()：**不缓存**（缓存 = 引用环）。
+	return func(m: int) -> float: return restitution_of_material(m)
 
 
 func density_of_material(material: int) -> float:
