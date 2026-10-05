@@ -826,3 +826,50 @@ pub extern "C" fn rb_body_set_restitution(w: *mut World, id: u32, restitution: f
 //    抓取现在在 GDScript 侧做**力控**（src/physics/grab.gd：每子步一个受限的力），
 //    这里不需要新原语。
 
+
+/// 关节求解**软度**：自然频率（Hz）+ 阻尼比。
+///
+/// 频率越高越硬（约束误差越小、越少迭代就收敛），越低越"软"（允许漂移，看起来像
+/// 带弹性的连接）。不调就是 Rapier 的 `SpringCoefficients::joint_defaults()`。
+///
+/// ⚠️ 这是**求解器参数**，不是"关节类型"：焊接仍然是焊接（自由度照样全锁），
+///    软度只决定"违约被拉回的速度"。
+#[no_mangle]
+pub extern "C" fn rb_joint_set_softness(w: *mut World, id: u32, frequency: f64, damping: f64) -> i32 {
+    let Some(w) = (unsafe { wref(w) }) else { return 0 };
+    let Some(rec) = w.joints.get(&id) else { return 0 };
+    let handle = rec.handle;
+    if let Some(j) = w.ij.get_mut(handle, true) {
+        // ⚠️ frequency <= 0 = **调回 Rapier 默认**（joint_defaults）—— 没有这条，用户设了软度
+        //    就再也回不到默认（只能自己猜那个数）。
+        let sc = if frequency > 0.0 {
+            SpringCoefficients::new(frequency as f32, damping as f32)
+        } else {
+            SpringCoefficients::joint_defaults()
+        };
+        j.data.set_softness(sc);
+        return 1;
+    }
+    0
+}
+
+/// 世界级**关节求解**参数。三个都是"显式设过才推"（iterations > 0 / warmstart >= 0 /
+/// coeff >= 0），没设的保持 Rapier 默认 —— 这样"没调过"的场景逐位不变。
+///
+///   iterations 求解迭代次数（越多越准、越贵）
+///   warmstart  关节是否用 warmstart（>= 0 才推；0 = 关，1 = 开）
+///   coeff      warmstart 系数（>= 0 才推）
+#[no_mangle]
+pub extern "C" fn rb_world_set_joint_solver(w: *mut World, iterations: i32, warmstart: i32, coeff: f64) {
+    let Some(w) = (unsafe { wref(w) }) else { return };
+    if iterations > 0 {
+        w.params.num_solver_iterations = iterations as usize;
+    }
+    if warmstart >= 0 {
+        w.params.warmstart_joints = warmstart != 0;
+    }
+    if coeff >= 0.0 {
+        w.params.warmstart_coefficient = coeff as f32;
+    }
+}
+

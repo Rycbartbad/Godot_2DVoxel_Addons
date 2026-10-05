@@ -142,6 +142,8 @@ alignas(16) static unsigned char g_str_empty_hint[64];
 //  34  body_set_density(u32 id, f64 density)             材质密度 -> Rapier 质量（不推就是两边质量分叉）
 //  38  body_set_friction(u32 id, f64 friction)           材质摩擦系数 -> Rapier 碰撞体
 //  39  body_set_restitution(u32 id, f64 restitution)     材质恢复系数 -> Rapier 碰撞体
+//  40  joint_set_softness(u32 jid, f64 freq, f64 damping)  关节求解软度（Hz + 阻尼比）
+//  41  world_set_joint_solver(i32 iters, i32 warmstart, f64 coeff)  世界级关节求解参数
 //  （35~37 曾用于"鼠标关节"抓取，已删除 —— 见 rapier_bridge/src/lib.rs 的墓碑注释）
 
 typedef void *RPWorld;
@@ -190,6 +192,8 @@ struct RapierApi {
 	void (*body_set_density)(RPWorld, uint32_t, double) = nullptr;
 void (*body_set_friction)(RPWorld, uint32_t, double) = nullptr;
 void (*body_set_restitution)(RPWorld, uint32_t, double) = nullptr;
+	int32_t (*joint_set_softness)(RPWorld, uint32_t, double, double) = nullptr;
+	void (*world_set_joint_solver)(RPWorld, int32_t, int32_t, double) = nullptr;
 
 	bool tried = false;
 	bool ok = false;
@@ -264,6 +268,8 @@ static bool load_rapier() {
 	RP_GET(body_set_density, "rb_body_set_density")
 RP_GET(body_set_friction, "rb_body_set_friction")
 RP_GET(body_set_restitution, "rb_body_set_restitution")
+	RP_GET(joint_set_softness, "rb_joint_set_softness")
+	RP_GET(world_set_joint_solver, "rb_world_set_joint_solver")
 
 #undef RP_GET
 	g_rap.ok = true;
@@ -450,6 +456,21 @@ static void run_rapier_cmd(RapierInstance *inst, const uint8_t *in, size_t in_n,
 				uint32_t id = r.u32();
 				double rest = r.f64();
 				g_rap.body_set_restitution(W, id, rest);
+				break;
+			}
+			// 40  关节求解软度（自然频率 Hz + 阻尼比）—— 不推就是 Rapier 默认
+			case 40: {
+				uint32_t id = r.u32();
+				double freq = r.f64(), damping = r.f64();
+				g_rap.joint_set_softness(W, id, freq, damping);
+				break;
+			}
+			// 41  世界级关节求解参数（迭代次数 / warmstart 开关 / warmstart 系数）——
+			//     三个都是"显式设过才推"，没设的保持 Rapier 默认（没调过的场景逐位不变）
+			case 41: {
+				int32_t it = r.i32(), ws = r.i32();
+				double coeff = r.f64();
+				g_rap.world_set_joint_solver(W, it, ws, coeff);
 				break;
 			}
 			default:

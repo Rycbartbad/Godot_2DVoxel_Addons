@@ -679,6 +679,33 @@ var _rp_pixel_params_pushed := false
 var rp_linear_damping := 0.35
 var rp_angular_damping := 0.6
 
+## ---- 关节求解精度（R3）----
+##
+## ⚠️ 三个都是"**显式设过才推**"：0 / -1 = 不推，保持 Rapier 默认 —— 所以没调过的场景
+##    （含 8 条逐位基准）行为**逐位不变**。
+##
+## 调它们的理由：默认的迭代次数不多，而"长链 / 大质量比 / 一堆焊接堆在一起"的场景
+## 需要更多迭代才能把约束误差压下去（用 PJoint.anchor_error() 量）。
+## 代价是每步的求解开销按迭代次数线性涨。
+
+## 求解迭代次数（0 = 不推）。
+##
+## ⚠️⚠️ 它**不是关节专属**旋钮：Rapier 0.36 的 num_solver_iterations 是**整个求解**
+##    （含接触与积分）的迭代次数 —— 实测连"没有任何关节"的自由落体结果都会变
+##    （tests/validation_joint_solver.gd 里那条断言就是钉这个事实的）。
+##    所以调它等于调**全局精度**：更准，但每步开销按迭代次数涨，而且会改变所有场景的
+##    数值结果（包括你已经调好的那些手感）。
+var rp_joint_solver_iterations := 0
+## 关节 warmstart 开关（-1 = 不推；0 = 关；1 = 开）。
+##
+## ⚠️ warmstart = 用上一子步的冲量当这一子步的初值。关掉它会让**迭代收敛变慢**
+##    （同样的迭代次数下误差更大），但能排除"warmstart 把错误的历史冲量带进新接触"
+##    这类问题 —— 排查"抖动是不是求解器引起的"时，它是第一个该试的开关。
+var rp_warmstart_joints := -1
+## warmstart 系数（< 0 = 不推）。
+var rp_warmstart_coefficient := -1.0
+var _rp_joint_solver_pushed := false
+
 # 命令流的写入辅助（PackedByteArray 必须自己 resize，encode_* 不会自动扩容）
 static func _rp_u8(b: PackedByteArray, v: int) -> void:
 	b.resize(b.size() + 1)
@@ -876,7 +903,14 @@ func _substep_rapier(dt: float) -> void:
 		_rp_f64(cmds, gravity.x)
 		_rp_f64(cmds, gravity.y)
 		_rp_gravity_pushed = gravity
-	# 关节的限位/马达：变了才推
+	# 关节求解参数（R3）：**只有显式设过才推** —— 没设过的场景逐位不变。
+	if rp_joint_solver_iterations > 0 or rp_warmstart_joints >= 0 or rp_warmstart_coefficient >= 0.0:
+		_rp_u8(cmds, 41)
+		_rp_i32(cmds, rp_joint_solver_iterations)
+		_rp_i32(cmds, rp_warmstart_joints)
+		_rp_f64(cmds, rp_warmstart_coefficient)
+		_rp_joint_solver_pushed = true
+	# 关节的限位/马达/软度：变了才推
 	_rp_push_joints(cmds)
 	var n_state := 0
 	var n_sleep := 0
@@ -2581,6 +2615,14 @@ func _rp_push_joints(cmds: PackedByteArray) -> void:
 			j._rp_limits_on = j.limits_enabled
 			j._rp_min = j.min_limit
 			j._rp_max = j.max_limit
+		# 求解软度（R3）：0 = 用 Rapier 默认（joint_defaults）。
+		# ⚠️ 镜像初值是 -1（"从没推过"），所以设过之后即使改回 0 也会推一次"回默认"。
+		if j.solver_frequency != j._rp_soft_freq:
+			_rp_u8(cmds, 40)
+			_rp_u32(cmds, j.rapier_id)
+			_rp_f64(cmds, j.solver_frequency)
+			_rp_f64(cmds, j.solver_damping)
+			j._rp_soft_freq = j.solver_frequency
 		if j.motor_mode == j._rp_motor_mode and j.motor_target == j._rp_motor_target \
 				and j.motor_max_force == j._rp_motor_force \
 				and j.motor_stiffness == j._rp_motor_stiffness \

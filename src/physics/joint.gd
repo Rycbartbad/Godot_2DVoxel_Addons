@@ -75,6 +75,19 @@ var contacts_enabled := false
 ## 推给 Rapier 的镜像（Rapier 的默认是 **true** —— 生成接触）
 var _rp_contacts := true
 
+## 关节求解**软度**：自然频率（Hz）。**0 = 用 Rapier 默认**（joint_defaults）。
+##
+## 频率越高越硬（约束误差越小、越少迭代就收敛），越低越"软"（允许漂移，看起来像
+## 带弹性的连接）。**焊接仍然是焊接**（自由度照样全锁）—— 软度只决定"违约被拉回的速度"。
+##
+## ⚠️ 这是**求解器参数**，不是关节类型。想诊断它调得对不对用 anchor_error() /
+## angle_error()（见 R3 的诊断接口）。
+var solver_frequency := 0.0
+## 阻尼比（只有 solver_frequency > 0 时才用得上；默认 1.0 = 临界阻尼）。
+var solver_damping := 1.0
+## 推给 Rapier 的镜像（-1 = 从没推过；0 = 已推"回默认"）
+var _rp_soft_freq := -1.0
+
 ## 断裂阈值：约束冲量（**力 × 时间步**）超过它就断。INF = 不断。
 ##
 ## 比的是**线性冲量**（锚点处的约束反力）—— 铰链也一样：挂着东西的铰链，
@@ -273,6 +286,19 @@ func set_motor_target(target: float, max_force: float, stiff := 100.0, damp := 1
 
 func motor_off() -> void:
 	motor_mode = MOTOR_OFF
+
+
+## 设置关节求解**软度**：自然频率（Hz）+ 阻尼比。**frequency <= 0 = 调回 Rapier 默认**。
+##
+## 用途：默认的关节很硬（约束误差极小），但在"长链 / 大质量比 / 迭代次数被压"的场景里
+## 会表现为抖动或过冲；调低频率可以让它变成"带弹性的连接"（代价是锚点会漂）。
+## 反过来，想让锚点更死就调高（但迭代次数不够时调高也没用 —— 见
+## PWorld.rp_joint_solver_iterations）。
+##
+## 实测判据：tests/validation_joint_solver.gd 用 anchor_error() 量"漂多少"。
+func set_solver_softness(frequency: float, damping := 1.0) -> void:
+	solver_frequency = frequency
+	solver_damping = damping
 
 
 ## 断开这个关节（刚体照旧，只是不再连在一起）。

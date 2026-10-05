@@ -4354,6 +4354,52 @@ detach 以前只要 `was_boundary` 就无条件 `ensure_connected`（**全量连
 | `PWorld.freeze_component(body)` | 整个关节组件（任意关节连通） |
 | `PWorld.joint_component(body)` | 取组件（剔除/查询用） |
 | `PWorld.cull_freeze(rect, keep := [])` | **相机剔除**：范围外冻结、范围内恢复；返回 `{frozen, unfrozen, kept}` |
+
+---
+
+# R3 的原生部分：关节求解精度旋钮（软度 / 迭代次数 / warmstart）
+
+甲方原话：**"暴露原生关节求解精度配置与约束误差诊断"**。诊断面（`anchor_error` /
+`angle_error` / `lateral_error`）上一批已经交付；这批把**旋钮**补上（要重编两个 DLL）。
+
+## 加了什么
+
+| 层 | 内容 |
+|---|---|
+| Rust（rapier_bridge）| `rb_joint_set_softness`（`GenericJoint::set_softness`）、`rb_world_set_joint_solver`（`IntegrationParameters` 的 `num_solver_iterations` / `warmstart_joints` / `warmstart_coefficient`）|
+| GDExtension | op **40**（关节软度）、op **41**（世界级关节求解参数）+ 两个 RP_GET 绑定 |
+| GDScript | `PJoint.set_solver_softness(freq, damping)`；`PWorld.rp_joint_solver_iterations` / `rp_warmstart_joints` / `rp_warmstart_coefficient` |
+
+## 实测（tests/validation_joint_solver.gd，12 项）
+
+| 场景 | 结果 |
+|---|---|
+| 40x40 方块焊在世界锚点上挂着（默认）| 锚点漂移 **0.000 px** |
+| 同一场景 `softness = 2 Hz` | **22.17 px** |
+| `softness = 8 Hz` | 0.62 px（比 2 Hz 硬）|
+| `softness = 0`（回默认）| **0.000 px**（与默认逐位相同）|
+| 12 节焊链静定 600 步，迭代 **1** | 误差和 **17.38 px** |
+| 同上，默认 | 0.75 px |
+| 同上，迭代 **8** | 0.65 px |
+| 同上，显式迭代 **4** | 与默认**逐位相同** -> 说明 **Rapier 默认就是 4** |
+| warmstart 关 | 与默认**逐位相同**（见下）|
+
+## 两条"实测打脸"的记录
+
+1. **迭代次数不是关节专属旋钮。** 我按名字以为它只管关节 —— 实测连**没有任何关节**的自由
+   落体结果都会变（223.6367 -> 225.3281）。Rapier 0.36 的 `num_solver_iterations` 是
+   **整个求解**（含接触与积分）的迭代次数。文档与字段注释里都写明了：调它 = 调全局精度，
+   会改掉你已经调好的所有手感。闸门里那条断言就是钉这个事实的（不是我原先以为的那条）。
+2. **warmstart 开关在本引擎用的冲量关节上没有可观测影响**（迭代 1 时开/关结果逐位相同）。
+   留着它是因为它是排查"求解器历史/抖动"类问题的第一个该试的开关，而且升级 Rapier 之后
+   可能就生效了 —— 闸门把"当前行为"钉住，将来变了会被抓出来。
+
+## 安全边界
+
+- 三个世界级旋钮都是"**显式设过才推**"（0 / -1 = 不推）—— 没调过的场景逐位不变，
+  **8 条基准重编 DLL 之后仍然逐位相同**（重编后专门跑过 dump_state 核对）。
+- 关节软度同理：镜像初值 -1（"从没推过"），所以"设过再调回 0"也会推一次"回默认"。
+
 | 门面：`px.freeze` / `px.unfreeze` / `px.freeze_component` / `px.cull_freeze` | 同上（addon_src/pixel_physics.gd）|
 
 **语义**：冻结 = 按**静态**推给 Rapier（不积分、不参与静态-静态对 —— 整片冻住接近零成本），
