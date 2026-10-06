@@ -99,17 +99,19 @@ func _ready() -> void:
 	# ⚠️ 一个 2x2 的碎片就能把全世界拖进 **334 子步 / 346 ms 一帧**（实测
 	#    tests/diag_dust_substep.gd）—— 因为子步数取的是"全世界最快"的那个，
 	#    而轻碎片的角速度是**质量放大**通道（Δω = J·r/I，I ∝ m）。
-	#    这里的取值：质量 <= 16（约 4x4、密度 1）且运动 >= 2000 px/s（每帧 33 px）
-	#    才算"灰尘"，直接删；留着的也用 ccd_ignore_mass 豁免掉子步估计
-	#    （它们会穿墙 —— 4x4 穿过去没人看得出来，比拖慢全世界划算）。
-	# ⚠️ 写在**节点**上（编辑器里也看得见、能调），再 push 一次给 world ——
-	#    运行时改导出值**不会自动生效**，见 push_physics_settings 的说明。
+	# ⚠️ 质量 = **像素数 x 材质密度**，不是像素数：这里的 16 在密度 2.5 下只覆盖
+	#    "2x2 及更小"（4x4 = 16 像素 -> 质量 **40**）。拿像素数当质量是踩过的坑
+	#    （见 development_log「甲方移植踩到」那一节）。
+	#    取值：质量 <= 16（约 2x2、密度 2.5）且运动 >= 2000 px/s（每帧 33 px）才算"灰尘"，
+	#    直接删；留着的也用 ccd_ignore_mass 豁免掉子步估计（它们会穿墙 —— 2x2 穿过去
+	#    没人看得出来，比拖慢全世界划算）。
+	# ⚠️ 写在**节点**上（编辑器里也看得见、能调）—— setter 会**立刻播到 world**，
+	#    不用再手动 push（见 pixel_world.gd 导出块顶部的硬契约）。
 	_world_node.debris_max_mass = 16.0
 	_world_node.debris_min_speed = 2000.0
 	_world_node.ccd_ignore_mass = 16.0
 	# 角速度上限：8 转/秒。demo 的马达目标是 3.0 / 1.0 rad/s，远在下面（不会误钳）。
 	_world_node.max_angular_velocity = 50.0
-	_world_node.push_physics_settings()
 
 	# 视野跟着体素尺寸走：体素越大，相机越"推近"，看到的体素数越少
 	# 屏幕上体素边长 = voxel_world_size * render_scale * camera.zoom

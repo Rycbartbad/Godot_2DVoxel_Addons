@@ -46,30 +46,68 @@ const PixelScale := preload("res://src/core/pixel_scale.gd")
 ##    不挂在"步完成"上就没法保证"每次 step 的接触都被消费一次"。
 signal physics_step_finished(world)
 
+# ⚠️⚠️ 下面每个旋钮的 setter 都会**立刻播到 world**（_push_knob）。这是硬契约：
+#    "改了 @export 就生效"。为什么必须这样 —— 它们以前**只在 rebuild() 里播一次**，
+#    运行时改就是**静默不生效**：甲方移植时改了节点上的 @export，world 那边还是 0（= 全关），
+#    于是"设了阈值却一个碎片都没清"，查了半天。静默不生效是最坏的失败方式。
+#    世界还没建时（场景反序列化、_ready 之前）setter 只记值，rebuild() 会播。
 @export_group("物理")
-@export var gravity := Vector2(0, 600)
-@export var fixed_dt := 1.0 / 60.0
-@export var max_substeps := 4
-@export var sleeping := true
-@export var terminal_speed := 650.0
+@export var gravity := Vector2(0, 600):
+	set(v):
+		gravity = v
+		_push_knob("gravity", v)
+@export var fixed_dt := 1.0 / 60.0:
+	set(v):
+		fixed_dt = v
+		_push_knob("fixed_dt", v)
+@export var max_substeps := 4:
+	set(v):
+		max_substeps = v
+		_push_knob("max_substeps", v)
+@export var sleeping := true:
+	set(v):
+		sleeping = v
+		_push_knob("sleeping", v)
+@export var terminal_speed := 650.0:
+	set(v):
+		terminal_speed = v
+		_push_knob("terminal_speed", v)
 ## 线速度上限（世界单位/秒，0 = 不钳）。引擎默认 40000 —— 它用来挡数值爆炸，不是手感旋钮。
-@export var max_linear_velocity := 40000.0
+@export var max_linear_velocity := 40000.0:
+	set(v):
+		max_linear_velocity = v
+		_push_knob("max_linear_velocity", v)
 ## 角速度上限（rad/s，0 = 不钳）。见 PWorld.max_angular_velocity 的说明
 ## （Rapier 只有线速度上限，角速度这条是引擎自己钳的）。
-@export var max_angular_velocity := 1000.0
+@export var max_angular_velocity := 1000.0:
+	set(v):
+		max_angular_velocity = v
+		_push_knob("max_angular_velocity", v)
 ## 轻碎片**豁免子步估计**的质量阈值（0 = 关）。见 PWorld.ccd_ignore_mass：
 ## 子步数取的是"全世界最快"的那个刚体，所以一个轻碎片就能拖慢全世界。
-@export var ccd_ignore_mass := 0.0
+@export var ccd_ignore_mass := 0.0:
+	set(v):
+		ccd_ignore_mass = v
+		_push_knob("ccd_ignore_mass", v)
 
 @export_group("破坏")
 ## 碎片小于这么多**像素**就不要了（在分裂时就丢掉，不生成刚体）。见 PWorld.min_fragment_pixels。
-@export var min_fragment_pixels := 4
+@export var min_fragment_pixels := 4:
+	set(v):
+		min_fragment_pixels = v
+		_push_knob("min_fragment_pixels", v)
 ## 灰尘清理：质量 <= 它（且运动 >= debris_min_speed，若后者 > 0）的刚体直接删。默认关。
 ## ⚠️ debris_min_speed = 0 = **不限速度**（只按质量清，静止的也清）；> 0 则只清"正在飞的"。
 ## ⚠️ 质量 = 像素数 x 材质密度（4x4 的碎片在密度 2.5 下是 **40**，不是 16）。
 ## ⚠️ 删掉会打破体素守恒（玩家会看到碎片凭空消失），所以默认关。
-@export var debris_max_mass := 0.0
-@export var debris_min_speed := 0.0
+@export var debris_max_mass := 0.0:
+	set(v):
+		debris_max_mass = v
+		_push_knob("debris_max_mass", v)
+@export var debris_min_speed := 0.0:
+	set(v):
+		debris_min_speed = v
+		_push_knob("debris_min_speed", v)
 
 @export_group("材质")
 ## 全部材质。**在这里加一条就是加一种材质** —— 颜色、密度、强度一次设好。
@@ -242,26 +280,49 @@ func _ready() -> void:
 	set_physics_process(true)
 
 
-## 把本节点上的物理旋钮播到 world（gravity / 各种上限 / 破坏策略…）。
+## 物理旋钮清单（导出属性名）。_push_knob 的映射表 + 这里的清单必须覆盖同一批属性。
+const KNOBS: Array[String] = ["gravity", "fixed_dt", "max_substeps", "sleeping", "terminal_speed",
+	"max_linear_velocity", "max_angular_velocity", "ccd_ignore_mass",
+	"min_fragment_pixels", "debris_max_mass", "debris_min_speed"]
+
+
+## 把**一个**旋钮播到 world。**唯一的映射表** —— 每个 @export 的 setter 与
+## push_physics_settings() 都走它，所以"导出名 -> world 字段名"只写一遍。
 ##
-## ⚠️ 为什么要有这个方法：这些 @export 是给**编辑器**和代码驱动配置用的，而 world 是
-##    运行时对象 —— 运行中改了导出值**不会自动生效**（只有 rebuild() 会播）。
-##    运行时改完调一次它即可；**别为改一个阈值去调 rebuild()**（那会重建世界、
-##    把破坏状态全丢掉）。
+## ⚠️ 映射不是 1:1（sleeping -> sleeping_enabled、max_linear_velocity -> rp_max_linear_velocity），
+##    所以这里用 match 显式写，不走 Object.set()：后者遇到类型/名字不对是**静默失败**，
+##    而静默失败正是这条链路最怕的东西。
+func _push_knob(prop: String, v: Variant) -> bool:
+	if world == null:
+		return false                  # 世界还没建（场景反序列化时就是）—— rebuild() 会播
+	match prop:
+		"gravity": world.gravity = v
+		"fixed_dt": world.fixed_dt = v
+		"max_substeps": world.max_substeps = int(v)
+		"sleeping": world.sleeping_enabled = bool(v)
+		"terminal_speed": world.terminal_speed = v
+		"max_linear_velocity": world.rp_max_linear_velocity = v
+		"max_angular_velocity": world.max_angular_velocity = v
+		"ccd_ignore_mass": world.ccd_ignore_mass = v
+		"min_fragment_pixels": world.min_fragment_pixels = int(v)
+		"debris_max_mass": world.debris_max_mass = v
+		"debris_min_speed": world.debris_min_speed = v
+		_:
+			push_error("PixelWorld: _push_knob 的映射表漏了 %s" % prop)
+			return false
+	return true
+
+
+## 把本节点上的**全部**物理旋钮重播一遍。
+##
+## ⚠️ 平时**不需要**调它 —— 每个 @export 的 setter 已经立刻播了（见导出块顶部的说明）。
+##    它的用武之地只有两个：① rebuild() 建好新世界之后；② 你自己把 world 换掉之后。
+##    **别为改一个阈值去调 rebuild()**（那会重建世界、把破坏状态全丢掉）。
 func push_physics_settings() -> void:
 	if world == null:
 		return
-	world.gravity = gravity
-	world.fixed_dt = fixed_dt
-	world.max_substeps = max_substeps
-	world.sleeping_enabled = sleeping
-	world.terminal_speed = terminal_speed
-	world.rp_max_linear_velocity = max_linear_velocity
-	world.max_angular_velocity = max_angular_velocity
-	world.ccd_ignore_mass = ccd_ignore_mass
-	world.min_fragment_pixels = min_fragment_pixels
-	world.debris_max_mass = debris_max_mass
-	world.debris_min_speed = debris_min_speed
+	for k in KNOBS:
+		_push_knob(k, get(k))
 
 
 ## 重建整个世界：把子节点里的 PixelBody2D 全部烘焙一遍。

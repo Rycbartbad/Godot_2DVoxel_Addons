@@ -455,8 +455,8 @@ func _physics_process(_dt: float) -> void:
 | `px.world.max_angular_velocity` | 角速度上限（rad/s，0 = 不钳）| 1000 |
 | `px.world.rp_max_linear_velocity` | 线速度上限 | 40000 |
 
-节点层同样暴露了这些（`PixelWorld` 的"物理"/"破坏"两个组）；运行时改完调一次
-`push_physics_settings()`，或者走门面的 `configure`：
+节点层同样暴露了这些（`PixelWorld` 的"物理"/"破坏"两个组）—— **改了就生效**（setter 立刻播，
+不需要手动 push）。门面走 `configure`：
 
 ```gdscript
 px.configure({

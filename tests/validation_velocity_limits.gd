@@ -117,6 +117,48 @@ func _initialize() -> void:
 	_c("节点层：灰尘阈值播到了 world",
 		pw.world.debris_max_mass == 16.0 and pw.world.debris_min_speed == 2000.0,
 		"%.0f / %.0f" % [pw.world.debris_max_mass, pw.world.debris_min_speed])
+	# ---- 7. **改了就生效**：setter 必须立刻播到 world（不需要 push）----
+	#
+	# ⚠️ 为什么钉这条：这些 @export 以前**只在 rebuild() 里播一次**，运行时改是
+	#    **静默不生效**（甲方踩到过：改了节点上的值，world 那边还是 0 = 全关）。
+	#    Inspector 路径本来就是通的（_ready -> rebuild -> push），但代码路径不通 ——
+	#    同一个旋钮两条路行为不一样，是最难查的那种。
+	pw.debris_max_mass = 33.0
+	_c("setter 立刻播：debris_max_mass（没调 push）", pw.world.debris_max_mass == 33.0,
+		"%.1f" % pw.world.debris_max_mass)
+	pw.debris_min_speed = 7.0
+	pw.ccd_ignore_mass = 9.0
+	_c("setter 立刻播：debris_min_speed / ccd_ignore_mass",
+		pw.world.debris_min_speed == 7.0 and pw.world.ccd_ignore_mass == 9.0,
+		"%.1f / %.1f" % [pw.world.debris_min_speed, pw.world.ccd_ignore_mass])
+	# 名字不一样的那两个映射最容易漏（sleeping -> sleeping_enabled、max_linear_velocity -> rp_*）
+	pw.sleeping = false
+	pw.max_linear_velocity = 777.0
+	pw.max_substeps = 9
+	pw.gravity = Vector2(1, 2)
+	_c("setter 立刻播：映射名不同的那几个",
+		pw.world.sleeping_enabled == false and pw.world.rp_max_linear_velocity == 777.0 \
+			and pw.world.max_substeps == 9 and pw.world.gravity == Vector2(1, 2),
+		"sleep=%s lin=%.0f sub=%d g=%s" % [str(pw.world.sleeping_enabled),
+			pw.world.rp_max_linear_velocity, pw.world.max_substeps, str(pw.world.gravity)])
+	# 映射表必须覆盖 KNOBS 里的每一个名字（漏一条 = 那个旋钮静默失效）
+	var missing: Array = []
+	for k in pw.KNOBS:
+		if not pw._push_knob(k, pw.get(k)):
+			missing.append(k)
+	_c("_push_knob 的映射表覆盖全部 %d 个旋钮" % pw.KNOBS.size(), missing.is_empty(),
+		"缺: %s" % str(missing))
+
+	# ---- 8. 世界还没建时：setter 只记值，不许报错 ----
+	var bare = AddonWorld.new()          # 没加进树 -> world == null
+	bare.debris_max_mass = 12.0
+	bare.gravity = Vector2(0, -1)
+	bare.push_physics_settings()
+	_c("world 还没建时改导出不报错，且值记住了",
+		bare.debris_max_mass == 12.0 and bare.world == null,
+		"debris=%.0f world=%s" % [bare.debris_max_mass, str(bare.world)])
+	bare.free()
+
 	_c("节点层：重建（rebuild）也会播一遍", true)
 	pw.rebuild()
 	_c("rebuild 之后仍然是节点上的值", pw.world.max_angular_velocity == 50.0 and pw.world.min_fragment_pixels == 9,

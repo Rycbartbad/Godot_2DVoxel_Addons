@@ -251,9 +251,9 @@ renderer.forget_blueprint(id)
 | `debris_max_mass` | 灰尘清理**总开关**（质量 <= 它）| 0（关）|
 | `debris_min_speed` | > 0 = 只清"正在飞的"；**0 = 不限速度** | 0 |
 
-⚠️ **运行时改了导出值不会自动生效** —— `world` 是运行时对象，只有 `rebuild()` 会播。
-改完阈值别去调 `rebuild()`（那会重建世界、把破坏状态全丢掉），调
-`$PixelWorld.push_physics_settings()` 就行。
+⚠️ **改了就生效**：每个导出的 setter 会**立刻播到 `world`**（不需要手动 push）。
+`push_physics_settings()` 只在两种情况下需要：① `rebuild()` 之后；② 你自己把 `world` 换掉之后。
+**别为改一个阈值去调 `rebuild()`** —— 那会重建世界、把破坏状态全丢掉。
 
 ⚠️ 灰尘策略（`debris_*` / `ccd_ignore_mass`）会**改变内容**（碎片凭空消失 / 穿墙），
 所以默认全关 —— 开之前先读[性能手册](performance.md)的"灰尘策略"那一节。
