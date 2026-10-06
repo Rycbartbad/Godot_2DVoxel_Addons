@@ -47,10 +47,16 @@ var paused := false
 var brush_radius := 6.0
 var material_id := 1
 
-# ⚠️ 这里曾经有个 impact_damage 开关（撞击自动打洞）。**已删除** ——
-#    撞击伤害是**游戏规则**，不该由引擎（或 demo）提供：引擎只把接触数据摆出来
-#    （world.contacts / contact_points / contact_info），"多猛算高速、要不要破坏"由使用者决定。
-#    想照着写的人看 addon_src/examples/impact_damage.gd（一份可直接抄的骨架）。
+# ⚠️⚠️ 撞击自动打洞在这里**被删过两次**，别再搬回来。
+#    ① 它不该属于引擎/demo：撞击伤害是**游戏规则** —— 引擎只把接触数据摆出来
+#       （world.contacts / contact_points / contact_info），"多猛算高速、要不要破坏"由使用者决定。
+#    ② 第二次那版（拿 contact_info 的**冲量**当判据）**会把游戏卡死**：冲量里混着
+#       **静置重量 m*g*dt**，所以重物光是"压在地上"就能越过阈值 -> 每 0.5 秒炸一次 ->
+#       每次炸出来的碎片又形成**新的接触对**（冷却按刚体对，新碎片全是新对）->
+#       自我维持的破坏循环，碎片指数增长。甲方实测：**快速多次擦除后卡死，关掉它就不卡**。
+#       机理与实测数字见 docs/development_log.md「撞击破坏为什么会卡死」。
+#    真要做这个玩法，用**与质量无关**的量：接触事件里的 c.approach（接近速度）+ c.is_new，
+#    见 docs/manual/cookbook.md 第 6 节（那份是对的）。
 
 var _canvas_tiles := {}       # Vector2i -> PBody（静态画布瓦片）
 var _stroke_body: PBody = null  # Shift 绘制时本次笔画归属的动态体
@@ -88,6 +94,22 @@ func _ready() -> void:
 	var editing := Engine.is_editor_hint()
 	world = _world_node.world
 	renderer = _world_node.renderer
+
+	# ---- 灰尘策略与速度上限：引擎只提供机制，**阈值是游戏规则** ----
+	# ⚠️ 一个 2x2 的碎片就能把全世界拖进 **334 子步 / 346 ms 一帧**（实测
+	#    tests/diag_dust_substep.gd）—— 因为子步数取的是"全世界最快"的那个，
+	#    而轻碎片的角速度是**质量放大**通道（Δω = J·r/I，I ∝ m）。
+	#    这里的取值：质量 <= 16（约 4x4、密度 1）且运动 >= 2000 px/s（每帧 33 px）
+	#    才算"灰尘"，直接删；留着的也用 ccd_ignore_mass 豁免掉子步估计
+	#    （它们会穿墙 —— 4x4 穿过去没人看得出来，比拖慢全世界划算）。
+	# ⚠️ 写在**节点**上（编辑器里也看得见、能调），再 push 一次给 world ——
+	#    运行时改导出值**不会自动生效**，见 push_physics_settings 的说明。
+	_world_node.debris_max_mass = 16.0
+	_world_node.debris_min_speed = 2000.0
+	_world_node.ccd_ignore_mass = 16.0
+	# 角速度上限：8 转/秒。demo 的马达目标是 3.0 / 1.0 rad/s，远在下面（不会误钳）。
+	_world_node.max_angular_velocity = 50.0
+	_world_node.push_physics_settings()
 
 	# 视野跟着体素尺寸走：体素越大，相机越"推近"，看到的体素数越少
 	# 屏幕上体素边长 = voxel_world_size * render_scale * camera.zoom
@@ -194,7 +216,6 @@ func _process(delta: float) -> void:
 		_last_erase = mouse
 	if world.is_grabbing():
 		world.set_grab_target(mouse)
-	_apply_impact_damage()
 
 	# ⚠️ 这里**不能**再推进物理 —— 世界已经由 PixelWorld 节点在 _physics_process
 	#    里按 fixed_dt 推进了（auto_step 默认 true）。
@@ -431,94 +452,6 @@ func _brush_step(dir: float) -> void:
 	if brush_radius >= 8.0:
 		step = maxf(1.0, roundf(brush_radius * 0.15))
 	brush_radius = clampf(brush_radius + dir * step, MIN_BRUSH, MAX_BRUSH)
-
-
-# ---------------------------------------------------------------- 撞击伤害（demo 玩法）
-
-## 撞击伤害：撞得够猛就在接触点摘下一小块（Teardown 那样，碎块留下来）。
-##
-## ⚠️⚠️ 这是 **demo 自己的玩法**，不是引擎 API —— 故意**不做成 @export、不放进 addon**。
-##    引擎只把接触数据摆出来，"多猛算高速、要不要破坏、破坏多大"是**游戏规则**。
-##
-## ⚠️⚠️⚠️ 性能上踩过的两个大坑（都实测过，别再犯）：
-##
-##   1. **不要开接触事件**（world.contact_events_enabled）。
-##      实测（200 步 / 12 刚体 / 7 对接触）：关 79.3 ms，开 1125.1 ms
-##      -> **每帧多 5.2 ms**，摊到每对接触约 **0.74 ms/帧**。
-##      开销大头不是对象分配，而是每对接触都要算的 contact_width（逐像素走切向）。
-##      demo 里几十对接触就是几十 ms/帧 —— 这就是"一拖动就掉到几帧"的来源。
-##      所以这里走**查询路径**（contact_pair_count / contact_info，**不需要开事件**）。
-##      代价：拿不到 contact_width，判据只能用**冲量**（见 IMPACT_MIN_IMPULSE 的说明）。
-##
-##   2. **必须限流**，而且**冷却要按刚体对记，不能按接触点位置记**。
-##      一次破坏在大物体上实测 **10~15 ms**（rebuild 5.7 ms + split 4.0 ms + ...），
-##      直接一帧没了。
-##      ⚠️⚠️ 我第一版把接触点位置也算进 key（"刚体对 + 量化到 8 像素的位置"），
-##      结果**拖动时完全失效**：拖着一个物体沿别的物体刮过去，每帧的接触点都是新位置
-##      -> 每帧都是新 key -> 每帧都破坏一次 -> 用户报"主要是 drag 时很卡"。
-##      按刚体对记冷却才对（滑动时同一对刚体不会每帧重复破坏）。
-##      ⚠️ 再加一道**每帧总量**上限：一次撞击可能同时产生好几对接触，
-##      每对都破坏的话就是 N × 10 ms。
-##
-## ⚠️ 其余三条判断也都是踩过的坑：
-##   · **共享预算** —— 面-面接触有 2 个点，整对总冲量是**一个预算**，必须走
-##     contact_entries 按份额分配，否则每个点都用同一半径 = 预算被重复领取；
-##   · 只打 penetrating（dist < 0）—— 推测接触是在**阻止接近**，照着它打洞就是"擦身而过也打洞"；
-##   · 破坏用 detach（摘除）而不是 fracture（挖掉）—— 前者让命中的像素**变成碎片**
-##     留下来（总像素数守恒），后者是笔刷擦除该有的"挖洞"。
-##
-## ⚠️ 量纲变了：引擎的"应力"是 冲量/接触宽度（要开事件才拿得到），
-##    这里用的是**整对总冲量**，所以阈值不是一个量级 —— 按手感调。
-const IMPACT_MIN_IMPULSE := 150000.0
-const IMPACT_BASE_RADIUS := 1.0
-## 同一对刚体的冷却（秒）。⚠️ 只按刚体对，不含接触点位置 —— 见上面的说明。
-const IMPACT_COOLDOWN := 0.5
-## 每帧最多破坏几次。一次破坏 10~15 ms，多了直接掉帧。
-const IMPACT_MAX_PER_FRAME := 1
-
-var _impact_seen := {}       # "ida:idb" -> 上次破坏的时间（秒）
-
-
-func _apply_impact_damage() -> void:
-	var now := Time.get_ticks_msec() / 1000.0
-	# ⚠️ 每帧总量上限：撞击常常同时产生好几对接触，每对都破坏就是 N × 10 ms。
-	var done := 0
-	var by_id := {}
-	for b in world.bodies:
-		by_id[b.id] = b
-	for i in world.contact_pair_count():
-		if done >= IMPACT_MAX_PER_FRAME:
-			break
-		var info: Dictionary = world.contact_info(i)
-		var pts: Array = info["points"]
-		if pts.is_empty():
-			continue
-		var total := float(info["total_impulse"])
-		if total < IMPACT_MIN_IMPULSE:
-			continue
-		var a = by_id.get(int(info["id_a"]))
-		var b = by_id.get(int(info["id_b"]))
-		if a == null or b == null:
-			continue
-		# ⚠️ key **只含刚体对**。曾经把接触点位置也放进来（量化到 8 像素），
-		#    结果拖动时每帧的接触点都是新位置 -> 冷却形同不存在 -> 每帧破坏一次。
-		var key := "%d:%d" % [int(info["id_a"]), int(info["id_b"])]
-		var last: float = _impact_seen.get(key, -1e9)
-		if now - last < IMPACT_COOLDOWN:
-			continue
-		_impact_seen[key] = now
-		done += 1
-		for e in Destruction.contact_entries(pts, total, IMPACT_BASE_RADIUS):
-			if not e["penetrating"]:
-				continue
-			for body in [a, b]:
-				if body == null or body.shapes.is_empty():
-					continue
-				var dmg = Destruction.Damage.circle(body.to_local(e["point"]), e["radius"])
-				for frag in world.fracture(body, dmg):
-					renderer.sync(frag)
-				renderer.sync(body)
-				renderer.sync(body)
 
 
 func _paint(from: Vector2, to: Vector2) -> void:
