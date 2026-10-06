@@ -4982,6 +4982,50 @@ for b in world.bodies:
     print("  id %d  mass %.2f  motion %.4f  -> %s" % [b.id, b.mass, motion, why])
 ```
 
+---
+
+# ccd_ignore_mass 有没有用？—— 有用，而且"会穿墙"的代价比文档写的小得多
+
+甲方问"ccd_ignore 有正常工作吗"、"ccdenable=false 时 rapier 自带的 ccd 会兜住吗"。
+量了（`tests/diag_ccd_ignore.gd` / `tests/diag_ccd_tunnel.gd`）。
+
+## ① 有用，而且自己驱动子步的项目里也生效
+
+| ccd_ignore_mass | 同一个 30000 px/s 的刚体（质量 100）| 子步 |
+|---|---|---|
+| 0（关）| | **250** |
+| 200（豁免它）| | **1** |
+
+它挂在 `_compute_substeps` 里，而"自己驱动子步"的项目正是直接调那一条 —— 所以 `pre_step`
+那条路照样生效（实测 250 -> 1）。
+
+## ② 防穿有**两层**，豁免只关掉第一层
+
+| ccd_enabled（本引擎子步）| rp_ccd_substeps（Rapier CCD）| 30000 px/s 撞 4px 薄墙 |
+|---|---|---|
+| true | 1（默认）| 挡住 |
+| true | **0** | **穿过去了** |
+| **false** | **1（默认）** | **挡住** |
+| false | 0 | **穿过去了** |
+
+**`ccd_enabled = false` 不会顺带关掉 Rapier 的 CCD** —— 那是两个独立的 op。所以只要
+`rp_ccd_substeps` 还是默认的 1，豁免体照样被 swept 检测挡住（10x10 以 30000 px/s 撞 4 像素
+薄墙、引擎子步只有 1，结果**挡住**）。"豁免会穿墙"只在**第二层也关掉**时才成立。
+
+⚠️ 但要注意：**甲方自己的项目把两者绑在一起了**（`collision_damage.gd:58`：
+`rp_ccd_substeps = 1 if ccd_enabled else 0`）—— 在他那边 `ccd_enabled = false` 等于两层全关。
+
+## ③ 顺带修掉一个静默失效
+
+`rp_ccd_substeps = 0`（= 整个世界关掉 CCD，合法且有意义的设置）**在第一步之前设会被守卫吃掉**：
+`_rp_ccd_substeps_pushed` 的初值是 0，而"值没变就不推" —— 于是 0 永远推不过去，
+用户以为关了、Rapier 那边还是默认 1，且**不报任何错**。**我调这个旋钮做对照实验时正是这么
+被骗了一次**（第一版对照的结论是错的，差点把"挡住"归因给引擎的子步）。初值改成 **-1**。
+
+⚠️ 教训（值得推广到所有"值变了才推"的镜像）：**镜像初值不能等于任何一个有意义的取值**，
+否则那个值会被静默吞掉。`PBody` 的 _rp_vx/_rv_vy/_rv_w` 用 INF 强制重推就是这个道理。
+
+
 
 
 
