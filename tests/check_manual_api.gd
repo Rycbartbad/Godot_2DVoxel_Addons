@@ -93,7 +93,7 @@ func _initialize() -> void:
 	_check_prop("PWorld", w, ["contacts", "contact_events_enabled", "sleeping_enabled",
 		"ccd_max_substeps", "max_speculative_margin", "ccd_max_motion", "sleep_surface",
 		"material_density", "gravity"])
-	_check("PWorld", w, ["step"])
+	_check("PWorld", w, ["step", "pre_step"])
 	_check("PBody", b, ["to_local", "to_world", "velocity_at", "make_static"])
 	_check_prop("PBody", b, ["shapes"])
 	_check("PixelShape", s, ["get_pixel", "set_pixel", "get_aux", "set_aux", "clear_pixel",

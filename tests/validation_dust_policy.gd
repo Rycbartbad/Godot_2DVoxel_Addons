@@ -176,5 +176,26 @@ func _initialize() -> void:
 	_c("抓着的**不豁免**（它照样顶子步）", w6.last_substeps == 250,
 		"子步=%d" % w6.last_substeps)
 
+	# ---- 9. **自己驱动子步**的项目也必须能清（公开钩子 pre_step）----
+	#
+	# ⚠️ 为什么钉这条：清理原本只挂在 step() 里，而"自己驱动子步"是**合法用法**
+	#    （要逐子步结算接触伤害就必须自己写那个循环 —— 甲方项目就是这么做的：
+	#    只调 _compute_substeps + _substep_rapier）。于是那些项目里清理**一次都没跑过**，
+	#    debris_max_mass 设到 1000 也没清掉一个碎片，而且**不报任何错**。
+	#    现在 pre_step() 是公开前段（= 清接触事件 + 刷新质心 + 灰尘清理 + 子步估计），
+	#    自己写循环的人调这一个就不会漏。
+	var w7 := _world()
+	w7.debris_max_mass = 16.0
+	w7.debris_min_speed = 2000.0
+	var d7 := _dust(w7, 30000.0)
+	var n7: int = w7.pre_step(1.0 / 60.0)          # 完全复刻"自己驱动子步"，不调 step()
+	for i in n7:
+		w7._substep_rapier(1.0 / 60.0 / float(n7))
+	_c("自己驱动子步：pre_step 里就清了", not w7.bodies.has(d7) and w7.last_debris_removed == 1,
+		"removed=%d 子步=%d" % [w7.last_debris_removed, n7])
+	_c("自己驱动子步：子步也没被它顶起来", n7 <= 4, "子步=%d" % n7)
+	_c("pre_step 的返回值就是要切的子步数", n7 == w7.last_substeps,
+		"返回 %d / last_substeps %d" % [n7, w7.last_substeps])
+
 	print("=== %d passed, %d failed ===" % [_pass, _fail])
 	quit(1 if _fail > 0 else 0)

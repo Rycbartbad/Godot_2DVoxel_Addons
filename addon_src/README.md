@@ -278,6 +278,7 @@ docs/               架构与精度纪律
 | `add_body(body, shape_list, density_of?) -> PBody` | 加入刚体。`shape_list` 是 `PixelShape` 数组；`density_of` 可给逐材质密度 |
 | `remove_body(body)` | 移除 |
 | `step(dt)` | 推进一个时间步（内部按需切子步） |
+| `pre_step(dt) -> int` | **自己驱动子步时用它**：清接触事件 + 刷新质心 + 灰尘清理 + 子步估计，返回该切几个子步 |
 | `advance(delta) -> int` | 固定步长累加器版本，返回执行了几步 |
 | `fracture(body, damage, burst_speed?) -> Array` | **破坏**：返回新产生的碎片 Body |
 | `grab(body, world_point, accel?) -> Grab` | 建立鼠标拖动（策略层，不是求解器约束） |

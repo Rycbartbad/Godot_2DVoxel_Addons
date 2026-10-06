@@ -468,3 +468,13 @@ px.configure({
 ```
 
 ⚠️ `configure` 的键是**没给就不动**（不是"设成 0"）—— 手册里承诺的旋钮都有默认值。
+
+⚠️ **自己驱动子步的项目**（要逐子步结算接触伤害就得自己写循环）必须调 `pre_step(dt)`：
+
+```gdscript
+var n := world.pre_step(dt)          # 清接触事件 + 刷新质心 + 灰尘清理 + 子步估计
+for i in n:
+    world._substep_rapier(dt / float(n))
+```
+
+灰尘清理挂在 `step()` 里，绕过它就**一次都不会跑**（阈值设多少都没用，且不报错）。

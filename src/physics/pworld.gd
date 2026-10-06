@@ -1670,11 +1670,35 @@ func _compute_substeps(dt: float) -> int:
 	return _substeps_held
 
 
-func step(dt: float) -> void:
+## 固定步的**前段**：清接触事件、刷新质心、灰尘清理、子步估计。返回该步要切几个子步。
+##
+## ⚠️⚠️ 为什么要有这个**公开钩子**（甲方实测踩到）：
+##    "**自己驱动子步**"是合法用法 —— 要逐子步结算接触伤害就必须自己写那个循环
+##    （甲方项目就是这么做的：只调 `_compute_substeps` + `_substep_rapier`）。
+##    而灰尘清理原本只挂在 `step()` 里，于是那些项目里**清理一次都没跑过** ——
+##    `debris_max_mass` 设多少都没用（他设到 1000 也没清掉一个碎片），
+##    而且**不报任何错**。静默失效是最坏的失败方式，所以把前段抽成公开方法：
+##    自己写循环的人调这一个，就不会再漏。
+##
+## 用法：
+##     var n := world.pre_step(dt)
+##     for i in n:
+##         world._substep_rapier(dt / float(n))
+##
+## ⚠️ 顺序是契约：清理必须在子步估计**之前**（见 cull_fast_debris 的说明），
+##    否则就是"先卡一帧、下一帧才清掉"。
+func pre_step(dt: float) -> int:
 	if contact_events_enabled:
 		contacts.clear()          # 按**步**清空；子步会往同一个列表里追加
 	for b in bodies:
 		b.refresh_com()
+	last_debris_removed = cull_fast_debris()
+	var n := _compute_substeps(dt)
+	last_substeps = n
+	return n
+
+
+func step(dt: float) -> void:
 	# 物理交给 Rapier（宽相 / 窄相 / 求解 / 休眠都是它的），但**子步要自己切**。
 	#
 	# ⚠️ 这里曾经不切，理由是"Rapier 自带 CCD" —— 那是错的，代价是 demo 穿模。
@@ -1683,10 +1707,7 @@ func step(dt: float) -> void:
 	#
 	# 切子步在物理上是**正确**的：每个子步 dt/N，力/重力/抓取都按 dt/N 积分，
 	#    一帧的总冲量不变（早期担心的"力被重复施加"不成立 —— 那要每子步都用完整 dt）。
-	# ⚠️ 必须在子步估计**之前**（见 cull_fast_debris 的说明）：否则就是"先卡一帧再清掉"。
-	last_debris_removed = cull_fast_debris()
-	var n := _compute_substeps(dt)
-	last_substeps = n
+	var n := pre_step(dt)
 	var sub := dt / float(n)
 	for i in n:
 		_substep_rapier(sub)
