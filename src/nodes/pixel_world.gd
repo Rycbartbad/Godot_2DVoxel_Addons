@@ -64,7 +64,9 @@ signal physics_step_finished(world)
 @export_group("破坏")
 ## 碎片小于这么多**像素**就不要了（在分裂时就丢掉，不生成刚体）。见 PWorld.min_fragment_pixels。
 @export var min_fragment_pixels := 4
-## 灰尘清理：质量 <= 它 **且** 运动 >= debris_min_speed 的刚体直接删（两个都 > 0 才生效）。
+## 灰尘清理：质量 <= 它（且运动 >= debris_min_speed，若后者 > 0）的刚体直接删。默认关。
+## ⚠️ debris_min_speed = 0 = **不限速度**（只按质量清，静止的也清）；> 0 则只清"正在飞的"。
+## ⚠️ 质量 = 像素数 x 材质密度（4x4 的碎片在密度 2.5 下是 **40**，不是 16）。
 ## ⚠️ 删掉会打破体素守恒（玩家会看到碎片凭空消失），所以默认关。
 @export var debris_max_mass := 0.0
 @export var debris_min_speed := 0.0

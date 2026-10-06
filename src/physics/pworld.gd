@@ -101,8 +101,17 @@ var ccd_substep_budget := 600
 ## ⚠️ 抓着的 / 挂着关节的**永不豁免** —— 那些是要交互的，穿墙会被玩家看见。
 ## ⚠️ 它只治"拖慢"，不治"灰尘还在飞"（那个见 debris_max_mass）。
 var ccd_ignore_mass := 0.0
-## 又轻又快的灰尘**直接删掉**（两个都 > 0 才生效，**默认关**）。
-## 判据：mass <= debris_max_mass **且** 速度 >= debris_min_speed。
+## 灰尘**直接删掉**（默认关：debris_max_mass = 0）。
+## 判据：mass <= debris_max_mass **且**（若 debris_min_speed > 0）运动 >= debris_min_speed。
+##
+## ⚠️ **debris_min_speed = 0 表示"不限速度"**（只按质量清，静止的也清）。这不是笔误 ——
+##    甲方把 speed 设成 1 期望"清掉小碎片"，结果一个都没清：**静止的碎片 motion 恒为 0**，
+##    任何正阈值都拦得住躺在地上的碎块（实测 speed = 1 / 0.5 / 0.1 / 0.01 / 0.001
+##    全都没清，见 tests/diag_debris_port.gd）。两种需求用这一个旋钮表达：
+##      · speed > 0 = 只清"**正在高速飞的**灰尘"（挡子步尖峰，demo 用的就是这种）；
+##      · speed = 0 = 清掉所有够轻的（"扫地"，不管它动不动）。
+## ⚠️ 质量要按**密度**算：mass = 像素数 x 该材质密度。4x4 的碎片在密度 2.5 下是
+##    **质量 40**、密度 7.8 下是 124.8 —— 别拿像素数当质量。
 ##
 ## ⚠️ 为什么是**两个阈值**、而不是"质量/速度的比值"：它们回答两个不同的问题 ——
 ##    速度 = "它要全世界陪它跑多少子步"（每步位移 > ccd_max_motion 才有影响）；
@@ -2814,7 +2823,14 @@ func _break_joints_over_threshold(cands: Array) -> void:
 ##
 ## ⚠️ 两个阈值都必须 > 0 才生效（默认 0 = 关 -> 8 条逐位基准不动）。
 func cull_fast_debris() -> int:
-	if debris_max_mass <= 0.0 or debris_min_speed <= 0.0:
+	# ⚠️ 只有**质量**阈值是总开关；debris_min_speed <= 0 = **不限速度**（只按质量清）。
+	#
+	#    为什么这样定（甲方实测踩到）：他把 speed 设成 1 期望"清掉小碎片"，结果一个都没清 ——
+	#    因为**静止的碎片 motion 恒为 0**（实测 speed = 1 / 0.5 / 0.1 / 0.01 / 0.001
+	#    全都没清，见 tests/diag_debris_port.gd），**任何正阈值都拦得住躺在地上的碎块**。
+	#    这个旋钮原本的语义是"清正在高速飞的灰尘"（挡子步尖峰），而"清躺着的碎块"
+	#    是另一个需求 —— 用 0 表示"不看速度"就能表达它，且默认（质量也是 0）仍然全关。
+	if debris_max_mass <= 0.0:
 		return 0
 	var keep := _interactive_bodies()
 	var removed := 0
@@ -2826,7 +2842,7 @@ func cull_fast_debris() -> int:
 		#    只看线速度会漏掉质量放大的那个通道：Δω = J·r/I，而 **I ∝ m** ——
 		#    同一个力矩，轻 100 倍的碎片角速度大 100 倍，而子步估计里有一项
 		#    |ω| x 半径。既然闸门的目标是"别让它拖慢世界"，判据就得和那个度量对齐。
-		if _motion_of(b) < debris_min_speed:
+		if debris_min_speed > 0.0 and _motion_of(b) < debris_min_speed:
 			continue
 		if keep.has(b):
 			continue

@@ -248,7 +248,8 @@ renderer.forget_blueprint(id)
 | `max_angular_velocity` | 角速度上限 rad/s（0 = 不钳）| 1000 |
 | `ccd_ignore_mass` | 轻碎片豁免子步估计（0 = 关）| 0 |
 | `min_fragment_pixels` | 碎片小于这么多像素就丢掉 | 4 |
-| `debris_max_mass` / `debris_min_speed` | 灰尘清理阈值（两个都 > 0 才生效）| 0 / 0 |
+| `debris_max_mass` | 灰尘清理**总开关**（质量 <= 它）| 0（关）|
+| `debris_min_speed` | > 0 = 只清"正在飞的"；**0 = 不限速度** | 0 |
 
 ⚠️ **运行时改了导出值不会自动生效** —— `world` 是运行时对象，只有 `rebuild()` 会播。
 改完阈值别去调 `rebuild()`（那会重建世界、把破坏状态全丢掉），调
@@ -256,6 +257,9 @@ renderer.forget_blueprint(id)
 
 ⚠️ 灰尘策略（`debris_*` / `ccd_ignore_mass`）会**改变内容**（碎片凭空消失 / 穿墙），
 所以默认全关 —— 开之前先读[性能手册](performance.md)的"灰尘策略"那一节。
+
+⚠️ **质量 = 像素数 x 材质密度**（4x4 的碎片在密度 2.5 下是 **40**）—— 阈值要比你实际的碎片质量
+大才清得掉；**静止的碎片运动恒为 0**，所以想清躺着的必须把 `debris_min_speed` 设成 0。
 
 ## 相机与 UI
 

@@ -449,7 +449,8 @@ func _physics_process(_dt: float) -> void:
 | 旋钮 | 作用 | 默认 |
 |---|---|---|
 | `px.world.min_fragment_pixels` | 碎片小于这么多像素就不要了（分裂时丢） | 4 |
-| `px.world.debris_max_mass` + `debris_min_speed` | 又轻又快 -> 直接删（两个都 > 0 才生效） | 0（关）|
+| `px.world.debris_max_mass` | 质量 <= 它 -> 直接删（**总开关**）| 0（关）|
+| `px.world.debris_min_speed` | > 0 = 只清"正在飞的"；**0 = 不限速度**（躺着的也清）| 0 |
 | `px.world.ccd_ignore_mass` | 轻碎片豁免子步估计（留着但不拖慢） | 0（关）|
 | `px.world.max_angular_velocity` | 角速度上限（rad/s，0 = 不钳）| 1000 |
 | `px.world.rp_max_linear_velocity` | 线速度上限 | 40000 |

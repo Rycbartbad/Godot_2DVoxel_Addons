@@ -88,6 +88,38 @@ func _initialize() -> void:
 	_c("边界：这两个都不该删", w2.last_debris_removed == 0,
 		"removed=%d" % w2.last_debris_removed)
 
+	# ---- 3c. speed > 0 时**躺着的必须留下**（这是"只清正在飞的灰尘"那一档）----
+	var w2c := _world()
+	w2c.debris_max_mass = 16.0
+	w2c.debris_min_speed = 1.0
+	var lying := _dust(w2c, 0.0)
+	w2c.step(1.0 / 60.0)
+	_c("speed > 0：躺着不动的留下", w2c.bodies.has(lying) and w2c.last_debris_removed == 0,
+		"removed=%d" % w2c.last_debris_removed)
+	# ---- 3d. 默认关（mass = 0）时，speed = 0 也不许删 ----
+	var w2d := _world()
+	w2d.debris_max_mass = 0.0
+	w2d.debris_min_speed = 0.0
+	var untouched := _dust(w2d, 30000.0)
+	w2d.step(1.0 / 60.0)
+	_c("mass = 0 = 全关（连飞着的也不删）", w2d.bodies.has(untouched) and w2d.last_debris_removed == 0,
+		"removed=%d" % w2d.last_debris_removed)
+
+	# ---- 3a. speed = 0 = **不限速度**（只按质量清）----
+	#
+	# ⚠️ 为什么要有这条：甲方把 speed 设成 1 期望"清掉小碎片"，结果一个都没清 ——
+	#    **静止的碎片 motion 恒为 0**，任何正阈值都拦得住躺在地上的碎块
+	#    （实测 1 / 0.5 / 0.1 / 0.01 / 0.001 全没清，见 tests/diag_debris_port.gd）。
+	#    所以 0 被定义为"不看速度"，用来表达"扫地"这个需求。
+	var w3b := _world()
+	w3b.debris_max_mass = 16.0
+	w3b.debris_min_speed = 0.0
+	var sleeper := _dust(w3b, 0.0)              # 躺着不动（motion == 0）
+	w3b.step(1.0 / 60.0)
+	_c("speed = 0 = 不限速度：躺着的也清", not w3b.bodies.has(sleeper) and w3b.last_debris_removed == 1,
+		"removed=%d" % w3b.last_debris_removed)
+	_c("mass = 0 时 speed = 0 也不许删（默认关）", true)
+
 	# ---- 3b. 自转的轻碎片也要算"高速"（判据是 _motion_of，不是线速度）----
 	# ⚠️ 角速度正是**质量放大**的那个通道：Δω = J·r/I，而 I ∝ m ——
 	#    同一个力矩，轻 100 倍的碎片角速度大 100 倍，而子步估计里有一项 |ω| x 半径。
