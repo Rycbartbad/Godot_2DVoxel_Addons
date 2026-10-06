@@ -596,6 +596,15 @@ func _physics_process(delta: float) -> void:
 		steps += 1
 	if _accum > fixed_dt * float(max_substeps):
 		_accum = 0.0
+	# ⚠️⚠️ 不变量：`_body_nodes` 与 `world.bodies` **按下标一一对应**。任何绕过节点层增删刚体的
+	#    路径都会破坏它（直接 `fracture_pixels` / 门面 `spawn_*` / 灰尘策略的 `remove_body` /
+	#    调试脚本的 `add_body`）。破坏后的症状**不是报错**，而是"按下标取节点"的消费方
+	#    （游戏层的渲染同步循环）越界中断或静默错位 —— 那之后的刚体（通常正是新碎片）
+	#    这一帧不再被 sync，贴图停在旧位姿 = 用户报的"碎片位置偏差"。
+	#    按**版本号**对齐：只在真有增删时付 O(n)，平时一次整数比较。
+	if _bodies_rev != world.bodies_rev:
+		_bodies_rev = world.bodies_rev
+		realign_body_nodes()
 	if auto_render:
 		renderer.prune(_live_ids())
 		# ⚠️ 只同步**动态体**。静态体的像素内容永远不会变，而 sync 对每个刚体
@@ -778,6 +787,10 @@ func body_of(node: Node) -> PBody:
 ##
 ## 代价 O(刚体数) 的两次字典/数组操作，比 sync_world_bodies 便宜得多（那个还要全量
 ## 同步一遍渲染器）。
+## 上次对齐时的 `world.bodies_rev`（见 `_physics_process` 里那段不变量说明）。
+var _bodies_rev := -1
+
+
 func realign_body_nodes() -> void:
 	var by_body := {}
 	for n in _body_nodes:

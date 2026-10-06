@@ -18,6 +18,17 @@ const Sweep := preload("res://src/physics/sweep.gd")
 const Query := preload("res://src/physics/query.gd")
 
 var bodies: Array = []
+## 刚体**增删**的版本号（add_body / remove_body 各 +1）。
+##
+## ⚠️ 存在的理由：节点层的 `_body_nodes` 与 `bodies` 有一条**硬不变量**（按下标一一对应），
+##    而任何绕过节点层增删刚体的路径都会破坏它 —— 直接调 `fracture_pixels`、门面 `spawn_*`、
+##    灰尘策略里的 `remove_body`、调试脚本里的 `add_body`。
+##    症状**不是报错**：数组变长时静默错位（节点层的渲染归属会去问**别人的节点**）；
+##    数组变短时会让"按下标取节点"的消费方（游戏层的同步循环）**越界中断** ——
+##    那之后的刚体（通常正是新碎片）这一帧不再被 sync，贴图停在旧位姿，
+##    看起来就是"碎片有位置偏差"。
+##    `PixelWorld` 现在按这个版本号自动调 `realign_body_nodes()`，所以**消费者不用再记这条规矩**。
+var bodies_rev := 0
 var shapes_needing_coarse_proxy := 0
 ## 重力要按**可见尺度**定，不是按世界坐标的绝对值。
 ## 缩放 3 倍时可见高度只有 180 世界单位，900 的重力意味着物体 1 秒后
@@ -573,6 +584,7 @@ func add_body(body: PBody, shape_list: Array, density_of: Callable = Callable(),
 	body.rebuild(shape_list, density_of if density_of.is_valid() else density_callable(),
 		max_rects_per_shape, Rect2i(), friction_callable(), restitution_callable())
 	bodies.append(body)
+	bodies_rev += 1
 	if not connected_known:
 		ensure_connected(body)
 	return body
@@ -594,6 +606,7 @@ func remove_body(body: PBody) -> void:
 		for j in joints_of(body).duplicate():
 			_joint_drop_silent(j)
 	bodies.erase(body)
+	bodies_rev += 1
 
 
 ## ---------- 标签查询 ----------
