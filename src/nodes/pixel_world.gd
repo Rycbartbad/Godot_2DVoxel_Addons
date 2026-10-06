@@ -669,8 +669,19 @@ func body_of(node: Node) -> PBody:
 ##
 ## ⚠️ 关节：body_a / body_b 为 null 表示"锚在静态世界"，那是**合法**的，
 ##    不能和"锚点已被删除"一起清掉 —— 只清**非 null 且已不在 world.bodies 里**的。
-func sync_world_bodies() -> void:
-	# ① 节点数组按下标重建：能对上的节点保留，对不上的（碎片/未节点化）用 null 占位
+## 只把 _body_nodes 按下标重新对齐到 world.bodies（**不做渲染**）。
+##
+## ⚠️ 什么时候需要它：任何**绕过节点层**从 world.bodies 里删刚体的路径
+##    （`cull_outside` / `enforce_body_budget` / 游戏层自己调 `remove_body`）
+##    都会让"按下标一一对应"这个不变量失效。后果不是崩溃，而是**静默错配**：
+##    每帧那句 `uses_internal_render(_body_nodes[i])` 会拿**别人的节点**做判断 ——
+##    该画的刚体被判成"自带视觉"而 `forget` 掉（画面上少一块），而引擎不报任何错。
+##    demo 的剔除路径实测就是：每 60 帧剔一次，而 _body_nodes 一直错到下一次破坏
+##    （`sync_world_bodies`）才自愈。
+##
+## 代价 O(刚体数) 的两次字典/数组操作，比 sync_world_bodies 便宜得多（那个还要全量
+## 同步一遍渲染器）。
+func realign_body_nodes() -> void:
 	var by_body := {}
 	for n in _body_nodes:
 		if n != null and is_instance_valid(n) and n.body != null:
@@ -679,6 +690,11 @@ func sync_world_bodies() -> void:
 	for b in world.bodies:
 		out.append(by_body.get(b, null))
 	_body_nodes = out
+
+
+func sync_world_bodies() -> void:
+	# ① 节点数组按下标重建：能对上的节点保留，对不上的（碎片/未节点化）用 null 占位
+	realign_body_nodes()
 
 	# ② 渲染：全量 sync（含静态地形）+ 清理已经不存在的刚体
 	#

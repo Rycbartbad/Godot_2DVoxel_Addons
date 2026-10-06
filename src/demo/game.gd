@@ -213,9 +213,14 @@ func _process(delta: float) -> void:
 		var culled: int = world.cull_outside(Rect2(-600, -800, WORLD_W + 1200, WORLD_H + 1400))
 		if culled > 0:
 			renderer.prune(_live_ids())
+			# ⚠️ 剔除是**绕过节点层**删刚体的，_body_nodes 的下标会错位 ——
+			#    不对齐的话每帧的 uses_internal_render(_body_nodes[i]) 会拿别人的节点
+			#    做判断，该画的刚体被静默 forget 掉（画面上少一块，不报错）。
+			_world_node.realign_body_nodes()
 		var dropped: int = world.enforce_body_budget()
 		if dropped > 0:
 			renderer.prune(_live_ids())
+			_world_node.realign_body_nodes()
 
 	# ⚠️ 这里以前每帧全量同步一遍渲染器 —— 但 PixelWorld 节点在
 	#    _physics_process 里已经在做同一件事了。两边都做 = 每个动态体每帧
@@ -289,8 +294,14 @@ func _update_hud() -> void:
 	for b in world.bodies:
 		if not b.is_static:
 			rects += b.rects.size()
-	hud.text = "FPS %.0f | Body %d | 接触 %d | 碰撞矩形 %d | 笔刷 %.0f | 材质 %d | 体素 %sx%s | %s\n滚轮 笔刷大小   [ ] 微调   X 材质   - / = 体素大小   Ctrl+滚轮 视角缩放   Shift+左键 画刚体(松手生效)   Ctrl+左键 拖动   R 重置   空格 暂停\nL 碎块互撞: %s   M 幽灵方块(鼠标处)   D 调试叠加层   关节 %d 个（关节与碎块层都在 demo.tscn 里）" % [
-		_fps, world.bodies.size(), world.last_contacts, rects, brush_radius, material_id,
+	# ⚠️ HUD 上这两个数是**故意留的"故障指示器"**（排查"玩久了卡死"时不用猜）：
+	#   · Rapier 刚体数 —— 与 Body 长期不一致 = 有路径只删了 GDScript 那一半（僵尸还在被积分）。
+	#     cull_outside 就这么漏过（见 validation_cull_release.gd）。
+	#   · 子步 —— 每帧的成本是"子步 x 全世界"，它被顶到几百就是掉帧的直接原因
+	#     （按"最快物体的位移"算，所以"碎片掉进虚空永远加速"会把它顶满）。
+	hud.text = "FPS %.0f | Body %d | Rapier %d | 子步 %d | 接触 %d | 碰撞矩形 %d | 笔刷 %.0f | 材质 %d | 体素 %sx%s | %s\n滚轮 笔刷大小   [ ] 微调   X 材质   - / = 体素大小   Ctrl+滚轮 视角缩放   Shift+左键 画刚体(松手生效)   Ctrl+左键 拖动   R 重置   空格 暂停\nL 碎块互撞: %s   M 幽灵方块(鼠标处)   D 调试叠加层   关节 %d 个（关节与碎块层都在 demo.tscn 里）" % [
+		_fps, world.bodies.size(), world.rp_body_count(), world.last_substeps,
+		world.last_contacts, rects, brush_radius, material_id,
 		String.num(PixelScale.get_scale(), 1), String.num(PixelScale.get_scale(), 1), mode,
 		"是" if _debris_collide else "否", world.joints.size()]
 

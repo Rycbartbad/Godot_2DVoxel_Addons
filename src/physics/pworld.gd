@@ -731,6 +731,24 @@ static func _rp_f32(b: PackedByteArray, v: float) -> void:
 	b.resize(n + 4)
 	b.encode_float(n, v)
 
+## 原生（Rapier）侧的刚体数 —— **诊断用**。
+##
+## ⚠️ 为什么必须有它：GDScript 侧的 bodies.size() 与 Rapier 侧的刚体数是**两个数**，
+##    任何"只删了一边"的路径都会让它们分叉，而分叉的症状是**性能慢慢变差**
+##    （僵尸还在被积分），不会有任何报错。cull_outside 就这么漏了很久。
+##    判据用 tests/validation_cull_release.gd 钉住：剔 N 个，两边必须同步减 N。
+## 返回 -1 表示扩展还没起来（拿不到）。
+func rp_body_count() -> int:
+	if not _rp_ensure():
+		return -1
+	var cmds := PackedByteArray()
+	_rp_u8(cmds, 13)
+	var res := _rp_send(cmds, 4)
+	if res.size() < 8:
+		return -1
+	return res.decode_s32(4)
+
+
 func _rp_send(cmds: PackedByteArray, out_cap: int) -> PackedByteArray:
 	var inp := PackedByteArray()
 	_rp_i32(inp, out_cap)
@@ -1879,7 +1897,17 @@ func cull_outside(bounds: Rect2) -> int:
 		if b.is_static or b.frozen:
 			continue
 		if not bounds.intersects(b.aabb):
-			bodies.remove_at(i)
+			# ⚠️⚠️ 必须走 remove_body()，**不能**只 bodies.remove_at(i)。
+			#    曾经就是 remove_at：GDScript 这边刚体没了，而 Rapier 那边**一个都没删**
+			#    —— remove_body 才是唯一会发 op 4（body_remove）的地方。
+			#    症状（实测 tests/diag_cull_leak.gd）：连剔 5 轮 x 100 个之后，
+			#    GDScript 侧只剩 1 个刚体，**Rapier 侧还有 501 个**；
+			#    demo 里"切割地面 -> 碎片掉进虚空 -> 每 60 帧剔除一次"正是这条路，
+			#    于是僵尸无界增长（每个 ~0.34 us/步，8000 个 = 2.7 ms/步）。
+			#    顺带：remove_body 还会清掉挂在它上面的关节 —— remove_at 会让那些
+			#    关节在 GDScript 侧悬空、在 Rapier 侧也泄漏。
+			#    代价：每个刚体一次 _rp_send（实测 2.8 us），一次性剔几百个也只有 ~1 ms。
+			remove_body(b)
 			removed += 1
 	return removed
 

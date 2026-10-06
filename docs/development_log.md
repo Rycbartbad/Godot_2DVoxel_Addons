@@ -4650,4 +4650,105 @@ AABB 根本不变（走的是既有的增量路径），测不到 ①。
 | `tests/validation_tile_consistency.gd` | 改用 `_build_region_image_gd` 当独立基准（用分发入口会变成自己跟自己比）|
 | `tests/profile_sync.gd` | 两条路都量 |
 
+---
+
+# 排查"切割地面 + 碎片掉虚空 -> 卡死"：**找到一个真泄漏**（`cull_outside`）
+
+甲方报："跑 demo 破坏/切割大物体，切割地面、大部分碎片掉落虚空时偶尔卡死"，
+并问"是不是某处除零 / 循环递归卡死"。
+
+## 先给结论：**不是除零，也没有无界循环/递归**
+
+把 `src/` 里 **51 个 `while`** + GLSL 的循环 + 所有除法过了一遍，全部终止：
+
+| 类别 | 证据 |
+|---|---|
+| 除零 | `mass <= 0` / `n_px > 0` / `dt > 0` 都有守卫；`_compute_substeps` 的除法结果被 `clampi(..., 1, 600)` 夹住；NaN 比较为假直接跳过 |
+| `while bits != 0` 那一类 | 全是 `x &= x - 1` / `remaining &= ~comp`（每轮至少清一个 bit）|
+| 图遍历（关节/焊接/锚定）| 三个 BFS **都带 `seen`** —— 关节图有环也不会转圈 |
+| union-find | `_find` 的根**单调递减**（`parent[rb] = ra`，`ra < rb`），不可能成环 |
+| 定点迭代（`while changed`）| 只在矩形数**减少**时置 true -> 单调收敛 |
+| GLSL | `flood` 固定 64 轮；分量循环每轮至少清掉一个 bit |
+| 递归 | 写了个扫描器查 `src/` 全部函数 —— **没有一个自递归** |
+
+顺手排除的"看起来像"：矩形数爆炸是**线性**的（8192 个矩形 = 60.5 ms）。
+
+## 找到的**真 bug**：`cull_outside` 在 Rapier 侧泄漏刚体（还泄漏关节）
+
+`cull_outside` 一直只做 `bodies.remove_at(i)`，而**只有 `remove_body()` 会向原生发
+op 4（body_remove）**。于是"GDScript 这边删了、Rapier 那边一个没删"：
+
+```
+连剔 5 轮 x 100 个（tests/diag_cull_leak.gd）：
+  第 5 轮：cull 掉 100 个 | GDScript 刚体 1 | **Rapier 刚体 501**（泄漏 0 —— 全留着）
+```
+
+僵尸还在被 Rapier 积分（一直往下掉），代价实测**线性**：
+
+| Rapier 侧僵尸 | 步进 |
+|---|---|
+| 0 | 0.008 ms |
+| 500 | 0.110 ms |
+| 2000 | 0.554 ms |
+| 8000 | **2.695 ms** |
+
+也就是 ~**0.34 us/僵尸/步**，且**无界增长**。demo 那条路（每 60 帧剔一次）实测
+30 秒 40 刀 -> Rapier 侧 2 涨到 **41**，而活着的只有 1~6 个。
+
+⚠️ **诚实地说：这个泄漏本身还不足以解释"卡死"** —— 要 10 万级僵尸才顶满一帧。
+但它确实是 bug（无界的内存 + CPU），而且**正好落在甲方描述的那条路上**，所以先修掉。
+它也是"玩久了越来越卡"这类症状的经典成因，而**不会有任何报错**。
+
+## 顺带发现的第二个 bug：剔除会打乱节点层的下标对齐
+
+`_body_nodes` 与 `world.bodies` 是**按下标一一对应**的（`pixel_world.gd` 里写明了这个
+不变量），而 `cull_outside` 是**绕过节点层**删刚体的。后果不是崩溃，是**静默错配**：
+每帧那句 `uses_internal_render(_body_nodes[i])` 会拿**别人的节点**做判断，
+该画的刚体被判成"自带视觉"而 `forget` 掉 —— 画面上少一块，引擎不报任何错。
+
+修法：把"按下标对齐"抽成 `PixelWorld.realign_body_nodes()`（**不做渲染**，
+比 `sync_world_bodies()` 便宜得多），demo 在剔除/淘汰之后调它。
+
+## 修了什么
+
+| 位置 | 改动 |
+|---|---|
+| `PWorld.cull_outside()` | `bodies.remove_at(i)` -> **`remove_body(b)`**（同时清掉挂在它上面的关节）|
+| `PWorld.rp_body_count()` | 新增**诊断接口**：原生侧到底有几个刚体（op 13）|
+| `PixelWorld.realign_body_nodes()` | 新增；`sync_world_bodies()` 也改用它 |
+| `src/demo/game.gd` | 剔除/淘汰之后 realign；HUD 加 `Rapier` 与 `子步` 两个数 |
+
+⚠️ `remove_body` 每个刚体一次 `_rp_send`（实测 2.8 us）—— 一次性剔几百个也只有 ~1 ms，
+而它每 60 帧才跑一次。
+
+## 闸门：`tests/validation_cull_release.gd`（15 项）
+
+判据就是"**数一数两边**"（这类 bug 只有计数抓得到）：
+剔 40 个 -> GDScript 41->1 **且 Rapier 41->1**；剔除时关节两边都清；
+冻着的/静态的**不许**被剔（且原生侧也留着）；碎片预算淘汰同样两边同步；
+节点层"未 realign 时下标确实是错的 -> realign 之后重新对上"。
+
+## 还没排除的"卡死"候选（按可能性）
+
+1. **两个求解迭代旋钮没有上限**（最新提交加的）：`rp_joint_solver_iterations` /
+   `body.additional_solver_iterations`，Rapier 侧是 `as usize` 直接吃。
+   实测**线性**：1000 次 -> **11.2 ms/步**（基线 1.4）。填个十万级就是卡死。
+   ⚠️ 建议加 clamp（还没加，等甲方点头 —— 这是公开 API 的语义变更）。
+2. **`PixelShapePolygon2D.build_shape()`**：扫描线是 `for y in range(min_y, max_y)` +
+   逐像素 `set_pixel`（1289 ns/像素）。顶点或 `point_scale` 填大了 -> 行数/像素数爆炸，
+   而它是 `@tool`，**卡的是编辑器**。
+3. **AABB 决定渲染块数**：`O(面积 / 64^2)`。20000x20000 的 AABB = 9.8 万块 x 16 KB
+   ≈ **1.5 GB** + 9.8 万个 Sprite2D —— 一个离群的远顶点就能触发。
+4. ⚠️ **如果编辑器没重启**，跑起来的游戏用的是**旧 DLL**（没有 `PixelRaster`），
+   渲染会退回 GDScript 逐像素路径（慢 23 倍）—— 那是"卡"不是"死"，但很容易被当成卡死。
+
+## 下一步靠数据（HUD 已经埋好指示器）
+
+下次卡死时读 HUD 上的两个数就能一次定位：
+
+- **`Rapier` 与 `Body` 长期不一致** -> 又有"只删一半"的路径（僵尸在拖慢步进）；
+- **`子步` 被顶到几百** -> 每帧成本 = 子步 x 全世界，那就是掉帧的直接来源
+  （按"最快物体的位移"算，所以"碎片掉进虚空永远加速"会把它顶满）。
+
+
 

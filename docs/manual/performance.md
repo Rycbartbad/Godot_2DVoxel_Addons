@@ -143,6 +143,15 @@ px.cull_freeze(r, [player_body])       # 第二个参数 = 必须保持计算的
 ⚠️ `cull_outside()` 是**移除**（刚体没了，回来也回不来）—— 那是给"再也不需要的碎片"用的；
 要可逆就用 `cull_freeze()`。
 
+⚠️ 它删的是**两边**（GDScript 与 Rapier）—— 曾经只删 GDScript 那一半，Rapier 侧就无界泄漏：
+僵尸还在被积分，每个 **~0.34 us/步**（8000 个 = 2.7 ms/步），而且**不报任何错**。
+随时可以对数：`world.rp_body_count()` 与 `world.bodies.size()` 应当只差静态体的数量
+（demo 的 HUD 上直接显示着这两个数）。
+
+⚠️ 它**绕过节点层**删刚体，所以用完要 `PixelWorld.realign_body_nodes()` ——
+否则 `_body_nodes` 的下标错位，每帧的 `uses_internal_render(_body_nodes[i])` 会拿
+别人的节点做判断，该画的刚体被静默 `forget` 掉（画面上少一块）。
+
 ### 渲染：逐像素填图已经在原生里（`PixelRaster`）
 
 `PixelRenderer` 建贴图那一步（形状 -> RGBA8）现在走原生：**0.028 us/像素**
