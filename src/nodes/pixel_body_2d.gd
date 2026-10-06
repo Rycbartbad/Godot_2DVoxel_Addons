@@ -517,5 +517,9 @@ func bake() -> PBody:
 	if not can_sleep:
 		# 永不休眠：把计时器推到很负，永远攒不满 sleep_delay
 		b.sleep_timer = -1.0e9
+	# ⚠️ 把"要不要内部渲染"同步到 PBody 上：门面（PixelPhysics）那条路没有节点，
+	#    只能看 PBody 上的这个标志 —— 不同步的话，同一个场景"节点摆的"和"代码 spawn 的"
+	#    在渲染归属上会给出两种答案（而其中一种是错的）。
+	b.internal_render = internal_render
 	body = b
 	return b

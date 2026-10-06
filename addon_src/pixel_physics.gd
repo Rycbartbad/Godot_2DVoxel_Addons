@@ -933,26 +933,59 @@ func resync() -> void:
 	if _renderer == null:
 		return
 	for b: PBody in world.bodies:
+		if not _wants_internal_render(b):
+			_renderer.forget(b.id)
+			continue
 		_renderer.sync(b)
+
+
+## 这个刚体要不要进**内部渲染器**（画贴图）。
+##
+## ⚠️⚠️ 判据必须和节点层（PixelWorld.uses_internal_render）**一致**，否则"只物理不渲染"
+##    在门面这条路（代码驱动的项目，比如 ink-2）上会**静默失效** —— 症状就是
+##    "明明配了不渲染，破坏之后还是冒出一张停在旧位置的矩形贴图"。
+##    ⚠️ 门面这条路没有节点，所以只能看 **PBody 上的 internal_render**；
+##    节点层还额外看"这个节点有没有自带视觉（PixelSprite2D）"。
+func _wants_internal_render(b: PBody) -> bool:
+	return b.internal_render
 
 
 func _sync_body(b: PBody) -> void:
 	if auto_render and _renderer != null:
+		if not _wants_internal_render(b):
+			_renderer.forget(b.id)      # 关掉渲染之后要把旧贴图**回收**，不是留着
+			return
 		_renderer.sync(b)
 
 
-func _sync_renderer() -> void:
+## 每帧维护渲染层。include_static=false 时**跳过静态体**（与节点层同一条判据）：
+## 静态体的几何只在破坏时变，而那时调用方会走 _after_damage(true)。
+##
+## ⚠️ 实测（tests/_bench_syncpath.gd，1 个 768x100 地面 + 200 个动态方块）：
+##    每帧 1.558 ms（全部）vs 1.530 ms（跳过静态）—— 差值只有 0.028 ms（2%），
+##    因为内容没变的静态体一次 sync 只要 6 us。所以这条**不是**为了省那 2%，
+##    而是为了让门面与节点层**语义一致**（不然"静态体不用每帧同步"这条经验在两条路上不一致，
+##    以后谁改都会改错一边）。
+func _sync_renderer(include_static := false) -> void:
 	if _renderer == null:
 		return
 	var live := {}
 	for b: PBody in world.bodies:
 		live[b.id] = true
+		if b.is_static and not include_static:
+			continue
+		if not _wants_internal_render(b):
+			_renderer.forget(b.id)
+			continue
 		_renderer.sync(b)
 	_renderer.prune(live)
 
 
 ## 破坏会让引擎增删刚体 —— 门面负责让渲染层跟上，调用方什么都不用做。
+##
+## ⚠️ 这里必须 include_static=true：**静态地形也会被打坏**，跳过它就等于
+##    "地面被挖了洞，画面上还是完整的"（而且不报任何错）。
 func _after_damage(fragments: Array) -> Array:
 	if auto_render:
-		_sync_renderer()
+		_sync_renderer(true)
 	return fragments

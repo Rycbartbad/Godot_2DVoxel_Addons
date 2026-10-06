@@ -457,8 +457,14 @@ static func uses_internal_render(node) -> bool:
 		return true
 	if not (node is Node):
 		return true                      # 替身（不是节点）-> 当作普通刚体：要画
-	if node is PixelBody2D and not node.internal_render:
-		return false
+	if node is PixelBody2D:
+		# ⚠️ 两个入口都要看：节点上的导出（编辑器里摆的）与 **PBody 上的标志**
+		#    （代码 spawn / 门面路径设的）。烘焙时节点会把它同步到 PBody，
+		#    但游戏层也可能直接改 body.internal_render —— 任一说"不画"就不画。
+		if not node.internal_render:
+			return false
+		if node.body != null and not node.body.internal_render:
+			return false
 	return not has_own_sprite(node)
 
 

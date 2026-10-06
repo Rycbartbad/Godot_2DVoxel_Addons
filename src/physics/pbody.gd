@@ -46,6 +46,17 @@ var is_static := false
 ## ⚠️ 冻结期间刚体按**静态**推给 Rapier：不积分、不参与静态-静态对（整片冻住几乎零成本），
 ##    但碰撞体还在 —— 醒着的东西照样被它挡住。
 var frozen := false
+
+## 要不要进**内部渲染器**（引擎给刚体画的那张贴图）。false = 只物理不渲染。
+##
+## ⚠️⚠️ 为什么这个标志在 PBody 上、而不是只在节点上：**门面（PixelPhysics）那条路没有节点**
+##    （代码驱动的项目都走它，比如 ink-2）。策略只接在节点层的话，"配了不渲染"在门面路径上
+##    会**静默失效** —— 症状是"明明配了，破坏之后还是冒出一张停在旧位置的矩形贴图"，
+##    而且不报任何错。节点层（PixelBody2D.internal_render）烘焙时会把它同步过来。
+##
+## ⚠️ 关掉只影响**画**：像素照样参与物理、破坏、质量、连通性，刚体也不会被摘出世界。
+## ⚠️ 自带视觉（子节点 PixelSprite2D）也走同一条判据（见 PixelWorld.uses_internal_render）。
+var internal_render := true
 var awake := true
 var sleep_timer := 0.0
 var aabb := Rect2()
