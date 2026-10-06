@@ -3072,6 +3072,10 @@ func fracture_pixels(body: PBody, removals: Dictionary, burst_speed: float = 0.0
 	#    而删除掩码本来就带着范围信息（clear_pixel 也已经逐块记过脏）。
 	var removed := 0
 	var dirty := {}
+	# ⚠️ 同时收集**被改到的块键** —— 交给 rebuild -> MassProps 只重算这些块。
+	#    没有它的话，删 1 个像素也要把整个形状重扫一遍（实测 800x40 = 2.95 ms）。
+	var changed_chunks := {}
+	var all_interior := true          # 所有被改的块都只动了内部像素？（见下面的圈判据）
 	for s in body.shapes:
 		var mask: Dictionary = removals.get(s, {})
 		if mask.is_empty():
@@ -3085,12 +3089,33 @@ func fracture_pixels(body: PBody, removals: Dictionary, burst_speed: float = 0.0
 			if s.get_pixel(p.x, p.y) != 0:
 				s.clear_pixel(p.x, p.y)
 				removed += 1
+			changed_chunks[PixelShape.make_key(p.x >> 3, p.y >> 3)] = true
 			x0 = mini(x0, p.x)
 			y0 = mini(y0, p.y)
 			x1 = maxi(x1, p.x)
 			y1 = maxi(y1, p.y)
 		if x1 >= x0:
 			dirty[s] = Rect2i(x0, y0, x1 - x0 + 2, y1 - y0 + 2)
+			# ---- 判"这次只动了内部像素"：删除包围盒**外一圈**全是实心 -> 外轮廓没变 ----
+			# 那时旧矩形仍然是保守且有效的碰撞代理，可以跳过 GreedyRects.decompose
+			# （实测 800x40 要 2.0 ms，而删 1 个像素也是这个价）。
+			# ⚠️ 圈上碰到空像素（= 这次破坏摸到了外轮廓）就老老实实重扫。
+			if all_interior:
+				var ring_ok := true
+				for ry in range(y0 - 1, y1 + 2):
+					if not ring_ok:
+						break
+					for rx in range(x0 - 1, x1 + 2):
+						# ⚠️ 跳过**整个包围盒**（含它的边）—— 刚删掉的像素就在里面，
+						#    把边也算进圈上会永远判成"不是内部"（第一版就是这个 bug，
+						#    闸门里"内部像素：矩形逐位不变"当场抓到）。
+						if rx >= x0 and rx <= x1 and ry >= y0 and ry <= y1:
+							continue
+						if s.get_pixel(rx, ry) == 0:
+							ring_ok = false
+							break
+				if not ring_ok:
+					all_interior = false
 	if removed == 0:
 		return {"removed": 0, "body_alive": true, "fragments": []}
 
@@ -3146,7 +3171,7 @@ func fracture_pixels(body: PBody, removals: Dictionary, burst_speed: float = 0.0
 	if anchor_mode:
 		body.is_static = kept_anchored
 	body.rebuild(kept, density_callable(), max_rects_per_shape, Rect2i(),
-		friction_callable(), restitution_callable(), dirty)
+		friction_callable(), restitution_callable(), dirty, changed_chunks, all_interior)
 	var r_keep := body.com_world() - old_com
 	body.linear_velocity = v_old + w_old * Vector2(-r_keep.y, r_keep.x)
 	body.angular_velocity = w_old
