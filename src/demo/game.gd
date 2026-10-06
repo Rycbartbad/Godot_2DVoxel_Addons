@@ -459,7 +459,7 @@ func _brush_step(dir: float) -> void:
 ## ⚠️ 量纲变了：引擎的"应力"是 冲量/接触宽度（要开事件才拿得到），
 ##    这里用的是**整对总冲量**，所以阈值不是一个量级 —— 按手感调。
 const IMPACT_MIN_IMPULSE := 150000.0
-const IMPACT_BASE_RADIUS := 6.0
+const IMPACT_BASE_RADIUS := 1.0
 ## 同一对刚体的冷却（秒）。⚠️ 只按刚体对，不含接触点位置 —— 见上面的说明。
 const IMPACT_COOLDOWN := 0.5
 ## 每帧最多破坏几次。一次破坏 10~15 ms，多了直接掉帧。
