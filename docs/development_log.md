@@ -4941,6 +4941,47 @@ op 4（body_remove）**。于是"GDScript 这边删了、Rapier 那边一个没�
 
 `tests/validation_dust_policy.gd` 扩到 **21 项**：新增"`speed = 0` 清躺着"、"`speed > 0` 留躺着"、
 "`mass = 0` 全关（连飞着的也不删）"三条。
+### 闸门矩阵（甲方追问"speed=1 而且它动了，还是没删"，tests/diag_debris_gates.gd）
+
+| 情形（2x2、密度 2.5 -> 质量 10、`mass=20 / speed=1`）| 结果 |
+|---|---|
+| 静止（motion 0）| 没清（速度闸门）|
+| **以 5 px/s 动** | **已清** |
+| 以 100 px/s 动 | **已清** |
+| 动 + **冻着** | 没清（`frozen` —— 用了 `cull_freeze` 的项目要注意）|
+| 动 + **挂关节** | 没清（要交互的永不删）|
+| 4x4（质量 **40**）> mass 20 | 没清（质量闸门）|
+| 4x4（质量 40）<= mass 50 | 已清 |
+| 8x8（质量 160）<= mass 200 | 已清 |
+
+结论：**机制本身没问题**（质量过关 + 在动就一定删）。移植后"没删"的排查顺序：
+
+1. **`world.debris_max_mass` 是不是真的 > 0**（节点层改了 @export 却没调
+   `push_physics_settings()` 的话，world 上还是 0 = 全关）；
+2. **质量够不够**：`mass = 像素数 x 材质密度` —— 打印 `body.mass` 看实际值
+   （demo 的 `16` 在密度 2.5 下只覆盖"2x2 及更小"）；
+3. **是不是冻着**（`cull_freeze` 范围内）；
+4. 是不是挂着关节 / 被抓着。
+
+⚠️ 一段能直接定位的打印（贴到项目里跑一次，每条刚体会告诉你**哪一条**没过）：
+
+```gdscript
+for b in world.bodies:
+    if b.is_static:
+        continue
+    var motion: float = b.linear_velocity.length() + absf(b.angular_velocity) * b.bounding_radius()
+    var why := "应该会被清"
+    if b.mass > world.debris_max_mass:
+        why = "质量 %.2f > %.2f（= 像素数 x 密度）" % [b.mass, world.debris_max_mass]
+    elif world.debris_min_speed > 0.0 and motion < world.debris_min_speed:
+        why = "运动 %.4f < %.2f" % [motion, world.debris_min_speed]
+    elif b.frozen:
+        why = "冻着"
+    elif world.joints_of(b).size() > 0:
+        why = "挂着关节"
+    print("  id %d  mass %.2f  motion %.4f  -> %s" % [b.id, b.mass, motion, why])
+```
+
 
 
 
