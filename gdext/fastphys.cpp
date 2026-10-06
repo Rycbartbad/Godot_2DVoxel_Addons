@@ -1,6 +1,10 @@
 // FastPhys —— GDExtension 入口。
 //
-// 现在只有**一个**类：@@RapierPhys@@。物理全部交给 Rapier（rapier_bridge.dll）。
+// 两个类，各自一条命令流（编号互不干扰）：
+//   · @@RapierPhys@@  —— 物理全部交给 Rapier（rapier_bridge.dll），op 0..42。
+//   · @@PixelRaster@@ —— 形状 -> RGBA8 图的栅格化，**纯 CPU、不依赖 Rapier**。
+//     为什么单独一个类：渲染不该被"Rapier 桥接没加载"拖下水；两套命令流混在
+//     一起还会让"下一个空 op 号是多少"变成两个模块的共享状态。
 //
 // ⚠️ 手写的那套内核（collide_kernel.h / bp_kernel.h / solver_kernel.h）已经删除。
 //    它们曾经把宽相 / 窄相 / 求解逐位移植到 C++，是"GDScript 与 C++ 逐字节等价"
@@ -296,6 +300,14 @@ struct CmdRd {
 	int32_t i32() { int32_t v = 0; if (i + 4 > n) { ok = false; return 0; } std::memcpy(&v, p + i, 4); i += 4; return v; }
 	uint32_t u32() { return (uint32_t)i32(); }
 	double f64() { double v = 0; if (i + 8 > n) { ok = false; return 0; } std::memcpy(&v, p + i, 8); i += 8; return v; }
+	int64_t i64() { int64_t v = 0; if (i + 8 > n) { ok = false; return 0; } std::memcpy(&v, p + i, 8); i += 8; return v; }
+	// 定长裸字节段。失败返回 nullptr 且 ok = false —— 调用方**必须**查 ok 再解引用。
+	const uint8_t *bytes(size_t count) {
+		if (i + count > n) { ok = false; return nullptr; }
+		const uint8_t *q = p + i;
+		i += count;
+		return q;
+	}
 	bool f32s(size_t count, std::vector<float> &dst) {
 		dst.resize(count);
 		if (i + count * 4 > n) { ok = false; return false; }
@@ -496,6 +508,99 @@ static void run_rapier_cmd(RapierInstance *inst, const uint8_t *in, size_t in_n,
 	}
 }
 
+// ================= PixelRaster：形状 -> RGBA8 图（渲染用） =================
+//
+// 为什么值得搬进原生：逐像素在 GDScript 里填 RGBA8 是**实测 0.65 us/像素**
+// （参照实现 = src/render/pixel_renderer.gd 的 _build_region_image_gd）——
+// 一块 64x64 要 2.5 ms，768x100 的地面首次建图 **50 ms**。而"大物体被切开"
+// 那一帧里，渲染重建比破坏本身还贵（实测 53 ms vs 23.7 ms，
+// 见 tests/diag_bigfrag_hitch.gd）。
+//
+// ⚠️ GDScript 那条路**必须留着**：它是参照实现，逐位对拍靠它
+//    （tests/validation_raster_native.gd）；shading 打开时也只能走它
+//    （逐像素着色是 GDScript 的规则）。
+//
+// 命令流（头部协议与 RapierPhys.cmd 相同：in = [i32 out_cap][i32 cmd_len][ops...]）：
+//   1  fill_region(i32 w, i32 h, i32 rx, i32 ry, i32 ox, i32 oy, i32 n_chunks,
+//                  u32 palette[256], { i32 cx, i32 cy, i64 occ, u8 mat[64] } * n_chunks)
+//        -> w*h*4 字节 RGBA8（先清零），written = w*h*4
+//      w,h     = 区域尺寸（像素）
+//      rx,ry   = 区域原点（shape 局部像素坐标）
+//      ox,oy   = shape 的 aabb 原点（局部像素坐标）—— 块坐标 (cx,cy) 靠它换算
+//      palette = 256 项 u32（小端 = r,g,b,255）。**由 GDScript 侧按与参照实现
+//                逐位一致的规则算好**（int(c*255) 截断 / alpha 强制 255 /
+//                材质 id 越界 clamp 到最后一格）—— 原生只做拷贝，
+//                浮点语义只留一处真源（"同一规则写两处"在本仓库栽过太多次）。
+//
+// 每个块的 (occ, mat) 与 PixelChunk 一一对应：occ 的 bit i = 局部像素
+// (i & 7, i >> 3)，mat[i] = 材质 id。区域外的像素直接跳过（与参照实现同判据）。
+
+// PixelRaster 自己的一组 StringName。
+// ⚠️ 不复用 RapierPhys 那几个缓冲区：复用会让两个类的方法名/参数名互相覆盖，
+//    注册出来的签名静默错位（而症状是"调用时参数对不上"）。
+static SN g_sn_pxr_class, g_sn_pxr_fill, g_sn_pxr_a0, g_sn_pxr_a1, g_sn_pxr_ret;
+
+static void run_raster_cmd(const uint8_t *in, size_t in_n, uint8_t *out, size_t out_cap, size_t &written) {
+	written = 0;
+	CmdRd r; r.p = in; r.n = in_n; r.i = 0;
+	while (r.ok && r.i < r.n) {
+		uint8_t op = r.u8();
+		if (!r.ok) break;
+		switch (op) {
+			case 1: {
+				int32_t w = r.i32(), h = r.i32();
+				int32_t rx = r.i32(), ry = r.i32();
+				int32_t ox = r.i32(), oy = r.i32();
+				int32_t n_chunks = r.i32();
+				if (w < 0) w = 0;
+				if (h < 0) h = 0;
+				if (n_chunks < 0) n_chunks = 0;
+				size_t need = (size_t)w * (size_t)h * 4u;
+				const uint8_t *pal = r.bytes(1024);
+				if (!r.ok) break;
+				// ⚠️ 容量不够必须**停**，不能"能写多少写多少"：written 会被当成结果段
+				//    长度，写超容量是静默内存损坏（本仓库在命令流错位上栽过 ——
+				//    见 RapierPhys 的 default 分支墓碑）。
+				if (need > out_cap) {
+					printf("[PixelRaster] 结果段容量不够：need=%zu out_cap=%zu\n", need, out_cap);
+					r.ok = false;
+					break;
+				}
+				// 空像素必须是**全 0**（RGBA8 透明）—— 参照实现靠 resize 的零初始化
+				std::memset(out, 0, need);
+				for (int32_t k = 0; k < n_chunks; ++k) {
+					int32_t cx = r.i32(), cy = r.i32();
+					int64_t occ = r.i64();
+					const uint8_t *mat = r.bytes(64);
+					if (!r.ok) break;
+					// cx * 8 而不是 cx << 3：左移负数在 C++ 里是 UB（虽然实际不会错）
+					int32_t bx = cx * 8 - ox;
+					int32_t by = cy * 8 - oy;
+					uint64_t bits = (uint64_t)occ;
+					while (bits != 0) {
+						int i = __builtin_ctzll(bits);   // 与 PixelBits.first_bit_index 同义
+						bits &= bits - 1;
+						int32_t lx = bx + (i & 7) - rx;
+						int32_t ly = by + (i >> 3) - ry;
+						if (lx < 0 || lx >= w || ly < 0 || ly >= h) continue;
+						uint32_t col;
+						std::memcpy(&col, pal + ((size_t)mat[i] << 2), 4);
+						std::memcpy(out + (((size_t)ly * (size_t)w + (size_t)lx) << 2), &col, 4);
+					}
+				}
+				written = need;
+				break;
+			}
+			default:
+				// 与 RapierPhys 同一条规矩：未知操作码**立刻停**（它的载荷长度未知，
+				// 继续读会把后面的字节当操作码，整条流错位）
+				printf("[PixelRaster] 未知操作码 %d（命令流错位），就此中止\n", (int)op);
+				r.ok = false;
+				break;
+		}
+	}
+}
+
 static GDExtensionObjectPtr create_rapier_instance(void *p_userdata, GDExtensionBool p_notify_postinitialize) {
 	GDExtensionObjectPtr obj = g_construct_object((GDExtensionConstStringNamePtr)g_sn_parent.buf);
 	if (obj == nullptr) return nullptr;
@@ -508,7 +613,26 @@ static void free_rapier_instance(void *p_userdata, GDExtensionClassInstancePtr p
 	if (p_instance != nullptr) delete (RapierInstance *)p_instance;
 }
 
-static void call_rapier_cmd(void *method_userdata, GDExtensionClassInstancePtr p_instance,
+// ---- cmd(in, out_template) 的**公共胶水** ----
+//
+// RapierPhys.cmd 与 PixelRaster.fill_region 只有 dispatch 不同：协议头、
+// 模板拷贝、返回值装填完全一样 —— 所以只写这一份实现。
+// （"同一规则写两处"在本仓库栽过太多次：GDScript 侧改了 C++ 侧没改，接触点差 3.88 个单位。）
+typedef void (*CmdDispatch)(void *ctx, const uint8_t *in, size_t in_n,
+		uint8_t *out, size_t out_cap, size_t &written);
+
+static void rapier_dispatch(void *ctx, const uint8_t *in, size_t in_n,
+		uint8_t *out, size_t out_cap, size_t &written) {
+	run_rapier_cmd((RapierInstance *)ctx, in, in_n, out, out_cap, written);
+}
+
+static void raster_dispatch(void *ctx, const uint8_t *in, size_t in_n,
+		uint8_t *out, size_t out_cap, size_t &written) {
+	(void)ctx;   // 栅格化没有实例状态
+	run_raster_cmd(in, in_n, out, out_cap, written);
+}
+
+static void call_cmd_glue(CmdDispatch fn, void *ctx,
 		const GDExtensionConstVariantPtr *p_args, GDExtensionInt p_argument_count,
 		GDExtensionVariantPtr r_return, GDExtensionCallError *r_error) {
 	if (r_error) r_error->error = GDEXTENSION_CALL_OK;
@@ -534,7 +658,7 @@ static void call_rapier_cmd(void *method_userdata, GDExtensionClassInstancePtr p
 		std::memcpy(&cmd_len, in + 4, 4);
 		if (out_cap < 0) out_cap = 0;
 		if (cmd_len < 0) cmd_len = 0;
-		run_rapier_cmd((RapierInstance *)p_instance, in + 8, (size_t)cmd_len, out + 4, (size_t)out_cap, written);
+		fn(ctx, in + 8, (size_t)cmd_len, out + 4, (size_t)out_cap, written);
 		int32_t w32 = (int32_t)written;
 		std::memcpy(out, &w32, 4);
 	}
@@ -542,6 +666,19 @@ static void call_rapier_cmd(void *method_userdata, GDExtensionClassInstancePtr p
 	g_pba_destructor(out_s.buf);
 	g_pba_destructor(tmpl_s.buf);
 	g_pba_destructor(in_s.buf);
+}
+
+static void call_rapier_cmd(void *method_userdata, GDExtensionClassInstancePtr p_instance,
+		const GDExtensionConstVariantPtr *p_args, GDExtensionInt p_argument_count,
+		GDExtensionVariantPtr r_return, GDExtensionCallError *r_error) {
+	call_cmd_glue(rapier_dispatch, p_instance, p_args, p_argument_count, r_return, r_error);
+}
+
+static void call_raster_fill(void *method_userdata, GDExtensionClassInstancePtr p_instance,
+		const GDExtensionConstVariantPtr *p_args, GDExtensionInt p_argument_count,
+		GDExtensionVariantPtr r_return, GDExtensionCallError *r_error) {
+	(void)p_instance;
+	call_cmd_glue(raster_dispatch, nullptr, p_args, p_argument_count, r_return, r_error);
 }
 
 static void register_rapier_phys() {
@@ -589,6 +726,69 @@ static void register_rapier_phys() {
 	printf("[RapierPhys] 已注册方法 cmd\n");
 }
 
+// ---- PixelRaster 的类与实例 ----
+//
+// ⚠️ 它**不需要 Rapier**：实例只是个占位（GDExtension 要求一个 class instance
+//    指针），所以桥接层没加载时它照样能用 —— 渲染不该被物理扩展拖下水。
+struct RasterInstance { int unused = 0; };
+
+static GDExtensionObjectPtr create_raster_instance(void *p_userdata, GDExtensionBool p_notify_postinitialize) {
+	GDExtensionObjectPtr obj = g_construct_object((GDExtensionConstStringNamePtr)g_sn_parent.buf);
+	if (obj == nullptr) return nullptr;
+	RasterInstance *d = new RasterInstance();
+	g_object_set_instance(obj, (GDExtensionConstStringNamePtr)g_sn_pxr_class.buf, (GDExtensionClassInstancePtr)d);
+	return obj;
+}
+
+static void free_raster_instance(void *p_userdata, GDExtensionClassInstancePtr p_instance) {
+	if (p_instance != nullptr) delete (RasterInstance *)p_instance;
+}
+
+static void register_pixel_raster() {
+	GDExtensionClassCreationInfo6 info = {};
+	info.is_virtual = false;
+	info.is_abstract = false;
+	info.is_exposed = true;
+	info.is_runtime = false;
+	info.create_instance_func = create_raster_instance;
+	info.free_instance_func = free_raster_instance;
+	g_register_class6(g_library, (GDExtensionConstStringNamePtr)g_sn_pxr_class.buf,
+		(GDExtensionConstStringNamePtr)g_sn_parent.buf, &info);
+	printf("[PixelRaster] 类已注册\n");
+
+	GDExtensionClassMethodInfo mi = {};
+	mi.name = (GDExtensionStringNamePtr)g_sn_pxr_fill.buf;
+	mi.call_func = call_raster_fill;
+	mi.ptrcall_func = nullptr;
+	mi.method_flags = GDEXTENSION_METHOD_FLAG_NORMAL;
+	mi.has_return_value = true;
+	static GDExtensionPropertyInfo ret_info = {};
+	ret_info.type = GDEXTENSION_VARIANT_TYPE_PACKED_BYTE_ARRAY;
+	ret_info.name = (GDExtensionStringNamePtr)g_sn_pxr_ret.buf;
+	ret_info.class_name = (GDExtensionStringNamePtr)g_sn_empty_class.buf;
+	ret_info.hint_string = (GDExtensionStringPtr)g_str_empty_hint;
+	mi.return_value_info = &ret_info;
+	mi.return_value_metadata = GDEXTENSION_METHOD_ARGUMENT_METADATA_NONE;
+	static GDExtensionPropertyInfo args[2] = {};
+	args[0].type = GDEXTENSION_VARIANT_TYPE_PACKED_BYTE_ARRAY;
+	args[0].name = (GDExtensionStringNamePtr)g_sn_pxr_a0.buf;
+	args[1].type = GDEXTENSION_VARIANT_TYPE_PACKED_BYTE_ARRAY;
+	args[1].name = (GDExtensionStringNamePtr)g_sn_pxr_a1.buf;
+	for (int i = 0; i < 2; ++i) {
+		args[i].class_name = (GDExtensionStringNamePtr)g_sn_empty_class.buf;
+		args[i].hint_string = (GDExtensionStringPtr)g_str_empty_hint;
+	}
+	static GDExtensionClassMethodArgumentMetadata meta[2] = {
+		GDEXTENSION_METHOD_ARGUMENT_METADATA_NONE, GDEXTENSION_METHOD_ARGUMENT_METADATA_NONE };
+	mi.argument_count = 2;
+	mi.arguments_info = args;
+	mi.arguments_metadata = meta;
+	mi.default_argument_count = 0;
+	mi.default_arguments = nullptr;
+	g_register_method(g_library, (GDExtensionConstStringNamePtr)g_sn_pxr_class.buf, &mi);
+	printf("[PixelRaster] 已注册方法 fill_region\n");
+}
+
 
 static void initialize(void *p_userdata, GDExtensionInitializationLevel p_level) {
 	if (p_level != GDEXTENSION_INITIALIZATION_SCENE) return;
@@ -597,8 +797,11 @@ static void initialize(void *p_userdata, GDExtensionInitializationLevel p_level)
 	info.is_abstract = false;
 	info.is_exposed = true;
 	info.is_runtime = false;
-	// RapierPhys 自己注册类与实例 —— 见 register_rapier_phys。
+	// 两个类各自注册自己的类与实例（都继承 RefCounted）：
+	//   RapierPhys  —— 物理
+	//   PixelRaster —— 渲染栅格化（不依赖 Rapier）
 	register_rapier_phys();
+	register_pixel_raster();
 }
 
 static void deinitialize(void *p_userdata, GDExtensionInitializationLevel p_level) {
@@ -637,6 +840,11 @@ extern "C" __declspec(dllexport) GDExtensionBool gdextension_init(
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_rp_a0.buf, "input");
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_rp_a1.buf, "out_template");
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_rp_ret.buf, "result");
+	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_pxr_class.buf, "PixelRaster");
+	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_pxr_fill.buf, "fill_region");
+	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_pxr_a0.buf, "input");
+	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_pxr_a1.buf, "out_template");
+	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_pxr_ret.buf, "result");
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_empty_class.buf, "");
 	g_str_new((GDExtensionUninitializedStringPtr)g_str_empty_hint, "");
 	// PackedByteArray 的构造索引 1 = 拷贝构造

@@ -60,6 +60,13 @@ var _rev_offset := {}
 var last_debug := ""
 var last_tiles_rebuilt := 0
 var last_tiles_total := 0
+## 原生栅格化真的走了几次 / 退回 GDScript 几次（诊断用）。
+##
+## ⚠️ 加它的理由与 last_tiles_rebuilt 同一个：没有它，"原生路径生效了吗"只能靠
+##    读代码推断 —— 而**退回分支看起来和成功一样**（两条路的结果本来就该逐位相同，
+##    所以任何"结果对不对"的判据都抓不到它）。
+var native_calls := 0
+var native_fallbacks := 0
 ## body.id -> Image（**持久**，供分块增量重绘）。
 ## 以前每次重建都是新建一张 Image，所以"只重画脏块"无处落脚。
 var _images := {}
@@ -212,11 +219,15 @@ func sync(body) -> void:
 	var size_changed: bool = _bounds.get(body.id, Rect2i()) != aabb
 	var content_changed: bool = _rev.get(body.id, -1) != rev
 	var dirty := Rect2i()
-	if content_changed and not size_changed:
+	# ⚠️ 尺寸变了**也要取走脏信息**。以前这里是 content_changed and not size_changed
+	#    —— 那时"尺寸变了就全量重建"，脏信息没用了。现在不再全量：
+	#    切开一个大物体时 AABB 会变（768x100 -> 382x100），而像素其实只差切口
+	#    那一条 —— 实测母体重建 12/12 块要 24 ms，其中 20 块**区域和像素都没变**
+	#    （tests/diag_bigfrag_hitch.gd）。
+	if content_changed:
 		dirty = _take_dirty_rect(body, aabb)
 	if size_changed:
 		_bounds[body.id] = aabb
-		_clear_all_dirty(body)
 	if content_changed or size_changed:
 		_rev[body.id] = rev
 	var tiles: Dictionary = _tiles.get(body.id, {})
@@ -251,7 +262,13 @@ func sync(body) -> void:
 		var off2 := s2.revision - s2.range_revision
 		if off2 > 0 and (not prev_off.has(s2) or prev_off[s2] != off2):
 			untracked = true
-	var rebuild_all: bool = size_changed or tiles.is_empty() or untracked 			or (content_changed and dirty.size.x <= 0)
+	# ⚠️ 判据：**只有"内容变了、但没有可用的脏信息"才允许全量重建**。
+	#    size_changed 以前是"一律全量"的理由，那是错的（见上面 dirty 的说明）。
+	# ⚠️ 安全网一个字没动：size_changed 而**内容没变**（revision 没动）说明有人
+	#    直接改了 chunk 却没标脏（pitfalls.md 里那条），那种情况仍然全量。
+	var rebuild_all: bool = tiles.is_empty() or untracked \
+			or (content_changed and dirty.size.x <= 0) \
+			or (size_changed and not content_changed)
 	var revinfo := ""
 	for s3: PixelShape in body.shapes:
 		revinfo += " rev=%d/%d" % [s3.revision, s3.range_revision]
@@ -288,7 +305,12 @@ func sync(body) -> void:
 				var tr := Rect2i(rx - aabb.position.x, ry - aabb.position.y, rx2 - rx, ry2 - ry)
 				# ⚠️ Rect2i.intersects() 只有一个参数（include_borders 是 Rect2 的）——
 				#    传两个会编译失败，而且报错指向"依赖它的脚本"，不指向这里。
-				if not rebuild_all and not dirty.intersects(tr):
+				# ⚠️ 跳过本块的判据必须含 **region_changed**：块的区域（局部原点+尺寸）
+				#    一变，旧图的内容映射就错了 —— 哪怕脏矩形没碰到它也得重画。
+				#    AABB 缩小（大物体被切开）正好是这种情况：边界那几块的宽度变了。
+				var region_changed := _tile_region_changed(
+					tiles.get(key), tis.get(key), tts.get(key), Vector2(rx, ry), tr.size)
+				if not rebuild_all and not region_changed and not dirty.intersects(tr):
 					continue
 				last_tiles_rebuilt += 1
 				var sp: Sprite2D = tiles.get(key)
@@ -300,8 +322,7 @@ func sync(body) -> void:
 					tiles[key] = sp
 				var cur: Image = tis.get(key)
 				var tex: ImageTexture = tts.get(key)
-				var need_full: bool = rebuild_all or cur == null or tex == null \
-						or tex.get_width() != tr.size.x or tex.get_height() != tr.size.y
+				var need_full: bool = rebuild_all or region_changed
 				if need_full:
 					cur = _build_region_image(body.shapes, aabb, tr)
 					tis[key] = cur
@@ -436,7 +457,161 @@ func _build_texture(body, aabb: Rect2i):
 ## ⚠️ 存在的理由：擦除地面时重建**整个** 768x100 贴图要 ~44 ms，
 ##    而伤害其实只碰到 2.4% 的块（mark_dirty_range 标的）。
 ##    有了这个小图就能 blit 进持久 Image，只上传脏的那一块的像素。
+## ---- 原生栅格化（GDExtension 的 PixelRaster）----
+##
+## ⚠️ 为什么值得：逐像素在 GDScript 里填 RGBA8 是**实测 0.65 us/像素**
+##    （就是下面那个 _build_region_image_gd）—— 一块 64x64 要 2.5 ms，
+##    768x100 的地面首次建图 **50 ms**。而"大物体被切开"那一帧里，渲染重建
+##    比破坏本身还贵（实测 53 ms vs 23.7 ms，见 tests/diag_bigfrag_hitch.gd）。
+##
+## ⚠️ GDScript 那条路**必须留着**：它是参照实现，逐位对拍靠它
+##    （tests/validation_raster_native.gd）；shading 打开时也只能走它。
+var _raster: Object = null
+var _raster_checked := false
+## 256 项 RGBA 表（u32，小端 = r,g,b,255）—— 交给原生直接拷贝。
+##
+## ⚠️ 三条规则（int(c*255) 截断 / alpha 强制 255 / 材质 id 越界 clamp 到最后一格）
+##    只在这里写一次；原生只做拷贝，浮点语义**不复制第二份**。
+var _palette_table := PackedByteArray()
+## 自校验指纹：这张表是**按这份 palette** 建的。
+##
+## ⚠️ 用 Array 深比较（原生实现）而不是"改了调色板就置脏"的标志位：
+##    后者要求每个改动路径都记得置脏，而 palette 是**公开数组** ——
+##    用户既可以直接替换整个数组，也可以就地改某一格。
+##    深比较把两条路都盖住了，代价是每次重建一次原生比较（微秒级）。
+##    （本仓库在"标志位漏置"上栽过太多次，所以宁可每次比。）
+var _palette_src: Array = []
+
+
+## 懒加载原生栅格化器。返回 null 表示扩展不可用（调用方退回 GDScript）。
+func _ensure_raster() -> Object:
+	if not _raster_checked:
+		_raster_checked = true
+		if ClassDB.class_exists("PixelRaster"):
+			_raster = ClassDB.instantiate("PixelRaster")
+			# ⚠️ 与 RapierPhys 同一个 Godot 已知问题（issue #111075）：
+			#    GDExtension 实例化出来的 RefCounted 引用计数是 2，多出来的那份
+			#    没人还 -> 退出时报实例泄漏。判 > 1 再 unreference
+			#    （计数为 1 时调它会真的把对象释放掉）。
+			if _raster != null and _raster.get_reference_count() > 1:
+				_raster.unreference()
+		if _raster == null:
+			# ⚠️ 这里只警告、不回退到 assert：渲染**有**一条正确的慢路径，
+			#    和物理（缺扩展就没法跑）不同 —— 少画/画错才是不可接受的。
+			push_warning("PixelRaster 扩展不可用 —— 渲染退回 GDScript 逐像素路径（慢 ~50 倍）。" +
+				"跑 python tools/build_native.py 重编 fastphys.dll。")
+	return _raster
+
+
+func _palette_table_bytes() -> PackedByteArray:
+	var n := palette.size()
+	if n <= 0:
+		return PackedByteArray()
+	if _palette_src == palette and _palette_table.size() == 1024:
+		return _palette_table
+	_palette_src = palette.duplicate()
+	var t := PackedByteArray()
+	t.resize(1024)
+	for i in 256:
+		# 越界材质 id 夹到最后一格 —— 与参照实现同一条规则
+		var mi: int = i if i <= n - 1 else n - 1
+		var col: Color = palette[mi]
+		t.encode_u32(i << 2,
+			(int(col.r * 255.0)) | (int(col.g * 255.0) << 8)
+			| (int(col.b * 255.0) << 16) | (255 << 24))
+	_palette_table = t
+	return t
+
+
+## 走原生填一块区域。协议见 gdext/fastphys.cpp 的 PixelRaster 一节。
+##
+## ⚠️ 失败时**吵闹地**退回 GDScript 参照实现，而不是"能画多少画多少" ——
+##    静默画错比慢得多难查（本仓库的规矩）。
+func _build_region_image_native(shapes: Array, aabb: Rect2i, region: Rect2i) -> Image:
+	native_calls += 1
+	var w: int = region.size.x
+	var h: int = region.size.y
+	var ox: int = aabb.position.x
+	var oy: int = aabb.position.y
+	var rx: int = region.position.x
+	var ry: int = region.position.y
+	# 与参照实现**同一个块范围**（都按 8 像素的块网格推）
+	var kx0 := (rx + ox) >> 3
+	var ky0 := (ry + oy) >> 3
+	var kx1 := (rx + ox + w - 1) >> 3
+	var ky1 := (ry + oy + h - 1) >> 3
+	# ① 收集本区域覆盖到的块（只传非空块；区域外的块由原生按同一判据跳过）
+	var hits: Array = []
+	for s: PixelShape in shapes:
+		for cy in range(ky0, ky1 + 1):
+			for cx in range(kx0, kx1 + 1):
+				var c: PixelChunk = s.chunks.get(PixelShape.make_key(cx, cy))
+				if c != null:
+					hits.append(cx)
+					hits.append(cy)
+					hits.append(c)
+	var n := hits.size() / 3
+	var need := w * h * 4
+	# ② 头 + 调色板表（append_array 一次搬 1024 字节）
+	var cmds := PackedByteArray()
+	cmds.resize(1 + 4 * 6 + 4)
+	cmds.encode_u8(0, 1)                 # op 1 = fill_region
+	cmds.encode_s32(1, w)
+	cmds.encode_s32(5, h)
+	cmds.encode_s32(9, rx)
+	cmds.encode_s32(13, ry)
+	cmds.encode_s32(17, ox)
+	cmds.encode_s32(21, oy)
+	cmds.encode_s32(25, n)
+	cmds.append_array(_palette_table_bytes())
+	# ③ 每条块记录：cx, cy, occ(int64), mat(64 字节)
+	#    ⚠️ mat 只能用 append_array 搬（64 次 encode_u8 会把收益吃光）；
+	#       所以记录是**顺序**写出来的：头 16 字节 resize + encode，mat 整体追加。
+	for i in n:
+		var c2: PixelChunk = hits[i * 3 + 2]
+		var off := cmds.size()
+		cmds.resize(off + 16)
+		cmds.encode_s32(off, hits[i * 3])
+		cmds.encode_s32(off + 4, hits[i * 3 + 1])
+		cmds.encode_s64(off + 8, c2.occ)
+		cmds.append_array(c2.mat)
+	var inp := PackedByteArray()
+	inp.resize(8)
+	inp.encode_s32(0, need)
+	inp.encode_s32(4, cmds.size())
+	inp.append_array(cmds)
+	var tmpl := PackedByteArray()
+	tmpl.resize(4 + need)
+	var res: PackedByteArray = _raster.fill_region(inp, tmpl)
+	if res.size() < 4 + need or res.decode_s32(0) != need:
+		native_fallbacks += 1
+		push_error("PixelRaster.fill_region 返回长度不对（res=%d 期望=%d）—— 退回 GDScript 参照实现" % [
+			res.size(), 4 + need])
+		return _build_region_image_gd(shapes, aabb, region)
+	return Image.create_from_data(w, h, false, Image.FORMAT_RGBA8, res.slice(4, 4 + need))
+
+
+## 只把 region（相对 aabb 的像素矩形）那一块画成一张小 Image。
+##
+## 有原生栅格化器就走原生（0.65 us/像素 -> ~0.01 us/像素），否则走 GDScript
+## 参照实现。两条路**必须逐位一致** —— 闸门 tests/validation_raster_native.gd。
 func _build_region_image(shapes: Array, aabb: Rect2i, region: Rect2i) -> Image:
+	# ⚠️ 四条前置条件缺一不可：
+	#   · shading 打开时只能走 GDScript（逐像素着色是 GDScript 的规则）
+	#   · palette 为空时参照实现自己就会报错，原生表也无从建起
+	#   · 区域必须非空
+	#   · 扩展在不在
+	if not shading and palette.size() > 0 and region.size.x > 0 and region.size.y > 0 \
+			and _ensure_raster() != null:
+		return _build_region_image_native(shapes, aabb, region)
+	return _build_region_image_gd(shapes, aabb, region)
+
+
+## **参照实现**：逐像素在 GDScript 里填 RGBA8。
+##
+## ⚠️ 原生化之后它仍然是真源之一：原生那条路的每一条规则（块范围推导、
+##    越界跳过、调色板 clamp、alpha 强制 255）都以它为准，逐位对拍。
+func _build_region_image_gd(shapes: Array, aabb: Rect2i, region: Rect2i) -> Image:
 	var w: int = region.size.x
 	var h: int = region.size.y
 	var data := PackedByteArray()
@@ -498,11 +673,16 @@ func tile_image_at(body_id: int, local_x: int, local_y: int) -> Image:
 	return (_tile_img.get(body_id, {}) as Dictionary).get(key)
 
 
-## 全量重建之后把脏集合清掉 —— 那些块已经画过了。
-func _clear_all_dirty(body) -> void:
-	for s: PixelShape in body.shapes:
-		if s.has_dirty():
-			s.clear_dirty()
+## 这一块的**区域**（在局部像素里的原点 + 尺寸）变了吗？
+##
+## ⚠️ 区域一变，缓存下来的那张图的内容映射就错了 —— 必须重画，
+##    哪怕脏矩形根本没碰到它。AABB 缩小（大物体被切开）正是这种情况：
+##    边界那几块的宽度变了，而它们的像素其实一个都没动。
+static func _tile_region_changed(sp: Sprite2D, cur: Image, tex: ImageTexture,
+		origin: Vector2, size: Vector2i) -> bool:
+	if sp == null or cur == null or tex == null:
+		return true
+	return sp.offset != origin or tex.get_width() != size.x or tex.get_height() != size.y
 
 
 ## 取走各形状的脏块，合并成一个**相对 aabb 的像素矩形**，并清空脏集合。
@@ -529,13 +709,14 @@ func _take_dirty_rect(body, aabb: Rect2i) -> Rect2i:
 		s.clear_dirty()
 	if not any or hi_x <= lo_x or hi_y <= lo_y:
 		return Rect2i()
-	# 夹进 aabb（脏块可能落在外面，比如形状被裁过）
-	lo_x = maxi(lo_x, 0)
-	lo_y = maxi(lo_y, 0)
-	hi_x = mini(hi_x, aabb.size.x)
-	hi_y = mini(hi_y, aabb.size.y)
-	if hi_x <= lo_x or hi_y <= lo_y:
-		return Rect2i()
+	# ⚠️⚠️ **不要**把它夹进 aabb。曾经夹过（理由是"脏块可能落在外面"），
+	#    症状：大物体被切开时切口整条都落在母体**新** AABB 之外 ——
+	#    夹完 hi_x <= lo_x -> 返回空矩形 -> 调用方读成"没有块级信息"
+	#    -> 保守全量重建 12/12 块（实测 24 ms，而母体一个像素都没变）。
+	#    现在返回**未夹的**矩形：越界部分命中不了任何块（块都在 aabb 内），
+	#    而"到底有没有脏信息"这个信号保住了。
+	#    真正需要裁剪的是逐块 patch 那一步，那里用 dirty.intersection(tr) 裁，
+	#    tr 本身就在 aabb 内 —— 所以这里不夹是安全的。
 	return Rect2i(lo_x, lo_y, hi_x - lo_x, hi_y - lo_y)
 
 

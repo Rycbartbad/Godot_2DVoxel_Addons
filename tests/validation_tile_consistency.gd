@@ -38,7 +38,10 @@ func _check_tiles(label: String) -> void:
 		if rx2 <= rx or ry2 <= ry:
 			continue
 		var tr := Rect2i(rx - aabb.position.x, ry - aabb.position.y, rx2 - rx, ry2 - ry)
-		var want: Image = r._build_region_image(_ground.shapes, aabb, tr)
+		# ⚠️ 这里必须用**参照实现**（_gd），不能用分发入口：
+		#    入口现在会走原生，而原生与参照实现本来就是同一条规则的两种写法 ——
+		#    拿它当基准等于自己跟自己比（同义反复）。
+		var want: Image = r._build_region_image_gd(_ground.shapes, aabb, tr)
 		var got: Image = tis[key]
 		checked += 1
 		if got.get_width() != want.get_width() or got.get_height() != want.get_height():

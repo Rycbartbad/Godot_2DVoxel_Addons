@@ -21,8 +21,10 @@
 GDScript 那份自研求解器**已全部删除**，只剩 native 一条路 ——
 所以**不再需要 `use_xxx` 这类开关**。
 
-原生层只暴露**一个方法**：`RapierPhys.cmd(in, out_template) -> PackedByteArray`，
-走命令流协议（`in = [i32 out_cap][i32 cmd_len][ops...]`）。
+原生层有两个类、各自一条命令流（同一个头协议）：
+`RapierPhys.cmd(in, out_template)` 管物理；`PixelRaster.fill_region(in, out_template)`
+管"形状 -> RGBA8 图"的栅格化（**不依赖 Rapier**，缺桥接也能用）。
+协议：`in = [i32 out_cap][i32 cmd_len][ops...]`。
 操作码 0..23 是刚体/世界，**24..31 是关节**，32..39 是分组/材质/接触导出，
   **40..41 是关节求解精度**（软度 / 世界级求解参数）—— 完整表见 `gdext/fastphys.cpp` 顶部注释。
 

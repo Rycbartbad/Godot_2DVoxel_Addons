@@ -823,7 +823,7 @@ tests/bench_collide.gd                  窄相 A/B（一次多余的 SAT 值多�
 tests/dump_state.gd                     刚体状态 dump —— 物理改动的**逐位等价性判据**
 tests/bench_datalayout.gd               数据布局：对象属性 vs packed 数组（串行成本 + 并发膨胀）
 tests/dump_batch_bin.gd                 把 SoA 批次导出成二进制（给 C++ 侧读同一份数据）
-gdext/fastphys.cpp                      GDExtension 入口（手写 C API）：只注册 RapierPhys 一个类
+gdext/fastphys.cpp                      GDExtension 入口（手写 C API）：注册 RapierPhys（物理）+ PixelRaster（渲染栅格化）两个类
 gdext/rapier_bridge/                    Rust + Rapier 桥接层（纯 C ABI，自包含，由前者运行时 LoadLibrary）
 gdext/rapier_bridge/src/lib.rs          19 个 rb_* 导出：世界 / 刚体 / 碰撞体 / 接触
 tests/diag_rapier.gd                    桥接层直连样例（含命令流编码器）

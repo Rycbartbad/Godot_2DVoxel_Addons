@@ -143,6 +143,21 @@ px.cull_freeze(r, [player_body])       # 第二个参数 = 必须保持计算的
 ⚠️ `cull_outside()` 是**移除**（刚体没了，回来也回不来）—— 那是给"再也不需要的碎片"用的；
 要可逆就用 `cull_freeze()`。
 
+### 渲染：逐像素填图已经在原生里（`PixelRaster`）
+
+`PixelRenderer` 建贴图那一步（形状 -> RGBA8）现在走原生：**0.028 us/像素**
+（GDScript 参照实现是 0.654 us/像素，**23 倍**）。768x100 一整张：**50.3 ms -> 2.1 ms**。
+
+- 大物体被切开的那一帧，渲染重建以前比破坏本身还贵（**53 ms vs 23.7 ms**）——
+  现在分别是 **3.8 ms** 与 22.7 ms。测法：`tests/diag_bigfrag_hitch.gd`。
+- 走不到原生的两种情况：`shading = true`（逐像素着色是 GDScript 的规则）、
+  扩展没加载（`push_warning` + 退回 GDScript）。两条路**逐字节一致**，
+  闸门 `tests/validation_raster_native.gd`（374 组比对）。
+- 自己写渲染层时同理：**别在 GDScript 里逐像素填图**，用
+  `PixelRenderer._build_region_image(shapes, aabb, region)`（它就是分发入口）。
+- AABB 变化不再等于"整张重建"：只有**区域变了**或**脏矩形命中**的块才重画
+  （实测右边界整条切掉 768 -> 763：24/24 块 -> **2/24**）。
+
 ### GPU：只对体素有用，对刚体没用
 
 | 该上 GPU 的 | 不该上 GPU 的 |
@@ -199,6 +214,7 @@ godot --headless --path . --script res://tests/profile_stages.gd
 | 扫掠 AABB 搬进 C++ | ~0.27 ms（6%） | 低 |
 | 编码换 packed 数值数组 | ~0.28 ms（6%） | 低 |
 | update_aabb 搬进 C++ | ~0.49 ms（11%） | 中 |
+| **破坏管线原生化**（连通分量 / 组装 / 质量属性） | 768x100 一刀 **22.7 -> ~12 ms** | **高**：第一步是定**数据布局**（扁平化 shape），会改消费方 API —— 见 development_log 表 ⑥ |
 
 > **排序为什么不能直接搬**：现在用 `sort_custom`（不稳定排序），并列元素的次序取决于
 > Godot 内部实现 —— 换个引擎版本就可能变。要搬进 C++ 必须先把排序键做成全序

@@ -49,7 +49,11 @@ func _initialize() -> void:
 	t0 = Time.get_ticks_usec()
 	for i in 20:
 		r._build_region_image(ground.shapes, aabb, tr)
-	print("  _build_region_image 64x64  %7.3f ms" % ((Time.get_ticks_usec() - t0) / 20.0 / 1000.0))
+	print("  _build_region_image 64x64  %7.3f ms  <- 分发入口（现在是原生）" % ((Time.get_ticks_usec() - t0) / 20.0 / 1000.0))
+	t0 = Time.get_ticks_usec()
+	for i in 20:
+		r._build_region_image_gd(ground.shapes, aabb, tr)
+	print("  同上（GDScript 参照实现）   %7.3f ms  <- 0.65 us/像素，只在缺扩展/shading 时走" % ((Time.get_ticks_usec() - t0) / 20.0 / 1000.0))
 	Editor.erase(pw.world, Vector2(300.0, 270.0), Vector2(300.0, 271.0), 6.0, 25.0)
 	t0 = Time.get_ticks_usec()
 	var dr = r._take_dirty_rect(ground, aabb)

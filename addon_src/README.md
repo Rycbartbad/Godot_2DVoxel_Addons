@@ -334,6 +334,11 @@ Destruction.split(shape, min_pixels) -> Array        # 按连通性切块
 `sync(body)` 同步一个 Body 的贴图；`prune(live_dict)` 回收已消失的；
 `palette` 是材质 id -> Color。基于 Sprite2D + ImageTexture，每个 Body 一张图。
 
+⚠️ 建贴图那一步（形状 -> RGBA8）走**原生**（`PixelRaster.fill_region`，
+**0.028 us/像素**；GDScript 参照实现是 0.654 us/像素）。`shading = true`
+或扩展缺失时退回 GDScript —— 两条路**逐字节一致**，闸门是
+`tests/validation_raster_native.gd`。
+
 ---
 
 ## 原生加速（可选）
@@ -351,6 +356,9 @@ g++ -O2 -std=c++17 -ffp-contract=off -shared -static-libgcc -static-libstdc++ \
 
 ⚠️ **`-ffp-contract=off` 不能省** —— 少了它编译器会把浮点乘加融合成 FMA，
 与 GDScript 路径立刻分叉（见 [docs/PRECISION.md](docs/PRECISION.md)）。
+
+这个 DLL 里有两个类：`RapierPhys`（物理）与 `PixelRaster`（渲染栅格化）。
+后者**不依赖 Rapier 桥接**，所以 `rapier_bridge.dll` 没加载时它照样能用。
 
 启用：Godot **不会**自动扫描 `.gdextension`，必须在项目的
 `.godot/extension_list.cfg` 里列出它的路径（一行一个，例如

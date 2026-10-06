@@ -4505,3 +4505,149 @@ ensure_connected）都是"用分片替换母形状"，所以整块拷贝可以**
 碎片预算跳过冻着的、子步估计（含关节感知那条）跳过冻着的 —— 否则"冻住"会被别的机制
 悄悄拆掉（前两个会让它**消失**，第三个会让它继续顶帧时间）。
 
+---
+
+# 渲染栅格化原生化（新类 `PixelRaster`）+ 两条"别白重建"的收紧
+
+甲方原话：**"逐像素填图搬进原生"**、**"①②一起做"**（① = AABB 变了别丢贴图、
+② = 切分时把旧贴图过继给碎片）。
+
+## 起因：卡顿的大头在**渲染**，不在破坏（这是本轮最重要的发现）
+
+新加的常驻探针 `tests/diag_bigfrag_hitch.gd`。demo 那块 768x100 静态底板
+（`scenes/demo.tscn`）被一刀切两半的那一帧：
+
+| 段 | 改前 | 改后 |
+|---|---|---|
+| `fracture`（best-of-5，headless CPU 路径） | 23.7 ms | 22.7 ms（**没动**）|
+| 母体 sync | 24.3 ms（重建 12/12 块）| **1.9 ms** |
+| 碎片首次 sync | 28.7 ms（重建 12/12 块）| **1.9 ms** |
+| **合计** | **≈ 77 ms** | **≈ 26.5 ms** |
+
+⚠️ **这条账以前没人量过** —— 现有两个探针各有盲区：`diag_split_profile.gd` 只量纯破坏
+（不接渲染器），`profile_sync.gd` 只量**擦除的增量路径**（0.36 ms/笔，看起来一切正常）。
+而玩家看到的卡顿是"破坏 + **首次渲染新碎片**"这一帧，两半加起来才是账。
+前几轮优化全花在较小的那一半（23.7 ms）上，更大的那一半（53 ms）没人看。
+
+渲染那半的分解（768x100 = 76800 像素 / 24 块）：
+
+| 项 | 改前 | 改后 |
+|---|---|---|
+| `_build_region_image` 逐像素填 RGBA8 | **50.3 ms（0.654 us/像素）** | 2.1 ms（**0.028 us/像素**）|
+| `ImageTexture.create_from_image` | 0.081 ms | 0.038 ms |
+| `Sprite2D.new + add_child` | 0.142 ms | 0.072 ms |
+
+也就是说：**渲染那 53 ms 里 100% 是 GDScript 的逐像素循环**，贴图上传与建节点都是噪声。
+
+## ③ 新类 `PixelRaster`：形状 -> RGBA8 图（gdext/fastphys.cpp）
+
+命令流（与 `RapierPhys.cmd` 同一个 8 字节头协议，但**是独立的一条流**）：
+
+```
+1  fill_region(i32 w, h, i32 rx, ry, i32 ox, oy, i32 n_chunks,
+              u32 palette[256], { i32 cx, cy, i64 occ, u8 mat[64] } * n_chunks)
+     -> w*h*4 字节 RGBA8（先清零），written = w*h*4
+```
+
+三个决定，都是"少留一份真源"：
+
+1. **单独一个类，不挂在 `RapierPhys` 上** —— 这是渲染的事，与物理无关。挂上去会让
+   "Rapier 桥接没加载"顺手把渲染也拖下水；而且两套命令流混在一起，"下一个空 op 号
+   是多少"会变成两个模块的共享状态（本轮就撞上了：远端刚把 op 42 用掉）。
+2. **调色板表（256 项 u32）由 GDScript 侧算好传进来**，原生只做 `memcpy`。
+   三条规则（`int(c*255)` 截断 / alpha 强制 255 / 材质 id 越界 clamp 到最后一格）
+   因此**只写在一处**；原生侧不复制浮点语义。
+3. **GDScript 参照实现原样留着**（`_build_region_image_gd`），`_build_region_image`
+   变成分发入口。shading 打开时只能走 GDScript（逐像素着色是 GDScript 的规则）；
+   扩展缺失时也退回它（渲染有正确的慢路径，和物理"缺扩展就没法跑"不同）。
+
+### 闸门：`tests/validation_raster_native.gd`（378 项 / **374 组逐字节比对**）
+
+判据两条，缺一不可：
+
+- 两条路的 `Image.get_data()` **逐字节相等**（随机形状 60 组 × 6 种区域：整块 / 64 瓦片 /
+  跨块边界 / 右下半 / 部分越界 / 完全在外；含负原点与非 8 倍数原点、越界材质 id、
+  1/2/300 项调色板、半透明 alpha、就地改调色板）；
+- **原生那条真的被走了**（`native_calls` / `native_fallbacks` 计数器）。
+  ⚠️ 没有第二条，闸门会静默变成同义反复：退回分支的**结果当然和参照实现一样**，
+  "结果对不对"这类判据永远抓不到它。加计数器的理由与 `last_tiles_rebuilt` 同一个。
+
+## ① AABB 变了别丢贴图（三处改动，含一个真 bug）
+
+`sync()` 原来把 `size_changed` 当成"一律全量重建"的理由，于是**大物体被切开时**
+（768x100 -> 382x100）母体 24 块全部从头栅格化 —— 而它一个像素都没变。
+
+1. **尺寸变了也要取走脏信息**：`if content_changed and not size_changed` -> `if content_changed`。
+2. **`rebuild_all` 不再由 `size_changed` 单独触发**，改成
+   `tiles.is_empty() or untracked or (content_changed and dirty 为空) or (size_changed and not content_changed)`。
+   ⚠️ 最后那一项是**没动的安全网**：`size_changed` 而 revision 没动 = 有人直接改了 chunk
+   却没标脏（`pitfalls.md` 那条），那种情况仍然全量。
+3. **块的"区域"（局部原点 + 尺寸）进了跳过判据**（`_tile_region_changed`）：区域一变，
+   缓存图的内容映射就错了，哪怕脏矩形没碰到它也得重画。
+
+### 顺带修掉一个真 bug：`_take_dirty_rect` 把脏矩形夹进 AABB
+
+以前那里有 `hi_x = mini(hi_x, aabb.size.x)` 之类的夹取（理由写的是"脏块可能落在外面"）。
+后果：一刀切两半时**切口整条都落在母体新 AABB 之外** —— 夹完 `hi_x <= lo_x` ->
+返回空矩形 -> 调用方读成"没有块级信息" -> 保守全量重建。
+现在返回**未夹的**矩形：越界部分命中不了任何块（块都在 AABB 内），而"到底有没有脏信息"
+这个信号保住了。真正需要裁剪的是逐块 patch 那一步，那里用 `dirty.intersection(tr)` 裁，
+`tr` 本身就在 AABB 内。
+
+**实测（`diag_bigfrag_hitch.gd` 第 ⑤ 节）**：右边界整条切掉（768 -> 763，形状对象不变）——
+改前 24/24 块全量重建，改后 **2/24**。
+⚠️ 这条探针第一版我写错了：只在右边缘中间咬一口的话，**四角的像素还撑着 max_x**，
+AABB 根本不变（走的是既有的增量路径），测不到 ①。
+
+## ② 碎片贴图过继：**没做**（量完之后判定不值）
+
+它现在能省的账是**碎片那 1.9 ms**（③ 之后冷建图已经便宜了），而不是改前的 28.7 ms。
+而且它**必须**先改脏信息契约才可能生效 —— 这是本轮的第二个发现：
+
+- `Destruction._assemble` 给**每个搬运过的块**都打了 `mark_dirty_key`（"写进了新 shape"，
+  不是"像素和旧图不一样"），于是母体与碎片的脏矩形都 = **整个形状**；
+- 碎片那条路上 `add_body` 传的是空 `dirty_rect` -> `PBody.rebuild` 走 `touch()` ->
+  `untracked = true` -> 无论如何都全量重建。
+
+所以 ② 的前提是：给 `add_body` 加 `dirty_rect` 参数（**公开 API 变更**）+ 改掉 `_assemble`
+的逐块标记（那是上一轮**故意保留**的："给游戏层 `take_dirty_keys` 用的"）。
+收益上界 ≈ 1.9 ms（占改后 26.5 ms 的 7%），代价是一条公开 API + 一个既有契约 ——
+按本仓库"没有实测收益的复杂度不留"的规矩，**留给甲方点头**。
+
+## 剩下的账在哪
+
+改后那一帧 **26.5 ms 里 22.7 ms（86%）是 `fracture`**：split 的逐块解释器开销 +
+质量属性扫描。这与表 ⑥ 的结论完全一致（"只有一路走到原生才拿得到剩下的 ~10 ms"），
+而它卡在**数据布局**那个决定上（扁平化 shape = 架构级重构，要改消费方代码）。
+
+## 闸门与基准
+
+- 全部 `test_*` + `validation_*` + `check_manual_api`：**全绿**（`test_gpu` exit=2 是跳过码）。
+- **8 条逐位基准逐位不变**（重编 DLL 之后核对过）：`stack:6:5 -14.016073139122`、
+  `pile:8:6 -30.229686508`、`frags:240 -214.586038730939`、`mixed -3.464347122832`、
+  `stack:2:3 -2.694825580758`、`pile:4:4 -8.328776872784`、
+  `sleep_box -4.705517743051 (0/12)`、`sleep_frag -35.696264844083 (0/120)`。
+  —— 渲染改动**不可能**动物理，但 DLL 重编过，所以照规矩核对。
+- 新增：`tests/validation_raster_native.gd`（378 项）、`tests/diag_bigfrag_hitch.gd`（探针）。
+
+## 踩到的坑（两条，都是"静默"那一类）
+
+1. **脏矩形被夹空 = 把"有信息"读成"没信息"**（见上，`_take_dirty_rect`）。
+   症状是"该省的全量重建没省"，而**任何"画得对不对"的判据都抓不到它**（全量重建永远是对的）。
+   只有"重建了几块"这个计数能抓到 —— 所以 `last_tiles_rebuilt` 那类计数器值得一直留着。
+2. **模板字符串里的反引号**把我这一轮的补丁脚本弄崩了（无关引擎，但值得记：
+   中文注释里常写 `代码` 形式，脚本里要转义）。
+
+## 改动清单
+
+| 文件 | 改了什么 |
+|---|---|
+| `gdext/fastphys.cpp` | 新类 `PixelRaster` + op 1 `fill_region`；`cmd` 胶水抽成公共实现（两个类只有 dispatch 不同）|
+| `gdext/fastphys.dll` | 重编（`tools/build_native.py` 的同一套 g++ 参数）|
+| `src/render/pixel_renderer.gd` | 原生路径 + 调色板表 + 两个计数器；`_build_region_image_gd` 保留为参照实现；① 的三处改动；`_tile_region_changed`；`_clear_all_dirty` 删除（已无调用方）|
+| `tests/validation_raster_native.gd` | 新增闸门 |
+| `tests/diag_bigfrag_hitch.gd` | 新增探针（破坏 + 首次渲染的端到端账）|
+| `tests/validation_tile_consistency.gd` | 改用 `_build_region_image_gd` 当独立基准（用分发入口会变成自己跟自己比）|
+| `tests/profile_sync.gd` | 两条路都量 |
+
+
