@@ -138,9 +138,9 @@ func _initialize() -> void:
 	var t6t := Time.get_ticks_usec()
 	w6.fracture_pixels(b6, {s6: {Vector2i(400, 20): true}}, 0.0, true)
 	var ms_inner := float(Time.get_ticks_usec() - t6t) / 1000.0
-	_c("内部像素：矩形逐位不变 + 没重推（rects_rev 不动）",
-		b6.rects == rects_before and b6.rects_rev == rev_before,
-		"矩形 %d 个，rects_rev %d -> %d" % [b6.rects.size(), rev_before, b6.rects_rev])
+	_c("内部与外围**行为一致**：都重扫（不做内部特例）",
+		b6.rects_rev != rev_before,
+		"rects_rev %d -> %d" % [rev_before, b6.rects_rev])
 	_c("内部像素：质量属性照旧更新（逐位）", _cmp(b6, _full(w6, s6)))
 
 	# ⑧ **外围**像素：外轮廓变了 -> 必须重扫
@@ -160,7 +160,33 @@ func _initialize() -> void:
 	_c("外围像素：矩形数与全量 decompose 一致", b7.rects.size() == full_rects,
 		"%d vs %d" % [b7.rects.size(), full_rects])
 	print("  [性能] 内部 1 像素 %.3f ms | 外围 1 像素 %.3f ms（含 decompose）" % [ms_inner, ms_edge])
-	_c("内部比外围快（跳过了 decompose）", ms_inner < ms_edge, "%.3f < %.3f ms" % [ms_inner, ms_edge])
+	_c("内部与外围耗时同档（都含 decompose）", absf(ms_inner - ms_edge) < 3.0,
+		"%.3f vs %.3f ms" % [ms_inner, ms_edge])
+
+	# ⑨ **甜甜圈**：删一圈闭合像素 -> 内部那块被断开（产生碎片）。
+	#    外轮廓确实没变，但母体少了那块面积 -> 旧矩形会盖住碎片 -> **必须重扫**。
+	var t8 := _init_world()
+	var w8: PWorld = t8[0]
+	var b8: PBody = t8[1]
+	var s8: PixelShape = t8[2]
+	var rev8: int = b8.rects_rev
+	var ring := {}
+	for i in range(10, 15):
+		ring[Vector2i(i, 10)] = true
+		ring[Vector2i(i, 14)] = true
+		ring[Vector2i(10, i)] = true
+		ring[Vector2i(14, i)] = true
+	var res8: Dictionary = w8.fracture_pixels(b8, {s8: ring}, 0.0, true)
+	var frags8: Array = res8.get("fragments", [])
+	_c("甜甜圈：确实断出了碎片", frags8.size() >= 1, "碎片 %d 个" % frags8.size())
+	_c("甜甜圈：矩形必须重扫（否则母体矩形盖住碎片）", b8.rects_rev != rev8,
+		"rects_rev %d -> %d" % [rev8, b8.rects_rev])
+	# ⚠️ 必须拿**母体当前的 shape** 去全量重算 —— split(adopt=true) 会把块搬到新 shape 上，
+	#    原来的 s8 已经不是母体的形状了（第一版闸门就是这么写错的，报了假 FAIL）。
+	var full8: MassProps.Props = MassProps.compute(b8.shapes[0], w8.density_callable(),
+		w8.friction_callable(), w8.restitution_callable())
+	_c("甜甜圈：质量属性仍然逐位正确", _cmp(b8, full8),
+		"mass %.6f（母体当前 shape 像素 %d）" % [b8.mass, b8.shapes[0].pixel_count()])
 
 	print("=== %d passed, %d failed ===" % [_pass, _fail])
 	quit(1 if _fail > 0 else 0)

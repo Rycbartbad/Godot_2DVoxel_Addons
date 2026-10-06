@@ -380,17 +380,10 @@ static func _first_material(shape_list: Array) -> int:
 func rebuild(shape_list: Array, density_of: Callable = Callable(),
 		max_rects: int = 64, dirty_rect: Rect2i = Rect2i(),
 		friction_of: Callable = Callable(), restitution_of: Callable = Callable(),
-		dirty_rects: Dictionary = {}, changed_chunks: Variant = null,
-		keep_rects := false) -> void:
+		dirty_rects: Dictionary = {}, changed_chunks: Variant = null) -> void:
 	# 几何变了 —— Rapier 后端据此决定要不要重建碰撞体（见 _rp_rects_rev）。
 	# 放在 rebuild() 里是**源头修**：破坏 / 擦除 / 绘制 / 分裂全都走这里。
-	#
-	# ⚠️ keep_rects：调用方**声明**"这次改的是内部像素，外轮廓没变" -> 旧矩形仍然是
-	#    **保守且有效**的碰撞代理（碰撞体比像素实一点，1 像素的洞不值得重扫 2 ms）。
-	#    这时**不 bump rects_rev** -> 也就不会把矩形重推给 Rapier（省两次钱）。
-	var keep := keep_rects and not rects.is_empty()
-	if not keep:
-		rects_rev += 1
+	rects_rev += 1
 	shapes = shape_list
 	for s0 in shape_list:
 		if s0 != null:
@@ -418,16 +411,14 @@ func rebuild(shape_list: Array, density_of: Callable = Callable(),
 			s1.mark_dirty_range(dr)           # 已知范围 -> 渲染器可只重建脏块
 		else:
 			s1.touch()                        # 不知道范围 -> 渲染器只能全量
-	if not keep:
-		rects.clear()
+	rects.clear()
 	# 静态体不需要质量属性（逆质量恒为 0，质心也不参与求解）。
 	# 擦地形时每帧都会 rebuild，跳过逐像素扫描是实打实的收益。
 	if is_static:
-		if not keep:
-			for s0 in shape_list:
-				var r0: GreedyRects.Result = GreedyRects.decompose(s0, max_rects)
-				for rect0: Rect2 in r0.rects:
-					rects.append(rect0)
+		for s0 in shape_list:
+			var r0: GreedyRects.Result = GreedyRects.decompose(s0, max_rects)
+			for rect0: Rect2 in r0.rects:
+				rects.append(rect0)
 		mass = 0.0
 		inertia = 0.0
 		inv_mass = 0.0
@@ -478,10 +469,9 @@ func rebuild(shape_list: Array, density_of: Callable = Callable(),
 		var p2: MassProps.Props = props[i]
 		# 平行轴定理：把每块的惯性搬到自己质心之外
 		inertia_c += p2.inertia + p2.mass * p2.com.distance_squared_to(com)
-		if not keep:
-			var r: GreedyRects.Result = GreedyRects.decompose(shape_list[i], max_rects)
-			for rect: Rect2 in r.rects:
-				rects.append(rect)
+		var r: GreedyRects.Result = GreedyRects.decompose(shape_list[i], max_rects)
+		for rect: Rect2 in r.rects:
+			rects.append(rect)
 	mass = m_total
 	inertia = inertia_c
 	# 平均密度 = 质量 / 像素数（材质逐像素不同时取平均值：Rapier 的碰撞体密度是
