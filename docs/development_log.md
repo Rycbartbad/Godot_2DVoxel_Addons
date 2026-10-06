@@ -5072,6 +5072,68 @@ for b in world.bodies:
 (a) **原生重写 decompose**（精确；要重编 DLL + 每块传块数据，与 PixelRaster 同一套做法）；
 (b) **小改动时复用旧矩形**（近似、可开关；代价是"1 像素的洞不会立刻出现在碰撞体上"）。
 
+> **已按 (a) 解决 —— 见下一节。**
+
+---
+
+# fracture_pixels 优化（二）：`decompose` 原生化（`PixelRaster` op 2）
+
+结论先说：**"2.0 ms 是贪心分解"这个归因是错的。**
+
+## 那 2.0 ms 到底是什么
+
+`decompose()` 的第一句是 `shape.local_aabb()`，而它要遍历**全部 chunk**（800x40 = 500 个），
+逐行取最低/最高置位 —— 实测 **1.83 ms**。真正的分块贪心 + 极大行程融合只有 **0.20 ms**。
+两者加起来正好是上一节表里那个 2.00 ms。
+
+⚠️ 所以"只把贪心搬进原生"是**白做**：那 1.8 ms 只会挪到下一个 `local_aabb()` 的调用方
+（`PBody.update_aabb` / 渲染器）。原生 op 2 因此把 **AABB 一起算**（出参），
+并在 GDScript 侧写回 `PixelShape` 的 AABB 缓存。
+
+| 800x40（32000 像素） | GDScript 参照实现 | 原生 |
+|---|---|---|
+| 每笔破坏（AABB 缓存被作废）| **2.031 ms** | **0.111 ms** |
+| 冷路径（块缓存全空）| 2.950 ms | 0.286 ms |
+| 热（什么都没变）| 0.205 ms | 0.107 ms |
+| `fracture_pixels` 端到端（删 1 像素）| 3.39 ms | 1.49 ms |
+
+（各 20 次取最好值；`tests/bench_decompose_native.gd`。**外围**（顶边）那一笔同样是 3.39 -> 1.52。）
+
+## 协议（`gdext/fastphys.cpp` 的 PixelRaster op 2）
+
+```
+2  decompose(i32 n_chunks, i32 max_rects, { i32 cx, i32 cy, i64 occ } * n_chunks)
+   -> i32 count, i32 budget_exceeded, i32 aabb_x/y/w/h, { i32 x, i32 y, i32 w, i32 h } * count
+```
+
+- 块记录与 op 1 同一种（少了 `mat`）；`max_rects` 进协议但不参与几何，只决定
+  `budget_exceeded`（"decompose 永远精确"这条语义不变）。
+- ⚠️ 矩形数是**算完才知道**的，所以结果段约定"放不下就只写头"（头 24 字节一定写得下，
+  `count` 在里面）-> 调用方按 `count` 精确重开一次。不给"能写多少写多少"（那是静默截断）。
+- ⚠️ `w/h` **不是入参**（原计划里写的是入参）：要传就得先在 GDScript 里扫一遍 AABB，
+  而那正是要省掉的那 1.8 ms。
+
+## 逐位判据
+
+`tests/validation_greedy_native.gd`：**435 项断言 / 87 组形状 / 57180 个矩形**，
+每条都比 4 个分量**和下标**（顺序也是判据 —— 矩形顺序会进入 Rapier 的碰撞体顺序）。
+含内部空洞、边缘缺口、整行/整列空、孤立像素、混合占用（最坏情况矩形数）、
+w/h 不是 8 的倍数、负原点、只有空 chunk 的形状；`max_rects` 取 0/1/3/64/100000。
+判据四条：矩形逐位相同 / origin / budget_exceeded / **AABB 写回且逐位相同**，
+外加"**真的走了原生**"（计数）—— 否则"退回 GDScript"会让闸门静默变成同义反复。
+
+⚠️ 闸门当场抓到一个真 bug：**空 AABB（有 chunk 但一个像素都没有）**原样写回了哨兵
+`1 << 30`（参照实现是整个 `Rect2i()`），而它会被写进 `PixelShape` 的 AABB 缓存 ——
+症状正是"形状与碰撞体静默错位"（用户报过两次的那种）。
+
+## 代价 / 取舍
+
+- 原生化之后 GDScript 的块缓存（`_rect_blocks`）不再被这条路喂 —— 它是按块指纹失效的，
+  空着只会让回退路径多算一点，**不会算错**。
+- `decompose_gd()` 原样保留（参照实现，一字不改）。
+- 8 条逐位基准（`tests/dump_state.gd`）**逐位不变**。
+
+
 
 
 

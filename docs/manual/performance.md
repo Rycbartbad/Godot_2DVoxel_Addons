@@ -237,6 +237,29 @@ px.world.max_angular_velocity = 50.0    # rad/s，0 = 不钳；默认 1000（宽
 - AABB 变化不再等于"整张重建"：只有**区域变了**或**脏矩形命中**的块才重画
   （实测右边界整条切掉 768 -> 763：24/24 块 -> **2/24**）。
 
+### 破坏：矩形分解也在原生里（`PixelRaster` op 2）
+
+`GreedyRects.decompose()`（像素团 -> 碰撞矩形集合）现在走原生。800x40（ink-2 地面，32000 像素）：
+
+| | GDScript 参照实现 | 原生 |
+|---|---|---|
+| 每笔破坏（AABB 缓存被作废）| **2.031 ms** | **0.111 ms** |
+| 冷路径（块缓存全空）| 2.950 ms | 0.286 ms |
+| 热（什么都没变）| 0.205 ms | 0.107 ms |
+
+`fracture_pixels` 端到端（删 1 个像素）：**3.39 ms -> 1.49 ms**；外围（顶边）那一笔 3.39 -> 1.52 ms。
+
+- ⚠️⚠️ 那 2.0 ms 里 **1.8 ms 是 `local_aabb()` 的重扫**（500 个 chunk 逐行取最低/最高置位），
+  真正的分块贪心 + 极大行程融合只有 **0.20 ms** —— 所以原生把 **AABB 一起算**（出参）
+  并写回 `PixelShape` 的 AABB 缓存。只搬贪心的话，那 1.8 ms 只会挪到下一个
+  `local_aabb()` 的调用方（`PBody.update_aabb` / 渲染器），总量一点没省。
+- 走不到原生的情况：扩展没加载 / DLL 太旧（没有 `decompose` 方法）。两条路**逐位相同**
+  （同样的矩形、同样的顺序 —— 顺序会进入 Rapier 的碰撞体顺序），闸门
+  `tests/validation_greedy_native.gd`（435 项断言 / 87 组形状）。
+- 测法：`tests/bench_decompose_native.gd`（各 20 次取最好值）。
+- 自己写碰撞代理时同理：别在 GDScript 里逐像素扫 AABB + 贪心，用
+  `GreedyRects.decompose(shape, max_rects)`（它就是分发入口）。
+
 ### GPU：只对体素有用，对刚体没用
 
 | 该上 GPU 的 | 不该上 GPU 的 |

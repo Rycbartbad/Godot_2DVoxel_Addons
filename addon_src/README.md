@@ -360,8 +360,13 @@ g++ -O2 -std=c++17 -ffp-contract=off -shared -static-libgcc -static-libstdc++ \
 ⚠️ **`-ffp-contract=off` 不能省** —— 少了它编译器会把浮点乘加融合成 FMA，
 与 GDScript 路径立刻分叉（见 [docs/PRECISION.md](docs/PRECISION.md)）。
 
-这个 DLL 里有两个类：`RapierPhys`（物理）与 `PixelRaster`（渲染栅格化）。
+这个 DLL 里有两个类：`RapierPhys`（物理）与 `PixelRaster`（栅格化 + 矩形分解）。
 后者**不依赖 Rapier 桥接**，所以 `rapier_bridge.dll` 没加载时它照样能用。
+
+`PixelRaster` 有两个方法（同一个命令流，靠 op 字节分派）：`fill_region`（形状 -> RGBA8，
+渲染用）与 `decompose`（像素团 -> 碰撞矩形集合，破坏用）。两个都有 GDScript 参照实现
+（`shading = true` / 扩展缺失 / DLL 太旧时自动退回），判据是**逐位相同**：
+`tests/validation_raster_native.gd` 与 `tests/validation_greedy_native.gd`。
 
 启用：Godot **不会**自动扫描 `.gdextension`，必须在项目的
 `.godot/extension_list.cfg` 里列出它的路径（一行一个，例如

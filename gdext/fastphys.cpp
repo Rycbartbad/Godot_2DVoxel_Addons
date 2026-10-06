@@ -16,10 +16,12 @@
 //   所以输出走**返回值**：先用拷贝构造函数按模板复制出一个等长数组，再写它。
 
 #include "gdextension_interface.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 // windows.h 只用来做运行时动态加载；宏要收窄，否则 min/max 会污染其它头
 #ifndef WIN32_LEAN_AND_MEAN
@@ -532,13 +534,324 @@ static void run_rapier_cmd(RapierInstance *inst, const uint8_t *in, size_t in_n,
 //                材质 id 越界 clamp 到最后一格）—— 原生只做拷贝，
 //                浮点语义只留一处真源（"同一规则写两处"在本仓库栽过太多次）。
 //
+//   2  decompose(i32 n_chunks, i32 max_rects,
+//                { i32 cx, i32 cy, i64 occ } * n_chunks)
+//        -> i32 count, i32 budget_exceeded,
+//           i32 aabb_x, aabb_y, aabb_w, aabb_h,
+//           { i32 x, i32 y, i32 w, i32 h } * count
+//      written = 24 + count*16；**结果段放不下矩形时只写头**（written = 24，
+//      count 在里面）—— 调用方按 count 精确重开一次。见 run_raster_decompose。
+//      n_chunks / max_rects 在头里（与 op 1 同一种"先头后记录"的排布）。
+//
+//      ⚠️ max_rects **不参与几何**（参照实现里它只决定 budget_exceeded 这个标志位：
+//         "decompose 永远精确，超了要告诉我"）。原生顺手把标志一起算了，
+//         省得同一条阈值规则在两边各写一份。
+//
+//      ⚠️ AABB 是**出参**，不是入参：decompose() 在 GDScript 里第一步就是
+//         local_aabb()，而那一扫才是每笔破坏 2.0 ms 里的大头（500 个 chunk
+//         实测 1.8 ms）。要成入参就得先在 GDScript 里扫一遍 —— 那就白搬了。
+//
 // 每个块的 (occ, mat) 与 PixelChunk 一一对应：occ 的 bit i = 局部像素
 // (i & 7, i >> 3)，mat[i] = 材质 id。区域外的像素直接跳过（与参照实现同判据）。
 
 // PixelRaster 自己的一组 StringName。
 // ⚠️ 不复用 RapierPhys 那几个缓冲区：复用会让两个类的方法名/参数名互相覆盖，
 //    注册出来的签名静默错位（而症状是"调用时参数对不上"）。
-static SN g_sn_pxr_class, g_sn_pxr_fill, g_sn_pxr_a0, g_sn_pxr_a1, g_sn_pxr_ret;
+static SN g_sn_pxr_class, g_sn_pxr_fill, g_sn_pxr_decomp, g_sn_pxr_a0, g_sn_pxr_a1, g_sn_pxr_ret;
+
+// ---- op 2 的几何内核：块内贪心 + 极大行程融合 ----
+//
+// ⚠️⚠️ 这是 src/core/greedy_rects.gd 的**第二份实现**，判据只有一条：
+//    **逐位相同**（同样的矩形、同样的顺序）—— 闸门 tests/validation_greedy_native.gd。
+//    所以每一步都照着参照实现抄，注释里标出对应的函数名。
+//    **顺序不同也是不同**：矩形顺序会原样进入 Rapier 的碰撞体顺序。
+//
+// 为什么值得搬进原生（800x40 实测，见 tests/bench_decompose_native.gd）：
+//    GDScript 冷路径 3.1 ms；每笔破坏的热路径 2.0 ms（其中 local_aabb 重扫
+//    占 1.8 ms，真正的分块 + 融合只占 0.2 ms）-> 原生 ~0.15 ms，两笔一起算掉。
+//
+// ⚠️ 分块锚点在**局部像素坐标的 0/64/128...**，与 AABB 无关（AABB 会随擦到
+//    边界而变，锚在 AABB 上的话每笔边缘擦除都要全量重算）。
+
+struct PxRect { int64_t x, y, w, h; };
+
+// 低 bits 位为 1。bits >= 64 时全 1 —— 参照实现里 1 << 64 是 UB，
+// 它靠 `if take < 64` 的守卫绕开，这里用同一个判据。
+static inline uint64_t px_low_mask(int bits) {
+	return bits >= 64 ? ~0ULL : ((1ULL << bits) - 1ULL);
+}
+
+// GreedyRects._run_right（块内特化：wq == 1，一行正好一个 word）
+static inline int px_run_right(const uint64_t *words, int x, int y) {
+	uint64_t inv = ~words[y] & ~px_low_mask(x);
+	if (inv == 0) return 64 - x;
+	return __builtin_ctzll(inv) - x;
+}
+
+// GreedyRects._run_down
+static inline int px_run_down(const uint64_t *words, int x, int y) {
+	uint64_t bit = 1ULL << x;
+	int rh = 1;
+	while (y + rh < 64 && (words[y + rh] & bit) != 0) ++rh;
+	return rh;
+}
+
+// GreedyRects._extend_down_bits
+static inline int px_extend_down(const uint64_t *words, int x, int y, int rw) {
+	uint64_t m = ~px_low_mask(x) & px_low_mask(x + rw);
+	int rh = 1;
+	while (y + rh < 64 && (words[y + rh] & m) == m) ++rh;
+	return rh;
+}
+
+// GreedyRects._extend_right_bits
+static inline int px_extend_right(const uint64_t *words, int x, int y, int rh) {
+	int best = 64 - x;
+	for (int j = 0; j < rh; ++j) {
+		int r = px_run_right(words, x, y + j);
+		if (r < best) {
+			best = r;
+			if (best <= 0) break;
+		}
+	}
+	return best;
+}
+
+// GreedyRects._clear_rect
+static inline void px_clear_rect(uint64_t *words, int x, int y, int rw, int rh) {
+	uint64_t m = ~px_low_mask(x) & px_low_mask(x + rw);
+	for (int j = 0; j < rh; ++j) words[y + j] &= ~m;
+}
+
+// GreedyRects._greedy（64x64、每行一个 word 的特化版）。
+// ⚠️ words 会被**就地清零** —— 要跑第二遍必须先复制一份（参照实现靠 duplicate()）。
+static void px_greedy_block(uint64_t *words, bool horizontal_first, std::vector<PxRect> &out) {
+	for (int wi = 0; wi < 64; ) {
+		while (wi < 64 && words[wi] == 0) ++wi;
+		if (wi >= 64) break;
+		int y = wi;
+		int x = __builtin_ctzll(words[wi]);
+		if (x >= 64) { ++wi; continue; }     // 参照实现同款防御（64 位字里不会发生）
+		int rw, rh;
+		if (horizontal_first) {
+			rw = px_run_right(words, x, y);
+			rh = px_extend_down(words, x, y, rw);
+		} else {
+			rh = px_run_down(words, x, y);
+			rw = px_extend_right(words, x, y, rh);
+		}
+		px_clear_rect(words, x, y, rw, rh);
+		out.push_back({x, y, rw, rh});
+	}
+}
+
+// GreedyRects._fuse_axis：把"另一轴区间相同、主轴相邻"的矩形并成极大行程。
+//
+// ⚠️⚠️ 输出顺序 = 分组**首次出现**的顺序（参照实现用的是 Dictionary，
+//    Godot 的 Dictionary 保持插入序）。分组内部按主轴升序。
+//    ⚠️ 组内不会有两根矩形主轴坐标相同 —— 精确覆盖里那意味着重叠，
+//       所以 std::sort（不稳定）在这里与参照实现的 sort_custom 等价。
+static void px_fuse_axis(const std::vector<PxRect> &in, bool along_x, std::vector<PxRect> &out) {
+	std::vector<std::vector<PxRect>> groups;
+	std::unordered_map<uint64_t, size_t> idx;
+	idx.reserve(in.size() * 2 + 8);
+	for (const PxRect &r : in) {
+		int64_t a = along_x ? r.y : r.x;
+		int64_t b = along_x ? r.h : r.w;
+		uint64_t k = ((uint64_t)(uint32_t)a << 32) | (uint32_t)b;
+		size_t gi;
+		auto it = idx.find(k);
+		if (it == idx.end()) {
+			gi = groups.size();
+			groups.emplace_back();
+			idx.emplace(k, gi);
+		} else {
+			gi = it->second;
+		}
+		groups[gi].push_back(r);
+	}
+	out.clear();
+	out.reserve(in.size());
+	for (std::vector<PxRect> &g : groups) {
+		if (g.size() == 1) { out.push_back(g[0]); continue; }
+		if (along_x) {
+			std::sort(g.begin(), g.end(), [](const PxRect &p, const PxRect &q) { return p.x < q.x; });
+		} else {
+			std::sort(g.begin(), g.end(), [](const PxRect &p, const PxRect &q) { return p.y < q.y; });
+		}
+		PxRect cur = g[0];
+		for (size_t i = 1; i < g.size(); ++i) {
+			const PxRect &nx = g[i];
+			// 参照实现写的是 absf(end - next) < 0.001 —— 全是整数，等价于相等
+			if (along_x) {
+				if (cur.x + cur.w == nx.x) cur.w = nx.x + nx.w - cur.x;
+				else { out.push_back(cur); cur = nx; }
+			} else {
+				if (cur.y + cur.h == nx.y) cur.h = nx.y + nx.h - cur.y;
+				else { out.push_back(cur); cur = nx; }
+			}
+		}
+		out.push_back(cur);
+	}
+}
+
+// GreedyRects._merge_pass：融合到不动点（两遍都**没有变小**就停）。
+static void px_merge_pass(std::vector<PxRect> &rects) {
+	std::vector<PxRect> a, b;
+	bool changed = true;
+	while (changed) {
+		changed = false;
+		px_fuse_axis(rects, true, a);
+		if (a.size() < rects.size()) changed = true;
+		px_fuse_axis(a, false, b);
+		if (b.size() < a.size()) changed = true;
+		rects.swap(b);
+	}
+}
+
+// 像素坐标 -> i32（协议就是 i32）。|块坐标| < 2^25 是前提（超了 i32 装不下），
+// 现实里不可能到 —— 但夹一下比留一个有符号溢出（UB）便宜。
+static inline int32_t px_i32(int64_t v) {
+	if (v > 2147483647LL) return 2147483647;
+	if (v < -2147483648LL) return -2147483648;
+	return (int32_t)v;
+}
+
+// op 2 主体：块记录 -> (AABB + 矩形集合)。
+//
+// ⚠️ 结果段容量：调用方**不可能**提前知道矩形数（精确分解的矩形数只有算完才知道），
+//    所以这里约定"放不下就只写头"（头 24 字节一定写得下，count 在里面），
+//    调用方按 count 精确重开一次。不给"能写多少写多少"—— 那会静默截断。
+static void run_raster_decompose(CmdRd &r, uint8_t *out, size_t out_cap, size_t &written) {
+	const size_t HEAD = 24;                  // count, budget, aabb_x/y/w/h
+	written = 0;
+	if (out_cap < HEAD) {
+		printf("[PixelRaster] decompose 结果段太小：out_cap=%zu\n", out_cap);
+		return;
+	}
+	int32_t n = r.i32();
+	int32_t max_rects = r.i32();
+	if (n < 0) n = 0;
+	if (!r.ok) return;
+
+	// ① 读块记录，同时算 AABB —— 与 PixelShape.local_aabb() **同一条规则**：
+	//    只看 occ，逐行取最低/最高置位；occ == 0 的块整体跳过。
+	//    ⚠️ 哨兵值也必须同款（1 << 30 / -(1 << 30)）：参照实现在"所有像素都在
+	//       |x| > 2^30"这种荒唐输入下会给出被哨兵夹住的结果，这里要逐位一样。
+	const int64_t SENT = 1 << 30;
+	int64_t min_x = SENT, min_y = SENT, max_x = -SENT, max_y = -SENT;
+
+	struct PxBlock { int64_t key; int32_t bix, biy; uint64_t words[64]; };
+	std::vector<PxBlock> blocks;
+	std::unordered_map<uint64_t, size_t> block_idx;
+	blocks.reserve((size_t)(n / 8 + 1));
+
+	for (int32_t i = 0; i < n; ++i) {
+		int32_t cx = r.i32();
+		int32_t cy = r.i32();
+		int64_t occ = r.i64();
+		if (!r.ok) return;
+		uint64_t bits = (uint64_t)occ;
+		int64_t bx = (int64_t)cx * 8;
+		int64_t by = (int64_t)cy * 8;
+		for (int row = 0; row < 8; ++row) {
+			uint32_t rb = (uint32_t)((bits >> (row * 8)) & 0xFFu);
+			if (rb == 0) continue;
+			int lo = __builtin_ctz(rb);
+			int hi = 32 - __builtin_clz(rb);      // 最高置位 +1（rb != 0）
+			if (bx + lo < min_x) min_x = bx + lo;
+			if (bx + hi > max_x) max_x = bx + hi;
+			if (by + row < min_y) min_y = by + row;
+			if (by + row + 1 > max_y) max_y = by + row + 1;
+		}
+		// 分块：块坐标 = chunk 坐标 >> 3（算术右移 = 向下取整，负数也对）
+		int32_t bix = cx >> 3, biy = cy >> 3;
+		int64_t bk = ((int64_t)bix << 32) | (int64_t)(uint32_t)biy;
+		size_t gi;
+		auto it = block_idx.find((uint64_t)bk);
+		if (it == block_idx.end()) {
+			gi = blocks.size();
+			PxBlock nb;
+			nb.key = bk;
+			nb.bix = bix;
+			nb.biy = biy;
+			std::memset(nb.words, 0, sizeof(nb.words));
+			blocks.push_back(nb);
+			block_idx.emplace((uint64_t)bk, gi);
+		} else {
+			gi = it->second;
+		}
+		uint64_t *words = blocks[gi].words;
+		int shift = (cx - (bix << 3)) << 3;
+		int row0 = (cy - (biy << 3)) << 3;
+		for (int row = 0; row < 8; ++row) {
+			words[row0 + row] |= (uint64_t)((bits >> (row * 8)) & 0xFFu) << shift;
+		}
+	}
+
+	// ② 块按 key **升序**（有符号 int64 比较 —— 负块坐标排在前面，
+	//    与 GreedyRects._sorted_insert 的 int(keys[mid]) < bk 同义）。
+	//    矩形顺序 = 块顺序，所以这一步决定输出顺序。
+	std::sort(blocks.begin(), blocks.end(),
+			[](const PxBlock &p, const PxBlock &q) { return p.key < q.key; });
+
+	std::vector<PxRect> rects;
+	std::vector<PxRect> cand;
+	for (PxBlock &bl : blocks) {
+		uint64_t w1[64];
+		std::memcpy(w1, bl.words, sizeof(w1));
+		cand.clear();
+		px_greedy_block(w1, true, cand);
+		// GreedyRects._decompose_block：两个方向各跑一遍，取**更少**那份
+		// （相等时留横优先那份）。只有一个矩形时不必跑第二遍 —— 与参照同款守卫。
+		if (cand.size() > 1) {
+			uint64_t w2[64];
+			std::memcpy(w2, bl.words, sizeof(w2));
+			std::vector<PxRect> cand2;
+			px_greedy_block(w2, false, cand2);
+			if (cand2.size() < cand.size()) cand.swap(cand2);
+		}
+		int64_t ox = (int64_t)bl.bix * 64;
+		int64_t oy = (int64_t)bl.biy * 64;
+		for (PxRect &q : cand) {
+			q.x += ox;
+			q.y += oy;
+			rects.push_back(q);
+		}
+	}
+
+	// ③ 极大行程融合（按块分解会留下 64 的接缝，必须并回去）
+	px_merge_pass(rects);
+
+	// ④ 写结果。放不下矩形时只写头（count 在里面），让调用方精确重开。
+	CmdWr w;
+	w.p = out;
+	w.cap = out_cap;
+	w.i = 0;
+	int32_t count = (int32_t)rects.size();
+	// ⚠️⚠️ 空 AABB（有 chunk 但一个像素都没有）必须是**整个** Rect2i()，
+	//    不是"位置是哨兵、尺寸为 0"。参照实现是 max_x <= min_x 时整个取 Rect2i()，
+	//    而哨兵 1 << 30 会被原样写进 PixelShape 的 AABB 缓存 ——
+	//    症状是"形状与碰撞体静默错位"（闸门的"只有空 chunk"用例抓到的）。
+	bool aabb_empty = max_x <= min_x;
+	w.i32(count);
+	w.i32(max_rects > 0 && count > max_rects ? 1 : 0);
+	w.i32(aabb_empty ? 0 : px_i32(min_x));
+	w.i32(aabb_empty ? 0 : px_i32(min_y));
+	w.i32(aabb_empty ? 0 : px_i32(max_x - min_x));
+	w.i32(aabb_empty ? 0 : px_i32(max_y - min_y));
+	if (HEAD + (size_t)count * 16 <= out_cap) {
+		for (const PxRect &q : rects) {
+			w.i32(px_i32(q.x));
+			w.i32(px_i32(q.y));
+			w.i32(px_i32(q.w));
+			w.i32(px_i32(q.h));
+		}
+		written = w.i;
+	} else {
+		written = HEAD;
+	}
+}
 
 static void run_raster_cmd(const uint8_t *in, size_t in_n, uint8_t *out, size_t out_cap, size_t &written) {
 	written = 0;
@@ -589,6 +902,10 @@ static void run_raster_cmd(const uint8_t *in, size_t in_n, uint8_t *out, size_t 
 					}
 				}
 				written = need;
+				break;
+			}
+			case 2: {
+				run_raster_decompose(r, out, out_cap, written);
 				break;
 			}
 			default:
@@ -675,6 +992,16 @@ static void call_rapier_cmd(void *method_userdata, GDExtensionClassInstancePtr p
 }
 
 static void call_raster_fill(void *method_userdata, GDExtensionClassInstancePtr p_instance,
+		const GDExtensionConstVariantPtr *p_args, GDExtensionInt p_argument_count,
+		GDExtensionVariantPtr r_return, GDExtensionCallError *r_error) {
+	(void)p_instance;
+	call_cmd_glue(raster_dispatch, nullptr, p_args, p_argument_count, r_return, r_error);
+}
+
+// 与 fill_region **同一个签名**（2 个 PackedByteArray -> PackedByteArray），
+// 分派靠命令流里的 op 字节。之所以还是两个方法：GDScript 侧要能
+// has_method("decompose") 判断 DLL 是不是太旧（老 DLL 里没有它）。
+static void call_raster_decompose(void *method_userdata, GDExtensionClassInstancePtr p_instance,
 		const GDExtensionConstVariantPtr *p_args, GDExtensionInt p_argument_count,
 		GDExtensionVariantPtr r_return, GDExtensionCallError *r_error) {
 	(void)p_instance;
@@ -787,6 +1114,13 @@ static void register_pixel_raster() {
 	mi.default_arguments = nullptr;
 	g_register_method(g_library, (GDExtensionConstStringNamePtr)g_sn_pxr_class.buf, &mi);
 	printf("[PixelRaster] 已注册方法 fill_region\n");
+
+	// decompose：签名与 fill_region 相同（参数名/返回名也复用同一组 PropertyInfo）
+	GDExtensionClassMethodInfo mi2 = mi;
+	mi2.name = (GDExtensionStringNamePtr)g_sn_pxr_decomp.buf;
+	mi2.call_func = call_raster_decompose;
+	g_register_method(g_library, (GDExtensionConstStringNamePtr)g_sn_pxr_class.buf, &mi2);
+	printf("[PixelRaster] 已注册方法 decompose\n");
 }
 
 
@@ -842,6 +1176,7 @@ extern "C" __declspec(dllexport) GDExtensionBool gdextension_init(
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_rp_ret.buf, "result");
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_pxr_class.buf, "PixelRaster");
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_pxr_fill.buf, "fill_region");
+	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_pxr_decomp.buf, "decompose");
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_pxr_a0.buf, "input");
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_pxr_a1.buf, "out_template");
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_pxr_ret.buf, "result");
