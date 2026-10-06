@@ -433,7 +433,7 @@ func _on_step(w) -> void:
 - **清掉锚点已不存在的关节** —— ⚠️ `body_a`/`body_b` 为 `null` 表示"锚在静态世界"，
   那是**合法**的，必须保留。
 
-### `fracture_pixels_and_sync(body, removals, burst_speed := 0.0)`
+### `fracture_pixels_and_sync(body, removals, burst_speed := 0.0, dynamic_fragments := false, static_anchors := {})`
 
 `world.fracture_pixels(...)` + `sync_world_bodies()` 一步到位 —— **推荐用这个**，
 忘了调同步的症状是"碎片没有贴图"。
@@ -444,3 +444,32 @@ var res: Dictionary = px.fracture_pixels_and_sync(body, {body.shapes[0]: mask})
 # res = {removed: int, body_alive: bool, fragments: Array}
 ```
 
+#### 可破坏钉子
+
+`static_anchors` 与 `removals` 使用相同格式：`{PixelShape: {Vector2i: true}}`。坐标指向
+固定该刚体的钉子像素。传入非空字典后，钉子决定分片是否静态，像素数量只决定哪个分片
+继承原 PBody：
+
+```gdscript
+var shape = body.shapes[0]
+var nail := Vector2i(5, 1)
+var result := px.fracture_pixels_and_sync(
+    body,
+    {shape: pixels_to_remove},
+    0.0,
+    true,
+    {shape: {nail: true}},
+)
+```
+
+- 分裂后含至少一个存活钉子的连通分量保持 `static`；
+- 不含钉子的分量成为动态体；
+- 钉子坐标也在本次删除掩码中时，钉子先被删除，该分量立即失去 `static`；
+- 多个钉子可以固定多个分量；最大的含钉子分量继承原 PBody，其余含钉子分量生成新的
+  static PBody；
+- 不传 `static_anchors` 时完全保留旧规则，`dynamic_fragments` 仍只决定静态母体的脱落碎片
+  是否转为动态。
+
+这一步复用破坏已经得到的连通分量，只对已知钉子坐标做块查询，不会再次 flood fill。
+主要开销仍是原有的分裂、碰撞矩形和质量重建。钉子破坏后若巨大地形整体动态化，质量计算
+和后续刚体求解本身仍可能昂贵，应通过地图分块限制单体尺寸。

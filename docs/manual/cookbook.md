@@ -360,6 +360,7 @@ j.lateral_error()         # 垂直自由度的漂移（px）
 | `j.set_solver_softness(2.0)` | 关节求解**软度**（自然频率 Hz + 阻尼比）| 2 Hz 时同一场景漂移 **22.17 px**；8 Hz 时 0.62 px |
 | `j.set_solver_softness(0)` | **调回 Rapier 默认**（frequency <= 0）| 漂移回到 **0.000 px**（逐位相同）|
 | `px.world.rp_joint_solver_iterations = 8` | 求解迭代次数（默认 4）| 12 节焊链静定后：1 次 → 误差 17.38 px，默认 → 0.75 px，8 次 → 0.65 px |
+| `body.additional_solver_iterations = 4` | 只给该刚体所在约束岛追加迭代 | 默认 0；适合抓取、长链等局部高负载约束 |
 | `px.world.rp_warmstart_joints = 0` | 关节 warmstart 开关 | ⚠️ 实测在已收敛的场景里**不改变结果**（Rapier 0.36 对冲量关节没有可观测影响）—— 留作排查开关 |
 
 > ⚠️⚠️ **迭代次数不是"关节专属"旋钮**：Rapier 0.36 的 `num_solver_iterations` 是**整个求解**
@@ -368,6 +369,23 @@ j.lateral_error()         # 垂直自由度的漂移（px）
 >
 > ⚠️ 三个世界级旋钮都是"**显式设过才推**"（0 / -1 = 不推，保持 Rapier 默认），
 > 所以没调过的场景（含 8 条逐位基准）行为逐位不变。
+
+`additional_solver_iterations` 会增加该刚体接触和关节所在约束岛的求解量，但不会增加
+全世界的碰撞检测次数、CCD 子步或其它无关约束岛的迭代。结束局部高精度状态后设回 `0`。
+
+### 每帧执行器输出
+
+角色控制器可以每帧覆盖 `body.control_force` 和 `body.control_torque`。它们会在每个物理子步
+参与积分，但不会混入持久的 `accum_force`，因此适合有功率限制的马达或手部控制器：
+
+```gdscript
+body.control_force = motor_force
+body.control_torque = motor_torque
+px.step(delta)
+```
+
+`body.clear_forces()` 会同时清空持久外力和执行器输出。控制器停用时也应主动写零，避免沿用
+上一帧输出。
 
 ---
 

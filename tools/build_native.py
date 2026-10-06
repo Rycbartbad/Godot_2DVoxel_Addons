@@ -108,7 +108,8 @@ def main() -> int:
     print("[2/2] fastphys（GDExtension 入口）")
     ok = build("g++", [
         "g++", "-O2", "-std=c++17", "-ffp-contract=off", "-shared",
-        "-static-libgcc", "-static-libstdc++", "-I..",
+        # 仅静态链接 gcc/stdcpp 会漏掉 winpthread，部署到 Godot 后触发加载错误126。
+        "-static", "-I..",
         "-o", "fastphys.dll", "fastphys.cpp",
     ], GDEXT, GDEXT / "fastphys.dll")
     if not ok:

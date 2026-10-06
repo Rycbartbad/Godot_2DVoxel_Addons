@@ -10,6 +10,15 @@
 use rapier2d::prelude::*;
 use std::collections::HashMap;
 
+/// 仅提高有精度需求的刚体所在约束岛的求解次数，避免整个世界重复步进。
+#[no_mangle]
+pub extern "C" fn rb_body_set_solver_iterations(w: *mut World, id: u32, n: u32) {
+    let Some(w) = (unsafe { wref(w) }) else { return };
+    if let Some(&h) = w.map.get(&id) {
+        w.bodies[h].set_additional_solver_iterations(n as usize);
+    }
+}
+
 pub struct World {
     bodies: RigidBodySet,
     colliders: ColliderSet,
@@ -30,6 +39,9 @@ pub struct World {
     /// 外部关节 id -> 记录。见 rb_joint_new。
     joints: HashMap<u32, JointRec>,
     next_joint_id: u32,
+    // 每步只建立一次索引，避免逐对查询从头扫描造成 O(N²)。
+    contact_pairs: Vec<(ColliderHandle, ColliderHandle)>,
+    contacts_dirty: bool,
 
 }
 
@@ -71,15 +83,22 @@ impl World {
             anchor,
             joints: HashMap::new(),
             next_joint_id: 1,
+            contact_pairs: Vec::new(),
+            contacts_dirty: true,
         }
     }
 
-    /// 丢掉 Rapier 侧已经不存在的关节句柄。
-    ///
-    /// ⚠️ 必须有这一步：rb_body_remove 走的是 RigidBodySet::remove(..., &mut ij, ...)，
-    ///    Rapier 会把挂在该刚体上的关节**一起删掉**，而我们的 id 表不知道。
-    ///    留着失效句柄的后果不是报错而是 **ABA** —— 句柄槽位会被下一个关节复用，
-    ///    于是"删掉旧关节"删掉的是新关节，而且看起来毫无理由。
+    /// 本步接触对索引；只存带代数的句柄，不跨步缓存点或冲量。
+    fn index_contacts(&mut self) {
+        if !self.contacts_dirty { return; }
+        self.contact_pairs.clear();
+        self.contact_pairs.extend(self.nf.contact_pairs()
+            .filter(|p| p.has_any_active_contact())
+            .map(|p| (p.collider1, p.collider2)));
+        self.contacts_dirty = false;
+    }
+
+    /// Rapier 删刚体时连带删除关节；同步清理 id 表，防止句柄槽位复用导致 ABA。
     fn purge_joints(&mut self) {
         let ij = &self.ij;
         self.joints.retain(|_, rec| ij.contains(rec.handle));
@@ -109,6 +128,7 @@ pub extern "C" fn rb_world_set_gravity(w: *mut World, x: f64, y: f64) {
 pub extern "C" fn rb_world_step(w: *mut World, dt: f64) {
     if let Some(w) = unsafe { wref(w) } {
         w.params.dt = dt as f32;
+        w.contacts_dirty = true;
         w.pipe.step(
             w.gravity, &w.params, &mut w.islands, &mut w.bf, &mut w.nf,
             &mut w.bodies, &mut w.colliders, &mut w.ij, &mut w.mj,
@@ -140,6 +160,7 @@ pub extern "C" fn rb_body_new(w: *mut World, is_static: i32, x: f64, y: f64, rot
 pub extern "C" fn rb_body_remove(w: *mut World, id: u32) {
     let Some(w) = (unsafe { wref(w) }) else { return };
     if let Some(h) = w.map.remove(&id) {
+        w.contacts_dirty = true;
         w.bodies.remove(h, &mut w.islands, &mut w.colliders, &mut w.ij, &mut w.mj, &mut w.soft, true);
         // 挂在它上面的关节被 Rapier 一起删了 —— 我们的 id 表要跟着清（见 purge_joints）。
         w.purge_joints();
@@ -153,6 +174,7 @@ pub extern "C" fn rb_body_set_rects(w: *mut World, id: u32, rects: *const f32, c
     let Some(w) = (unsafe { wref(w) }) else { return };
     let Some(&h) = w.map.get(&id) else { return };
     let old: Vec<ColliderHandle> = w.bodies[h].colliders().iter().copied().collect();
+    w.contacts_dirty = true;
     for c in old {
         w.colliders.remove(c, &mut w.islands, &mut w.bodies, &mut w.soft, true);
     }
@@ -377,9 +399,8 @@ pub extern "C" fn rb_body_wake(w: *mut World, id: u32) {
 #[no_mangle]
 pub extern "C" fn rb_contact_count(w: *mut World) -> i32 {
     let Some(w) = (unsafe { wref(w) }) else { return 0 };
-    w.nf.contact_pairs()
-        .filter(|p| p.has_any_active_contact())
-        .count() as i32
+    w.index_contacts();
+    w.contact_pairs.len() as i32
 }
 
 /// 读第 i 个接触对：out 至少 **8** 个 f64 ——
@@ -427,10 +448,9 @@ pub extern "C" fn rb_contact_count(w: *mut World) -> i32 {
 pub extern "C" fn rb_contact_get_points(w: *mut World, i: i32, out: *mut f64, cap: i32) -> i32 {
     let Some(w) = (unsafe { wref(w) }) else { return 0 };
     if out.is_null() || i < 0 { return 0; }
-    let mut k = 0i32;
-    for pair in w.nf.contact_pairs() {
-        if !pair.has_any_active_contact() { continue; }
-        if k != i { k += 1; continue; }
+    w.index_contacts();
+    let Some(&(ca, cb)) = w.contact_pairs.get(i as usize) else { return 0 };
+    if let Some(pair) = w.nf.contact_pair(ca, cb) {
         let ca = pair.collider1;
         let cb = pair.collider2;
         let ida = w.colliders[ca].parent().map(|h| w.bodies[h].user_data as u32).unwrap_or(0);
@@ -825,7 +845,6 @@ pub extern "C" fn rb_body_set_restitution(w: *mut World, id: u32, restitution: f
 //      · 放开轴（JointAxesMask::empty()）-> 马达完全不产生力，物体自由落体。
 //    抓取现在在 GDScript 侧做**力控**（src/physics/grab.gd：每子步一个受限的力），
 //    这里不需要新原语。
-
 
 /// 关节求解**软度**：自然频率（Hz）+ 阻尼比。
 ///

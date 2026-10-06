@@ -176,5 +176,18 @@ func _initialize() -> void:
 	_c("不 clear_forces 会越加越大（契约如此）", b8.angular_velocity > b9.angular_velocity * 3.0,
 		"不清 %.6f vs 清 %.6f" % [b8.angular_velocity, b9.angular_velocity])
 
+	# ---- 9. 每帧执行器输出独立于持久外力，并由 clear_forces 一并清空 ----
+	var w10 := PWorld.new()
+	w10.gravity = Vector2.ZERO
+	var b10 := PBody.new()
+	w10.add_body(b10, [_box(20, 20)])
+	b10.control_force = Vector2(1000.0, 0.0)
+	b10.control_torque = 100.0
+	w10.step(dt)
+	_c("执行器力与力矩参与积分", b10.linear_velocity.x > 0.0 and b10.angular_velocity > 0.0)
+	b10.clear_forces()
+	_c("clear_forces 同时清空执行器输出",
+		b10.control_force == Vector2.ZERO and b10.control_torque == 0.0)
+
 	print("=== %d passed, %d failed ===" % [_pass, _fail])
 	quit(0 if _fail == 0 else 1)

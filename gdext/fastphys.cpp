@@ -144,6 +144,7 @@ alignas(16) static unsigned char g_str_empty_hint[64];
 //  39  body_set_restitution(u32 id, f64 restitution)     材质恢复系数 -> Rapier 碰撞体
 //  40  joint_set_softness(u32 jid, f64 freq, f64 damping)  关节求解软度（Hz + 阻尼比）
 //  41  world_set_joint_solver(i32 iters, i32 warmstart, f64 coeff)  世界级关节求解参数
+//  42  body_set_solver_iterations(u32 id, u32 n)       局部约束岛追加迭代
 //  （35~37 曾用于"鼠标关节"抓取，已删除 —— 见 rapier_bridge/src/lib.rs 的墓碑注释）
 
 typedef void *RPWorld;
@@ -190,6 +191,7 @@ struct RapierApi {
 	void (*body_set_groups)(RPWorld, uint32_t, uint32_t, uint32_t) = nullptr;
 	void (*joint_set_contacts)(RPWorld, uint32_t, int32_t) = nullptr;
 	void (*body_set_density)(RPWorld, uint32_t, double) = nullptr;
+	void (*body_set_solver_iterations)(RPWorld, uint32_t, uint32_t) = nullptr;
 void (*body_set_friction)(RPWorld, uint32_t, double) = nullptr;
 void (*body_set_restitution)(RPWorld, uint32_t, double) = nullptr;
 	int32_t (*joint_set_softness)(RPWorld, uint32_t, double, double) = nullptr;
@@ -266,6 +268,7 @@ static bool load_rapier() {
 	RP_GET(joint_set_contacts, "rb_joint_set_contacts")
 	RP_GET(contact_get_points, "rb_contact_get_points")
 	RP_GET(body_set_density, "rb_body_set_density")
+	RP_GET(body_set_solver_iterations, "rb_body_set_solver_iterations")
 RP_GET(body_set_friction, "rb_body_set_friction")
 RP_GET(body_set_restitution, "rb_body_set_restitution")
 	RP_GET(joint_set_softness, "rb_joint_set_softness")
@@ -382,6 +385,7 @@ static void run_rapier_cmd(RapierInstance *inst, const uint8_t *in, size_t in_n,
 			case 22: { double pd = r.f64(), cv = r.f64(), ae = r.f64();
 				g_rap.world_set_pixel_params(W, pd, cv, ae); break; }
 			case 23: { uint32_t n = r.u32(); g_rap.world_set_ccd_substeps(W, n); break; }
+			case 42: { uint32_t id = r.u32(); uint32_t n = r.u32(); g_rap.body_set_solver_iterations(W, id, n); break; }
 			case 24: {
 				int32_t kind = r.i32();
 				uint32_t ia = r.u32(), ib = r.u32();
