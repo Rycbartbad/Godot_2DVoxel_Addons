@@ -5,6 +5,7 @@ extends SceneTree
 ##   ③ 断杆只分裂一次（fragments 恰好 1 个）
 ##   ④ 最大块保留原 body
 ##   ⑤ 旋转体分裂继承局部速度场（v_new = v_old + omega x r）
+##   ⑥ 钉子决定 static，钉子破坏后解除 static
 const PWorld := preload("res://src/physics/pworld.gd")
 const PBody := preload("res://src/physics/pbody.gd")
 const PixelShape := preload("res://src/core/pixel_shape.gd")
@@ -111,6 +112,55 @@ func _initialize() -> void:
 	_assert(absf(w_frag - 2.0) < 1e-6, "碎片角速度应继承 2.0，实际 %.4f" % w_frag)
 	_assert(absf(v_frag.y) > 1.0, "碎片线速度应含 omega x r 的横向分量，实际 v=%s" % str(v_frag))
 
+	# 材质由重建统一计算；游戏不应为了补摩擦再重建整块。
+	var w6 := PWorld.new()
+	w6.set_material_friction(1, 0.8)
+	w6.set_material_restitution(1, 0.15)
+	var b6 := PBody.new()
+	b6.is_static = true
+	b6.collision_layer = 4
+	b6.collision_mask = 8
+	b6.gravity_scale = 0.5
+	var s6 := _shape(40, 4)
+	w6.add_body(b6, [s6], Callable(), true)
+	var res6: Dictionary = w6.fracture_pixels(b6, {s6: m3}, 0.0, true)
+	var fragment = res6.fragments[0]
+	_assert(b6.is_static and not fragment.is_static, "地形保留静态，脱落碎片转为动态")
+	_assert(fragment.collision_layer == 4 and fragment.collision_mask == 8, "碎片继承碰撞过滤")
+	_assert(fragment.gravity_scale == 0.5, "碎片继承重力倍率")
+	_assert(is_equal_approx(b6.friction, 0.8) and is_equal_approx(fragment.friction, 0.8), "原体与碎片保留材料摩擦")
+	_assert(is_equal_approx(b6.restitution, 0.15) and is_equal_approx(fragment.restitution, 0.15), "原体与碎片保留材料恢复系数")
+
+	# ⑥ 钉子在较小的左块：左块继承原 body 且保持 static，较大的右块必须掉落。
+	var w7 := PWorld.new()
+	var b7 := PBody.new()
+	b7.is_static = true
+	var s7 := _shape(40, 4)
+	w7.add_body(b7, [s7], Callable(), true)
+	var cut7 := {}
+	for y in 4:
+		cut7[Vector2i(10, y)] = true
+	var nail := Vector2i(5, 1)
+	var res7: Dictionary = w7.fracture_pixels(b7, {s7: cut7}, 0.0, true,
+		{s7: {nail: true}})
+	_assert(b7.is_static and b7.shapes[0].pixel_count() == 40,
+		"含钉子的较小分量应保持原 static body")
+	_assert(res7.fragments.size() == 1 and not res7.fragments[0].is_static
+		and res7.fragments[0].shapes[0].pixel_count() == 116,
+		"不含钉子的较大分量应成为动态碎片")
+	var anchored_shape = b7.shapes[0]
+	w7.fracture_pixels(b7, {anchored_shape: {nail: true}}, 0.0, true,
+		{anchored_shape: {nail: true}})
+	_assert(not b7.is_static and b7.mass > 0.0 and b7.inv_mass > 0.0,
+		"钉子像素破坏后原体应一次重建为动态体")
+
+	for world in [w1, w2, w3, w4, w5, w6, w7]:
+		for body in world.bodies.duplicate():
+			for shape in body.shapes:
+				shape.owner_body = null
+			world.remove_body(body)
+			body.shapes.clear()
+		world._rp = null
 	print("---")
 	if failed == 0:
 		print("全部通过：%d 项断言" % passed)

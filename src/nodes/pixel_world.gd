@@ -713,7 +713,9 @@ func sync_world_bodies() -> void:
 
 ## 破坏的统一入口：调 fracture_pixels 之后**顺手**把节点层对齐。
 ## ⚠️ 游戏层只要用这一个方法，就不会忘记 sync_world_bodies()（忘了的症状是碎片没有贴图）。
-func fracture_pixels_and_sync(body: PBody, removals: Dictionary, burst_speed: float = 0.0) -> Dictionary:
-	var res: Dictionary = world.fracture_pixels(body, removals, burst_speed)
+func fracture_pixels_and_sync(body: PBody, removals: Dictionary, burst_speed: float = 0.0,
+		dynamic_fragments: bool = false, static_anchors: Dictionary = {}) -> Dictionary:
+	var res: Dictionary = world.fracture_pixels(body, removals, burst_speed,
+		dynamic_fragments, static_anchors)
 	sync_world_bodies()
 	return res

@@ -160,6 +160,13 @@ var pseudo_angular_velocity := 0.0
 var accum_force := Vector2.ZERO
 var accum_torque := 0.0
 
+## 执行器每帧覆盖输出，按子步积分；停用时归零，避免累加旧输出或覆盖外力。
+var control_force := Vector2.ZERO
+var control_torque := 0.0
+## 只增加当前约束岛的求解精度，不增加全世界碰撞检测次数。
+var additional_solver_iterations := 0
+var _rp_solver_iterations := -1
+
 ## ---- Teardown 对齐用的字段 ----
 ##
 ## 重力缩放（Teardown 的 SetBodyGravityScale）。0 = 不受重力，负数 = 反重力。
@@ -315,6 +322,8 @@ func _wake_force() -> void:
 func clear_forces() -> void:
 	accum_force = Vector2.ZERO
 	accum_torque = 0.0
+	control_force = Vector2.ZERO
+	control_torque = 0.0
 
 
 ## 从静态转回动态（Shift 绘制是"先摆好、松手才变成刚体"）。

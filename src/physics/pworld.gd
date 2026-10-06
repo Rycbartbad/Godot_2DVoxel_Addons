@@ -917,6 +917,11 @@ func _substep_rapier(dt: float) -> void:
 	for b: PBody in bodies:
 		if b.rapier_id <= 0:
 			continue
+		if b.additional_solver_iterations != b._rp_solver_iterations:
+			_rp_u8(cmds, 42)
+			_rp_u32(cmds, b.rapier_id)
+			_rp_u32(cmds, maxi(0, b.additional_solver_iterations))
+			b._rp_solver_iterations = b.additional_solver_iterations
 		# 求解前的速度 —— 接触事件的 approach 要用它（见 PBody.pre_vx 的说明）
 		b.pre_vx = b.linear_velocity.x
 		b.pre_vy = b.linear_velocity.y
@@ -1034,9 +1039,9 @@ func _substep_rapier(dt: float) -> void:
 		# 被抓住的刚体每子步强制推一次（不只是变化时）：Rapier 的
 		# add_force(f, wake_up=true) 顺带把它唤醒 —— 这正是"被抓着不入睡"
 		# 需要的，不用另写一套保醒逻辑。
-		var fx := b.accum_force.x + b.grab_force.x
-		var fy := b.accum_force.y + b.grab_force.y
-		var tq := b.accum_torque + b.grab_torque
+		var fx := b.accum_force.x + b.grab_force.x + b.control_force.x
+		var fy := b.accum_force.y + b.grab_force.y + b.control_force.y
+		var tq := b.accum_torque + b.grab_torque + b.control_torque
 		if _rp_grabbed.has(b) or fx != b._rp_fx or fy != b._rp_fy or tq != b._rp_tq:
 			_rp_u8(cmds, 18)
 			_rp_u32(cmds, b.rapier_id)
@@ -2853,13 +2858,17 @@ func detach(body: PBody, damage, burst_speed: float = 40.0) -> Array:
 ##    角速度直接继承。被删掉的像素和剔除的最小碎片**带着自己的动量离开模拟**，
 ##    不补偿给存活块（所以总动量会少一点 —— 这是有意的）。
 ##
-## removals = {PixelShape: {Vector2i: true}}，坐标是该 shape 的**局部像素坐标**。
+## removals / static_anchors = {PixelShape: {Vector2i: true}}，坐标都是该 shape 的局部像素坐标。
+## static_anchors 非空时，钉子决定分片是否静态；大小只决定哪个分片继承原 body。
 ## 返回 {removed: int, body_alive: bool, fragments: Array}。
-func fracture_pixels(body: PBody, removals: Dictionary, burst_speed: float = 0.0) -> Dictionary:
+func fracture_pixels(body: PBody, removals: Dictionary, burst_speed: float = 0.0,
+		dynamic_fragments: bool = false, static_anchors: Dictionary = {}) -> Dictionary:
 	# ① 删除**前**的速度场与质心（下面要用它给存活块和碎片定速度）
 	var old_com := body.com_world()
 	var v_old := body.linear_velocity
 	var w_old := body.angular_velocity
+	var original_static: bool = body.is_static
+	var anchor_mode: bool = not static_anchors.is_empty()
 
 	# ② 删除：只动 body 自己的 shape，只删掩码里列出的像素
 	#
@@ -2891,8 +2900,9 @@ func fracture_pixels(body: PBody, removals: Dictionary, burst_speed: float = 0.0
 	if removed == 0:
 		return {"removed": 0, "body_alive": true, "fragments": []}
 
-	# ③ 分裂：每个 shape 一次，**最大块留在原 body**（与 fracture / ensure_connected 一致）
+	# ③ 分裂：默认最大块留在原 body；有钉子时优先保留最大的含钉子块。
 	var kept: Array = []
+	var kept_anchored: bool = false
 	var loose: Array = []
 	for s in body.shapes:
 		# ⚠️⚠️ 被删光的 shape **不能留下**：split() 对空 shape 会返回 1 个空块，
@@ -2900,21 +2910,33 @@ func fracture_pixels(body: PBody, removals: Dictionary, burst_speed: float = 0.0
 		#    body_alive 仍然是 true（闸门 ② 抓到的）。
 		if s.pixel_count() <= 0:
 			continue
-		var parts: Array = Destruction.split(s, min_fragment_pixels, true)
+		# 未改的形状不扫描；已证明局部仍连通时保留原对象。
+		if not dirty.has(s):
+			kept.append(s)
+			kept_anchored = kept_anchored or _has_static_anchor(s, static_anchors.get(s, {}))
+			continue
+		var connected: bool = Destruction.local_connectivity(s, dirty[s], min_fragment_pixels) == Destruction.LOCAL_CONNECTED
+		var parts: Array = [s] if connected else Destruction.split(s, min_fragment_pixels, true)
 		if parts.size() <= 1:
 			kept.append(s)
+			kept_anchored = kept_anchored or _has_static_anchor(s, static_anchors.get(s, {}))
 			continue
-		var best := 0
+		var anchors: Dictionary = static_anchors.get(s, {})
+		var anchored: Array = []
+		var best := -1
 		var best_n := -1
 		for i in parts.size():
 			var cnt: int = parts[i].pixel_count()
-			if cnt > best_n:
+			var has_anchor: bool = _has_static_anchor(parts[i], anchors)
+			anchored.append(has_anchor)
+			if best < 0 or (has_anchor and not anchored[best]) or (has_anchor == anchored[best] and cnt > best_n):
 				best_n = cnt
 				best = i
 		kept.append(parts[best])
+		kept_anchored = kept_anchored or anchored[best]
 		for i2 in parts.size():
 			if i2 != best:
-				loose.append(parts[i2])
+				loose.append({"shape": parts[i2], "anchored": anchored[i2]})
 
 	# ④ 全删光 -> 原体消失
 	if kept.is_empty():
@@ -2927,6 +2949,8 @@ func fracture_pixels(body: PBody, removals: Dictionary, burst_speed: float = 0.0
 	#    查不到 -> 回落空 dirty_rect -> touch() -> 保守全量（新 shape 本来就整块是新的）。
 	#    单 shape、内部挖洞这条常见路径（split 返回原对象）因此只重建脏块。
 	# ⚠️ 三个 Callable 都要传：不传 -> 母体质量按"像素数"算错、摩擦/恢复被清成 0。
+	if anchor_mode:
+		body.is_static = kept_anchored
 	body.rebuild(kept, density_callable(), max_rects_per_shape, Rect2i(),
 		friction_callable(), restitution_callable(), dirty)
 	var r_keep := body.com_world() - old_com
@@ -2937,11 +2961,15 @@ func fracture_pixels(body: PBody, removals: Dictionary, burst_speed: float = 0.0
 
 	# ⑥ 碎片各自成体，同样继承速度场
 	var spawned: Array = []
-	for piece in loose:
+	for entry in loose:
+		var piece = entry.shape
 		var frag := PBody.new()
 		frag.position = body.position
 		frag.rotation = body.rotation
-		frag.is_static = body.is_static
+		frag.is_static = entry.anchored if anchor_mode else original_static and not dynamic_fragments
+		frag.collision_layer = body.collision_layer
+		frag.collision_mask = body.collision_mask
+		frag.gravity_scale = body.gravity_scale
 		frag.awake = body.awake
 		add_body(frag, [piece], Callable(), true)
 		var r := frag.com_world() - old_com
@@ -2952,3 +2980,11 @@ func fracture_pixels(body: PBody, removals: Dictionary, burst_speed: float = 0.0
 			frag.linear_velocity += r.normalized() * burst_speed
 		spawned.append(frag)
 	return {"removed": removed, "body_alive": true, "fragments": spawned}
+
+
+## 分裂已经算完连通分量；这里只做钉子坐标的块查询，不再跑 flood fill。
+func _has_static_anchor(shape, anchors: Dictionary) -> bool:
+	for point: Vector2i in anchors:
+		if shape.get_pixel(point.x, point.y) != 0:
+			return true
+	return false

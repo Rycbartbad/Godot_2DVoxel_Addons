@@ -117,6 +117,12 @@ func _initialize() -> void:
 	w6.step(DT)
 	_c("默认：一个子步都没推过 op 41", w6._rp_joint_solver_pushed == false)
 	_c("新关节的软度镜像 = 未推过（-1）", PJointSoftnessUnpushed(w6))
+	b6.additional_solver_iterations = 3
+	w6.step(DT)
+	_c("单体追加迭代已推给原生层", b6._rp_solver_iterations == 3)
+	b6.additional_solver_iterations = 0
+	w6.step(DT)
+	_c("单体追加迭代可恢复默认", b6._rp_solver_iterations == 0)
 
 	# ---- 7. 它**不是关节专属**旋钮（这条是实测出来的，不是假设） ----
 	#
