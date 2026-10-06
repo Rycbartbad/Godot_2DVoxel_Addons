@@ -235,6 +235,28 @@ renderer.forget_blueprint(id)
 
 节点是**唯一真相源**：改它会同时播到相机取景和渲染贴图（[`pixel_world.gd`](../../src/nodes/pixel_world.gd)）。
 
+## 物理与破坏旋钮（Inspector 里可调）
+
+`PixelWorld` 把这些旋钮**导出**了，编辑器里就能改（"物理"/"破坏"两个组）；
+`rebuild()` 与 `push_physics_settings()` 会播到 `PWorld`。
+
+| 导出 | 作用 | 默认 |
+|---|---|---|
+| `gravity` / `fixed_dt` / `max_substeps` / `sleeping` | 基本物理 | |
+| `terminal_speed` | 终端速度（只钳下落分量）| 650 |
+| `max_linear_velocity` | 线速度上限（0 = 不钳）| 40000 |
+| `max_angular_velocity` | 角速度上限 rad/s（0 = 不钳）| 1000 |
+| `ccd_ignore_mass` | 轻碎片豁免子步估计（0 = 关）| 0 |
+| `min_fragment_pixels` | 碎片小于这么多像素就丢掉 | 4 |
+| `debris_max_mass` / `debris_min_speed` | 灰尘清理阈值（两个都 > 0 才生效）| 0 / 0 |
+
+⚠️ **运行时改了导出值不会自动生效** —— `world` 是运行时对象，只有 `rebuild()` 会播。
+改完阈值别去调 `rebuild()`（那会重建世界、把破坏状态全丢掉），调
+`$PixelWorld.push_physics_settings()` 就行。
+
+⚠️ 灰尘策略（`debris_*` / `ccd_ignore_mass`）会**改变内容**（碎片凭空消失 / 穿墙），
+所以默认全关 —— 开之前先读[性能手册](performance.md)的"灰尘策略"那一节。
+
 ## 相机与 UI
 
 **引擎不封装这两者**，直接用内置的：

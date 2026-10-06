@@ -1,10 +1,18 @@
 extends SceneTree
 ## 验证**门面**路径：Godot 使用者只认识 PixelPhysics 一个类，能不能拿到接触数据。
 ## ⚠️ 这就是"在 Godot 中这些数据会怎么给出"的答案 —— 不碰 world、不碰 PBody。
+const FACADE_PATH := "res://addons/pixel_destruction/pixel_physics.gd"
+
 func _initialize() -> void:
-	# ⚠️ 这里用 preload 而不是 class_name：headless 下全局类名缓存可能还没扫到 addon，
-	#    直接用 PixelPhysics 会报 "Identifier not declared"。正常编辑器项目里 class_name 可用。
-	const PixelPhysicsScript := preload("res://addons/pixel_destruction/pixel_physics.gd")
+	# ⚠️⚠️ 用 load() 而不是 preload()：addon 是**构建产物**，平时不住在项目树里，
+	#    preload 会让整个脚本在编辑器里**直接解析失败**（红字刷屏），而真正的原因只是
+	#    "还没构建"。改成运行时加载 + 一句明确的失败信息：该红还是红，但不污染编辑器。
+	#    （这条规矩在 validation_facade_api.gd 的文件头写着，这个探针漏改了。）
+	var PixelPhysicsScript = load(FACADE_PATH)
+	if PixelPhysicsScript == null:
+		printerr("找不到 %s —— 先跑 python tools/build_addon.py" % FACADE_PATH)
+		quit(1)
+		return
 	var px = PixelPhysicsScript.new()
 	get_root().add_child(px)
 	await process_frame

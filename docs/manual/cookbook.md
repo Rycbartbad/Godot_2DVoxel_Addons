@@ -437,3 +437,33 @@ func _physics_process(_dt: float) -> void:
 - ⚠️ **别用 `Visible = false` 代替它** —— 那只是不画，物理照跑（这是最常见的误解）。
 - ⚠️ `cull_outside()` 是**移除**，不可逆；要可逆就用 `cull_freeze()`。
 - ⚠️ 关节组件是**原子**的：半冻会把关节另一头钉住（玩家一走出范围，手上的机械臂就不动了）。
+
+---
+
+## 15. 速度上限与灰尘策略
+
+子步数取的是"全世界最快"的那个刚体，所以**一个轻碎片就能拖慢全世界**
+（实测：240 个碎片 + 一个 2x2 碎片以 40000 px/s 飞行 → 子步 **334**、那一帧 **346 ms**）。
+机理与取舍见[性能手册](performance.md)的"灰尘策略"。
+
+| 旋钮 | 作用 | 默认 |
+|---|---|---|
+| `px.world.min_fragment_pixels` | 碎片小于这么多像素就不要了（分裂时丢） | 4 |
+| `px.world.debris_max_mass` + `debris_min_speed` | 又轻又快 -> 直接删（两个都 > 0 才生效） | 0（关）|
+| `px.world.ccd_ignore_mass` | 轻碎片豁免子步估计（留着但不拖慢） | 0（关）|
+| `px.world.max_angular_velocity` | 角速度上限（rad/s，0 = 不钳）| 1000 |
+| `px.world.rp_max_linear_velocity` | 线速度上限 | 40000 |
+
+节点层同样暴露了这些（`PixelWorld` 的"物理"/"破坏"两个组）；运行时改完调一次
+`push_physics_settings()`，或者走门面的 `configure`：
+
+```gdscript
+px.configure({
+    "max_angular_velocity": 50.0,
+    "min_fragment_pixels": 9,
+    "debris_max_mass": 16.0, "debris_min_speed": 2000.0,
+    "ccd_ignore_mass": 16.0,
+})
+```
+
+⚠️ `configure` 的键是**没给就不动**（不是"设成 0"）—— 手册里承诺的旋钮都有默认值。

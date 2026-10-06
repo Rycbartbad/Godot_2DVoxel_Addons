@@ -174,6 +174,11 @@ func _physics_process(delta: float) -> void:
 ##   max_substeps: float   每帧最多几步，默认 4
 ##   sleeping: bool        是否允许休眠，默认 true
 ##   terminal_speed: float 终端速度，默认 650
+##   max_linear_velocity: float 线速度上限（0 = 不钳），默认 40000
+##   max_angular_velocity: float 角速度上限 rad/s（0 = 不钳），默认 1000
+##   min_fragment_pixels: int 碎片小于这么多像素就丢掉，默认 4
+##   ccd_ignore_mass: float 轻碎片豁免子步估计的质量阈值（0 = 关），默认 0
+##   debris_max_mass / debris_min_speed: 灰尘清理阈值（两个都 > 0 才生效），默认关
 ##   native: bool          是否启用扩展加速（没有扩展会自动回退），默认 true
 ##   auto_render: bool     默认 true
 func configure(opts: Dictionary) -> void:
@@ -187,6 +192,21 @@ func configure(opts: Dictionary) -> void:
 		world.sleeping_enabled = bool(opts["sleeping"])
 	if opts.has("terminal_speed"):
 		world.terminal_speed = opts["terminal_speed"]
+	# ---- 速度上限与灰尘策略 ----
+	# ⚠️ 这几个都是"**没给就不动**"（与 rp_joint_solver_* 那组同一个规矩）：
+	#    它们的默认值已经写进 PWorld，configure 只负责**覆盖**。
+	if opts.has("max_linear_velocity"):
+		world.rp_max_linear_velocity = float(opts["max_linear_velocity"])
+	if opts.has("max_angular_velocity"):
+		world.max_angular_velocity = float(opts["max_angular_velocity"])
+	if opts.has("min_fragment_pixels"):
+		world.min_fragment_pixels = int(opts["min_fragment_pixels"])
+	if opts.has("ccd_ignore_mass"):
+		world.ccd_ignore_mass = float(opts["ccd_ignore_mass"])
+	if opts.has("debris_max_mass"):
+		world.debris_max_mass = float(opts["debris_max_mass"])
+	if opts.has("debris_min_speed"):
+		world.debris_min_speed = float(opts["debris_min_speed"])
 	# ⚠️ 这里以前有 opts["native"] -> world.use_native_solve / use_native_broadphase
 	#    / use_native_collide。那些开关在"只保留 Rapier"时删掉了，但这几行留了下来
 	#    —— 一旦有人传 native 就会报 "Invalid assignment ... on a base object"。

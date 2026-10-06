@@ -223,5 +223,40 @@ func _initialize() -> void:
 	_c("solidify 造出实体", body_s != null and px.shape_voxels(body_s.shapes[0]) == n_bp,
 		"蓝图 %d 体素 -> 实体 %d 体素" % [n_bp, px.shape_voxels(body_s.shapes[0])])
 
+	# ---- 速度上限与灰尘策略：configure 的**每个新键**都必须真的生效 ----
+	#
+	# ⚠️ 为什么单独测：`configure` 的键是**字符串**，写错了不会报错（if opts.has 静默为假）——
+	#    手册里承诺的旋钮就成了空头支票。判据是"世界上的值真的变了"。
+	print("=== 速度上限与灰尘策略（configure 的键）==="
+	)
+	var px2 = Facade.new()
+	root.add_child(px2)
+	px2.configure({
+		"max_linear_velocity": 12345.0,
+		"max_angular_velocity": 50.0,
+		"min_fragment_pixels": 9,
+		"ccd_ignore_mass": 8.0,
+		"debris_max_mass": 16.0,
+		"debris_min_speed": 2000.0,
+	})
+	_c("max_linear_velocity 生效", px2.world.rp_max_linear_velocity == 12345.0,
+		"%.0f" % px2.world.rp_max_linear_velocity)
+	_c("max_angular_velocity 生效", px2.world.max_angular_velocity == 50.0,
+		"%.0f" % px2.world.max_angular_velocity)
+	_c("min_fragment_pixels 生效", px2.world.min_fragment_pixels == 9,
+		"%d" % px2.world.min_fragment_pixels)
+	_c("ccd_ignore_mass 生效", px2.world.ccd_ignore_mass == 8.0,
+		"%.1f" % px2.world.ccd_ignore_mass)
+	_c("灰尘阈值生效", px2.world.debris_max_mass == 16.0 and px2.world.debris_min_speed == 2000.0,
+		"%.0f / %.0f" % [px2.world.debris_max_mass, px2.world.debris_min_speed])
+	# 没给的键**不许乱动**（默认值原样）—— "没给" ≠ "设成 0"
+	var px3 = Facade.new()
+	root.add_child(px3)
+	px3.configure({"gravity": Vector2.ZERO})
+	_c("没给的键保持默认（角速度上限 1000）", px3.world.max_angular_velocity == 1000.0,
+		"%.0f" % px3.world.max_angular_velocity)
+	_c("没给的键保持默认（min_fragment_pixels 4 / 灰尘关）",
+		px3.world.min_fragment_pixels == 4 and px3.world.debris_max_mass == 0.0 and px3.world.debris_min_speed == 0.0,
+		"%d / %.0f / %.0f" % [px3.world.min_fragment_pixels, px3.world.debris_max_mass, px3.world.debris_min_speed])
 	print("=== %d passed, %d failed ===" % [_pass, _fail])
 	quit(0 if _fail == 0 else 1)

@@ -26,6 +26,19 @@ var gravity := Vector2(0.0, 600.0)
 ## 终端速度：只钳下落分量（不影响水平抛出和爆炸的冲量），
 ## 这样"掉多久"和"从多高掉"无关，手感可预测。
 var terminal_speed := 650.0
+## 角速度上限（rad/s，<= 0 = 不钳）。**只钳角速度，不动线速度**。
+##
+## ⚠️ 为什么需要它：Rapier 2D 0.36 **只有线速度上限**（normalized_max_linear_velocity），
+##    **没有角速度上限**（把 crate 源码翻过：全库搜 max_angular_velocity 零命中）。
+##    而角速度恰恰是**质量放大**的那个通道：Δω = J·r/I，而 **I ∝ m** ——
+##    同一个力矩，轻 100 倍的碎片角速度大 100 倍。
+##    症状与线速度那条同源：子步估计里有一项 |ω| x 外接半径，
+##    所以一个疯狂自转的小碎片就能把全世界拖进几百个子步。
+##
+## ⚠️ 默认给一个**宽松但有限**的值（与 rp_max_linear_velocity = 40000 同一个哲学：
+##    它用来挡数值爆炸，不是手感旋钮）。要按玩法收紧就调小它。
+## ⚠️ 它**不**替代 debris_max_mass：那个是"清掉灰尘"，这个是"别转到离谱"。
+var max_angular_velocity := 1000.0
 var fixed_dt := 1.0 / 60.0
 var max_substeps := 4
 var solver := Solver.new()
@@ -77,6 +90,34 @@ var ccd_max_substeps := 16     ## 子步上限
 ## 所以子步数必须按物体数摊一个预算，否则一屏碎块会把帧时间直接乘 16。
 ## （实测 240 个高速碎块时 60 帧里有 57 帧跑满 16 子步，帧时间 500 ms。）
 var ccd_substep_budget := 600
+## 轻碎片**豁免子步估计**（0 = 关，**默认关**）。质量 <= 它的刚体不参与"全世界最快"的统计。
+##
+## ⚠️ 为什么需要它（实测 tests/diag_dust_substep.gd）：子步数取的是**全世界最快**的
+##    那个刚体，所以**一个** 2x2 的碎片就能拖慢全世界 —— 240 个碎片的场景里，
+##    一个 2x2 碎片以 40000 px/s 飞行：子步 3 -> **334**，那一帧 **3.2 ms -> 346 ms**。
+##    而防穿的意义是"别让**看得见的东西**穿墙"：2x2 的灰尘穿过去没人看得出来。
+##
+## ⚠️ 豁免 = **放松防穿**：这些碎片真的会穿墙（然后掉出世界、被 cull_outside 收走）。
+## ⚠️ 抓着的 / 挂着关节的**永不豁免** —— 那些是要交互的，穿墙会被玩家看见。
+## ⚠️ 它只治"拖慢"，不治"灰尘还在飞"（那个见 debris_max_mass）。
+var ccd_ignore_mass := 0.0
+## 又轻又快的灰尘**直接删掉**（两个都 > 0 才生效，**默认关**）。
+## 判据：mass <= debris_max_mass **且** 速度 >= debris_min_speed。
+##
+## ⚠️ 为什么是**两个阈值**、而不是"质量/速度的比值"：它们回答两个不同的问题 ——
+##    速度 = "它要全世界陪它跑多少子步"（每步位移 > ccd_max_motion 才有影响）；
+##    质量 = "没人会在意它穿墙/消失吗"。比值把两者耦合，形状是**锥形** v >= R*m：
+##      · 会删掉"很轻但很慢"的无害灰尘（mass=1、v=200 -> 比值 200，而它只要 2 子步）；
+##      · 会留下"很重但很快"的（mass=1000、v=3000 -> 比值 3，而它要 25 子步）。
+##    两个阈值是**角形**判据 {m <= M, v >= V}，正好对应"贵 **且** 不值钱"。
+##
+## ⚠️ 删掉会**打破体素守恒**（detach 的不变量）—— 玩家会看到碎片凭空消失。
+##    所以默认关。与 ccd_ignore_mass 的分工：那个是"留着但别拖慢世界"，这个是"清掉"。
+## ⚠️ 静态 / 冻结 / 抓着 / 挂着关节的**永不删**。
+var debris_max_mass := 0.0
+var debris_min_speed := 0.0
+## 上一次 step 里删掉的灰尘数（诊断用，与 last_substeps 同源）。
+var last_debris_removed := 0
 ## 抓着东西时，子步数**只涨不落**（迟滞开关）。
 ##
 ## ⚠️⚠️ 为什么需要它：子步数是按**全世界最快的那个刚体**算的，而它一变，**所有**刚体
@@ -1120,6 +1161,13 @@ func _substep_rapier(dt: float) -> void:
 		b4.rotation = res.decode_double(off + 16)
 		b4.linear_velocity = Vector2(res.decode_double(off + 24), res.decode_double(off + 32))
 		b4.angular_velocity = res.decode_double(off + 40)
+		var raw_w := b4.angular_velocity
+		# 角速度上限：Rapier **没有**这个旋钮（只有线速度的），所以在这里钳。
+		# ⚠️ 镜像 _rp_w 必须留**钳制前**的值（下面那行），理由与 terminal_speed 逐字相同：
+		#    留成钳制后的值会让下一子步的"变了才推"认为无需推送，于是 Rapier 继续按
+		#    未钳制的角速度积分 —— 钳制等于没做。
+		if max_angular_velocity > 0.0 and absf(raw_w) > max_angular_velocity:
+			b4.angular_velocity = clampf(raw_w, -max_angular_velocity, max_angular_velocity)
 		var raw_vy := b4.linear_velocity.y
 		# 终端速度：Rapier 没有这个概念，所以在这里钳制。
 		#
@@ -1138,7 +1186,7 @@ func _substep_rapier(dt: float) -> void:
 		b4._rp_rot = b4.rotation
 		b4._rp_vx = b4.linear_velocity.x
 		b4._rp_vy = raw_vy
-		b4._rp_w = b4.angular_velocity
+		b4._rp_w = raw_w
 		off += 48
 	for b5: PBody in bodies:
 		if b5.rapier_id <= 0 or b5.is_static:
@@ -1422,12 +1470,47 @@ func _motion_of(b: PBody) -> float:
 ## 全世界最快的运动 —— **逐刚体**（老行为，默认走这条）。
 func _fastest_motion_plain() -> float:
 	var fastest := 0.0
+	# ⚠️ 只在 ccd_ignore_mass > 0 时构造这个集合 —— 默认关，老路径一次字典都不建
+	#    （8 条逐位基准跑的就是老路径）。
+	var exempt: Dictionary = _exempt_bodies() if ccd_ignore_mass > 0.0 else {}
 	for b: PBody in bodies:
 		# ⚠️ 冻结的刚体不参与：它不积分（速度是留着解冻用的），拿它算子步数纯属白算。
 		if b.is_static or not b.awake or b.frozen:
 			continue
+		if not exempt.is_empty() and exempt.has(b):
+			continue
 		fastest = maxf(fastest, _motion_of(b))
 	return fastest
+
+
+## ccd_ignore_mass 生效时要跳过的"灰尘"集合。
+## ⚠️ 抓着的 / 挂着关节的**不在里面**（它们要交互，穿墙会被看见）。
+func _exempt_bodies() -> Dictionary:
+	var out := {}
+	for b: PBody in bodies:
+		if b.is_static or b.frozen:
+			continue
+		if b.mass <= ccd_ignore_mass:
+			out[b] = true
+	for k in _interactive_bodies():
+		out.erase(k)
+	return out
+
+
+## 抓着的 + 挂着关节的刚体（"要交互的"）—— 豁免与清理都必须放过它们。
+func _interactive_bodies() -> Dictionary:
+	var out := {}
+	for g in grabs:
+		if g.body != null:
+			out[g.body] = true
+	for j in joints:
+		if not j.active:
+			continue
+		if j.body_a != null:
+			out[j.body_a] = true
+		if j.body_b != null:
+			out[j.body_b] = true
+	return out
 
 
 ## 全世界最快的运动 —— **关节感知**版本（见 ccd_joint_aware）：焊接组件当一个整体。
@@ -1436,6 +1519,7 @@ func _fastest_motion_plain() -> float:
 func _fastest_motion_grouped() -> float:
 	var seen := {}
 	var fastest := 0.0
+	var exempt: Dictionary = _exempt_bodies() if ccd_ignore_mass > 0.0 else {}
 	for b: PBody in bodies:
 		if b.is_static or not b.awake or b.frozen or seen.has(b):
 			continue
@@ -1445,6 +1529,10 @@ func _fastest_motion_grouped() -> float:
 			seen[g] = true
 		if grp.size() <= 1:
 			# 单体：只有"焊死在静态世界"上才当 0（它整体动不了），否则照旧。
+			# ⚠️ 豁免只对**单体**生效：组内的灰尘已经被 _group_motion 的质量加权摊平了
+			#    （轻的拖不动重的），不需要也不应该把它从组里摘出去。
+			if not exempt.is_empty() and exempt.has(b):
+				continue
 			fastest = maxf(fastest, 0.0 if _anchored_unbreakable(b) else _motion_of(b))
 			continue
 		fastest = maxf(fastest, _group_motion(grp))
@@ -1586,6 +1674,8 @@ func step(dt: float) -> void:
 	#
 	# 切子步在物理上是**正确**的：每个子步 dt/N，力/重力/抓取都按 dt/N 积分，
 	#    一帧的总冲量不变（早期担心的"力被重复施加"不成立 —— 那要每子步都用完整 dt）。
+	# ⚠️ 必须在子步估计**之前**（见 cull_fast_debris 的说明）：否则就是"先卡一帧再清掉"。
+	last_debris_removed = cull_fast_debris()
 	var n := _compute_substeps(dt)
 	last_substeps = n
 	var sub := dt / float(n)
@@ -2713,6 +2803,36 @@ func _break_joints_over_threshold(cands: Array) -> void:
 		j.world = null
 		joints.erase(j)
 		broken_joints.append(j)
+
+
+## 删掉"又轻又快"的灰尘（阈值见 debris_max_mass / debris_min_speed）。返回删掉的个数。
+##
+## ⚠️ 为什么由 step() **自动**调，而不是让游戏层每帧自己调：
+##    子步估计就在 step 里，而"灰尘拿到高速度"（Δv = J/m —— 同样的冲量，轻 100 倍就快
+##    100 倍）与"估计看到它"之间只隔一个子步。早一步删掉，那一帧的尖峰**根本不会发生**；
+##    放到外面调就变成"先卡一帧、下一帧才清掉"（实测那一帧 346 ms）。
+##
+## ⚠️ 两个阈值都必须 > 0 才生效（默认 0 = 关 -> 8 条逐位基准不动）。
+func cull_fast_debris() -> int:
+	if debris_max_mass <= 0.0 or debris_min_speed <= 0.0:
+		return 0
+	var keep := _interactive_bodies()
+	var removed := 0
+	for i in range(bodies.size() - 1, -1, -1):
+		var b: PBody = bodies[i]
+		if b.is_static or b.frozen or b.mass > debris_max_mass:
+			continue
+		# ⚠️ 判据用 **_motion_of**（线速度 + |角速度| x 外接半径），与子步估计**同一个度量**。
+		#    只看线速度会漏掉质量放大的那个通道：Δω = J·r/I，而 **I ∝ m** ——
+		#    同一个力矩，轻 100 倍的碎片角速度大 100 倍，而子步估计里有一项
+		#    |ω| x 半径。既然闸门的目标是"别让它拖慢世界"，判据就得和那个度量对齐。
+		if _motion_of(b) < debris_min_speed:
+			continue
+		if keep.has(b):
+			continue
+		remove_body(b)
+		removed += 1
+	return removed
 
 
 ## 碎块数量上限：超出时淘汰最小、且已休眠、且没被抓的碎片。

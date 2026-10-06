@@ -287,7 +287,9 @@ docs/               架构与精度纪律
 | `cull_outside(bounds) -> int` | 清掉跑出边界的动态体 |
 | `enforce_body_budget() -> int` | 按预算淘汰（最远的先死） |
 
-关键字段：`gravity`、`terminal_speed`、`sleeping_enabled`、
+关键字段：`gravity`、`terminal_speed`、`max_angular_velocity`（角速度上限，
+Rapier 没有这个旋钮）、`rp_max_linear_velocity`、`min_fragment_pixels`、
+`ccd_ignore_mass` / `debris_max_mass` / `debris_min_speed`（灰尘策略，默认关）、`sleeping_enabled`、
 `sleep_linear`/`sleep_surface`/`sleep_delay`、`max_speculative_margin`、
 `ccd_enabled`/`ccd_auto`/`ccd_max_motion`/`ccd_max_substeps`、
 `bodies`、`joints`（活动关节）、`broken_joints`（断掉/移除掉的，供游戏层轮询）。

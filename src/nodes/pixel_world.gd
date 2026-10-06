@@ -52,6 +52,22 @@ signal physics_step_finished(world)
 @export var max_substeps := 4
 @export var sleeping := true
 @export var terminal_speed := 650.0
+## 线速度上限（世界单位/秒，0 = 不钳）。引擎默认 40000 —— 它用来挡数值爆炸，不是手感旋钮。
+@export var max_linear_velocity := 40000.0
+## 角速度上限（rad/s，0 = 不钳）。见 PWorld.max_angular_velocity 的说明
+## （Rapier 只有线速度上限，角速度这条是引擎自己钳的）。
+@export var max_angular_velocity := 1000.0
+## 轻碎片**豁免子步估计**的质量阈值（0 = 关）。见 PWorld.ccd_ignore_mass：
+## 子步数取的是"全世界最快"的那个刚体，所以一个轻碎片就能拖慢全世界。
+@export var ccd_ignore_mass := 0.0
+
+@export_group("破坏")
+## 碎片小于这么多**像素**就不要了（在分裂时就丢掉，不生成刚体）。见 PWorld.min_fragment_pixels。
+@export var min_fragment_pixels := 4
+## 灰尘清理：质量 <= 它 **且** 运动 >= debris_min_speed 的刚体直接删（两个都 > 0 才生效）。
+## ⚠️ 删掉会打破体素守恒（玩家会看到碎片凭空消失），所以默认关。
+@export var debris_max_mass := 0.0
+@export var debris_min_speed := 0.0
 
 @export_group("材质")
 ## 全部材质。**在这里加一条就是加一种材质** —— 颜色、密度、强度一次设好。
@@ -224,17 +240,35 @@ func _ready() -> void:
 	set_physics_process(true)
 
 
+## 把本节点上的物理旋钮播到 world（gravity / 各种上限 / 破坏策略…）。
+##
+## ⚠️ 为什么要有这个方法：这些 @export 是给**编辑器**和代码驱动配置用的，而 world 是
+##    运行时对象 —— 运行中改了导出值**不会自动生效**（只有 rebuild() 会播）。
+##    运行时改完调一次它即可；**别为改一个阈值去调 rebuild()**（那会重建世界、
+##    把破坏状态全丢掉）。
+func push_physics_settings() -> void:
+	if world == null:
+		return
+	world.gravity = gravity
+	world.fixed_dt = fixed_dt
+	world.max_substeps = max_substeps
+	world.sleeping_enabled = sleeping
+	world.terminal_speed = terminal_speed
+	world.rp_max_linear_velocity = max_linear_velocity
+	world.max_angular_velocity = max_angular_velocity
+	world.ccd_ignore_mass = ccd_ignore_mass
+	world.min_fragment_pixels = min_fragment_pixels
+	world.debris_max_mass = debris_max_mass
+	world.debris_min_speed = debris_min_speed
+
+
 ## 重建整个世界：把子节点里的 PixelBody2D 全部烘焙一遍。
 ##
 ## 编辑器里改完子节点之后调一次即可（@tool 下可以从 Inspector 的
 ## "调用方法"里点，或者重新打开场景）。运行时不建议调 —— 会丢掉破坏状态。
 func rebuild() -> void:
 	world = PWorld.new()
-	world.gravity = gravity
-	world.fixed_dt = fixed_dt
-	world.max_substeps = max_substeps
-	world.sleeping_enabled = sleeping
-	world.terminal_speed = terminal_speed
+	push_physics_settings()
 	# ---- 把材质播到物理层与渲染层 ----
 	# ⚠️ 这是本节点存在的核心理由之一：材质是**一份数据**，
 	#    颜色给渲染、密度给物理、强度给破坏判据 —— 三处必须同源。
