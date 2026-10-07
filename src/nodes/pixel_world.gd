@@ -596,15 +596,7 @@ func _physics_process(delta: float) -> void:
 		steps += 1
 	if _accum > fixed_dt * float(max_substeps):
 		_accum = 0.0
-	# ⚠️⚠️ 不变量：`_body_nodes` 与 `world.bodies` **按下标一一对应**。任何绕过节点层增删刚体的
-	#    路径都会破坏它（直接 `fracture_pixels` / 门面 `spawn_*` / 灰尘策略的 `remove_body` /
-	#    调试脚本的 `add_body`）。破坏后的症状**不是报错**，而是"按下标取节点"的消费方
-	#    （游戏层的渲染同步循环）越界中断或静默错位 —— 那之后的刚体（通常正是新碎片）
-	#    这一帧不再被 sync，贴图停在旧位姿 = 用户报的"碎片位置偏差"。
-	#    按**版本号**对齐：只在真有增删时付 O(n)，平时一次整数比较。
-	if _bodies_rev != world.bodies_rev:
-		_bodies_rev = world.bodies_rev
-		realign_body_nodes()
+	sync_body_nodes()
 	if auto_render:
 		renderer.prune(_live_ids())
 		# ⚠️ 只同步**动态体**。静态体的像素内容永远不会变，而 sync 对每个刚体
@@ -789,6 +781,30 @@ func body_of(node: Node) -> PBody:
 ## 同步一遍渲染器）。
 ## 上次对齐时的 `world.bodies_rev`（见 `_physics_process` 里那段不变量说明）。
 var _bodies_rev := -1
+
+
+## 按版本号**检查并对齐** `_body_nodes`（返回是否真的对齐了）。
+##
+## ⚠️⚠️ 不变量：`_body_nodes` 与 `world.bodies` **按下标一一对应**。任何绕过节点层增删刚体的
+##    路径都会破坏它（直接 `fracture_pixels` / 门面 `spawn_*` / 灰尘策略的 `remove_body` /
+##    调试脚本的 `add_body`）。破坏后的症状**不是报错**，而是"按下标取节点"的消费方
+##    （游戏层的渲染同步循环）越界中断或静默错位 —— 那之后的刚体（通常正是新碎片）
+##    这一帧不再被 sync，贴图停在旧位姿 = 用户报的"碎片位置偏差"。
+##
+## ⚠️ `_physics_process` 每帧会调它（按版本号：平时只是一次整数比较）。
+##    **自己驱动步进的项目必须自己每帧调一次** —— 那种项目通常会
+##    `set_physics_process(false)`（避免同一帧推进两次），于是节点自己的每帧钩子**不会跑**，
+##    自动对齐也就**失效**了（甲方 ink-2 正是这样：它接管了步进）。
+##
+## 用法：`_main.sync_body_nodes()` —— 放在你那次 `_physics_process` 的开头（或渲染同步之前）。
+func sync_body_nodes() -> bool:
+	if world == null:
+		return false
+	if _bodies_rev == world.bodies_rev:
+		return false
+	_bodies_rev = world.bodies_rev
+	realign_body_nodes()
+	return true
 
 
 func realign_body_nodes() -> void:

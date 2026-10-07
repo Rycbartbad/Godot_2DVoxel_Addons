@@ -82,5 +82,26 @@ func _initialize() -> void:
 	pw._physics_process(1.0 / 60.0)
 	_c("没有增删时不动数组（省掉每帧 O(n)）", pw._body_nodes == nodes_before)
 
+	# ⑤ **公开方法**：自己驱动步进的项目（set_physics_process(false)）必须能自己调
+	var rev_before: int = w.bodies_rev
+	_c("没有增删时 sync_body_nodes() 返回 false（不白对齐）", not pw.sync_body_nodes(),
+		"bodies_rev %d" % rev_before)
+	var b3 := PBody.new()
+	var s3 := PixelShape.new()
+	s3.fill_rect(Rect2i(0, 0, 4, 4), 1)
+	w.add_body(b3, [s3])
+	_c("有增删时 sync_body_nodes() 返回 true 并真的对齐",
+		pw.sync_body_nodes() and _aligned(pw),
+		"nodes %d / bodies %d" % [pw._body_nodes.size(), w.bodies.size()])
+	_c("再调一次返回 false（版本号没变）", not pw.sync_body_nodes())
+	w.remove_body(b3)
+	pw.sync_body_nodes()
+	_c("删完再对齐一次仍然正确", _aligned(pw),
+		"nodes %d / bodies %d" % [pw._body_nodes.size(), w.bodies.size()])
+	# world 为空时不许崩（场景还没 _ready 的窗口期）
+	var bare = AddonWorld.new()
+	_c("world 还没建时 sync_body_nodes() 返回 false 且不报错", not bare.sync_body_nodes())
+	bare.free()
+
 	print("=== %d passed, %d failed ===" % [_pass, _fail])
 	quit(1 if _fail > 0 else 0)

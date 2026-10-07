@@ -459,6 +459,28 @@ func _on_step(w) -> void:
 - **清掉锚点已不存在的关节** —— ⚠️ `body_a`/`body_b` 为 `null` 表示"锚在静态世界"，
   那是**合法**的，必须保留。
 
+### `sync_body_nodes() -> bool`
+
+**按版本号**检查并对齐 `_body_nodes`（返回是否真的对齐了）—— 只在刚体增删过时才付 O(n)，
+平时只是一次整数比较。
+
+⚠️ `PixelWorld._physics_process` 每帧会调它，所以**正常项目不用管**。
+但**自己驱动步进的项目必须自己每帧调一次**：那种项目通常会 `set_physics_process(false)`
+（避免同一帧推进两次），于是节点自己的每帧钩子**不会跑**，自动对齐也就失效了。
+
+```gdscript
+func _physics_process(delta):
+    _main.sync_body_nodes()      # 放在渲染同步之前
+    # ... 你自己的子步循环 + 渲染同步
+```
+
+⚠️ 为什么需要它：`_body_nodes` 与 `world.bodies` 有一条**硬不变量**（按下标一一对应），
+而任何**绕过节点层**增删刚体的路径都会破坏它（直接 `fracture_pixels`、门面 `spawn_*`、
+灰尘策略的 `remove_body`、调试脚本的 `add_body`）。破坏后的症状**不是报错**：
+数组**变短**时"按下标取节点"的消费方（渲染同步循环）越界中断，那之后的刚体（通常正是
+新碎片）这一帧不再被 `sync`，贴图停在旧位姿 = "碎片渲染位置偏差"；数组**变长**时静默错位，
+`has_own_sprite` 会去问**别人的节点**。
+
 ### `fracture_pixels_and_sync(body, removals, burst_speed := 0.0, dynamic_fragments := false, static_anchors := {})`
 
 `world.fracture_pixels(...)` + `sync_world_bodies()` 一步到位 —— **推荐用这个**，
