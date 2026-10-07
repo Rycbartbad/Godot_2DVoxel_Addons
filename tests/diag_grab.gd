@@ -26,6 +26,6 @@ func _initialize() -> void:
 		world.step(1.0 / 60.0)
 		print("%4d | %7.2f | %8.1f | %8d | %4s | %8.3f | %.1f" % [
 			i, b.com_world().x, b.linear_velocity.x, world.last_substeps,
-			str(world._ccd_saturated), b.com_world().x - x0,
+			str(world.last_substeps), b.com_world().x - x0,
 			2500.0 * b.mass * (1.0 / 60.0)])
 	quit(0)

@@ -83,6 +83,68 @@ GDScript 那一份实现已经删除，native 就是唯一实现。
 
 > 手动调 `ccd_max_substeps` 要小心：子步数会改变接触时序，进而改变物理结果。
 > 而且它和 `max_speculative_margin` 是**耦合**的 —— 见 pitfalls.md。
+> ⚠️ 它**曾经是死声明**（写成 16 而全引擎无人读，真实钳制是 `ccd_substep_budget = 600`）。
+> 现在接回来了，且默认 **0 = 不限**（保持逐位基准不变）。
+
+#### 小碎片：CCD 最贵的那条路径（四个旋钮，默认全关）
+
+子步是**全局**的：每个子步都要把整个世界重跑一遍，所以
+**帧时间 = 子步数 x 全世界矩形数**，而子步数只由**一个**最快的刚体决定。
+实测（876 矩形，真实地图规模）：一个 **2x2 的碎片**以 40000 px/s 飞过
+-> 334 子步 -> **593 ms/固定步**；配合「一帧追 4 个固定步」的累加器，一帧能叠到几秒。
+
+⚠️ 这个坑对**小碎片**是**结构性**的，不是调参能躲的：业界五个引擎（Rapier / Box2D v3 /
+Bullet / Jolt / PhysX）的 CCD 判据都是「每步运动 > 0.5 x **自身最薄尺寸**」，
+而**物体越小，变成「快体」所需的速度越低** —— 60 Hz 下 1 像素的碎片只要 30 px/s
+就永久满足。PhysX 把它写成明确的失败模式警告（paper-thin rigid body）。
+所以业界做法是**根本不给它们刚体**：Teardown 有最小碎片尺寸、Noita 从不把散像素
+升格成刚体、roxlap 让碎片落地即碎成纯表现粒子。
+
+| 旋钮 | 作用 |
+| --- | --- |
+| `ccd_per_body_only` | **不做全局子步**：子步恒为 1，防穿全交逐体 CCD（见下） |
+| `ccd_max_substeps` | 全局子步**硬上限**（0 = 不限，默认）。⚠️ 逐体模式下不参与 |
+| `ccd_substep_cost_budget_us` | 子步循环的**时间预算**（任何时候都生效；`ccd_grab_substep_cost_budget_us` 只管抓取时） |
+| `ccd_min_driver_thickness` | 比它薄的刚体**不参与**子步估计（**尺寸**豁免；与 `ccd_ignore_mass` 的**质量**豁免是两个独立的轴，都开取并集） |
+| `max_surface_speed` | 速度的**表面速度**上限：线速度与 `|w| x 外接半径` 用同一把尺子（`max_angular_velocity` 是裸 rad/s —— 60 rad/s x 300 px 半径 = 17860 px/s = 151 子步，而线速度上限 1000 只值 9 子步） |
+| `ccd_per_body` | `ccd_enabled` 只当总闸，谁开由 `PBody.ccd` / `ccd_auto`（按 `PBody.needs_ccd`）决定。老行为是**全世界每个刚体**都推成 Rapier 的 bullet，而 bullet 会连动态目标一起扫 |
+| `min_fragment_thickness` | 最薄尺寸低于它的碎片**不生成刚体**，随 `fracture_pixels` 的 `downgraded` 交回调用方（调用方可以降级成纯美术） |
+
+##### 为什么「不做全局子步」是对的（实测）
+
+子步是**全局**的（每子步重跑整条 Rapier 管线），而防穿是**逐体**的。
+拿全局子步防穿 = 让一个最快的碎片决定全世界的帧时间。
+4 像素薄墙 + 12x12 块、20000 px/s 冲过去：
+
+| 配置 | 结果 | 峰值子步 |
+| --- | --- | --- |
+| 全局子步 + 逐体 CCD 软预测 0.0 | 停在 x=188.1 | **167** |
+| **不做全局子步** + 逐体 CCD 软预测 1.5 | 停在 x=188.0 | **1** |
+| 不做全局子步 + Rapier CCD 全关 | x=3247，**穿过去** | 1 |
+
+花 167 倍的代价，换来一个**更差**的结果。
+
+> ⚠️⚠️ 前提是 **`rp_soft_ccd_prediction > 0`**。Rapier 默认 **0.0 —— 等于逐体 CCD 半关**
+> （快物体没有任何提前量，只能「正好撞上」才发现）。它比 `enable_ccd`（bullet 旗）
+> 重要得多：对静态世界的那一层自动扫掠**不看** bullet 旗，由 `rp_ccd_substeps >= 1` 控制，
+> 但两层都吃这个提前量。引擎里 `max_speculative_margin` 是同一个概念的另一侧。
+> `ccd_per_body_only` 打开时会检查这两个前提，缺了就 push_warning。
+> ⚠️ 逐体 CCD 对**动态-动态**高速相撞仍然无解（Rapier 官方：two CCD-enabled objects
+> might still tunnel）。要为那种场景兜底就关掉 `ccd_per_body_only`，回到全局子步。
+
+另有两条**默认行为**的修正（不是旋钮）：
+
+- 抓取迟滞的 `_substeps_held` 现在**也会被上限压回来**。修之前上限只压 `need`，
+  压不住已经涨上去的 held —— 实测 `grab_substep_cap` 算出 1 而返回值是 **77**，
+  **768 ms/固定步**。这是「卡死」的直接来源。
+- `PBody.thinnest_extent()` / `needs_ccd()`：逐体按尺寸的判据（Rapier `is_moving_fast` 的
+  同一个形状）。它**不是**用来给每个碎片开 CCD 的 —— 恰恰相反，是用来**认出**
+  「永远满足判据」的灰尘，然后别让它们拖累全世界。
+
+⚠️ `ccd_clamp_motion` 现在是**死旋钮**（Rapier 迁移的遗留，见它自己的墓碑）；
+`_ccd_saturated` 已删。**不要**把它们接到 Rapier 路径上 —— 那条硬钳曾经无条件生效，
+把「偶发穿模」升级成「全局慢动作」（每子步 2 像素 = 60 fps 下 120 px/s 上限，
+而重力是 900 px/s²，箱子根本落不下来）。
 
 #### 关节场景：`ccd_joint_aware`（默认关）
 

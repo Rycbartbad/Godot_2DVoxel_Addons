@@ -209,8 +209,17 @@ inertia = Σ density_i * (|p_i - com|² + 1/6)      ← 1×1 方块绕自身中�
 | 6000 px/s | 100 px | **穿过去** | 被挡住 |
 
 做法是**自适应子步**（`PWorld._compute_substeps`）：按本步最快物体的位移把一步切成 N 个子步，
-保证每个子步位移不超过 `ccd_max_motion`。朴素、极稳、结果可复现，
-也正是"small steps"那一派（Dennis 新引擎）的思路。子步上限 `ccd_max_substeps` 兜住性能。
+保证每个子步位移不超过 `ccd_max_motion`。朴素、极稳、结果可复现。
+
+> ⚠️ **两处更正（2026-10）**：
+> ① 「也正是 small steps 那一派（Dennis 新引擎）的思路」—— **引用错位**。Dennis 的
+>    substepping 是**求解器**子步（Temporal Gauss-Seidel，固定小步数，而且**不重算宽相
+>    与接触点** —— Catto 原话："It would be very expensive to recompute the contact points
+>    every sub-step"）。这里是**自适应、无上限、每子步重跑整条 Rapier 管线**，正好是
+>    他说「非常贵」的那一种。
+> ② 「子步上限 `ccd_max_substeps` 兜住性能」—— 它**当时是死声明**（写 16 而无人读，
+>    真实钳制是 `ccd_substep_budget = 600`）。现在接回来了，默认 0 = 不限。
+>    小碎片那条路径见 `docs/manual/performance.md` 的「小碎片」一节。
 
 **极端情况的实测边界**（1 像素薄墙，12×12 箱子）：
 
