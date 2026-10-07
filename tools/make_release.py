@@ -7,6 +7,20 @@ tag 用 git 推就够了，但 **Release 是 GitHub 的元数据**，git 推不�
 必须走 API。而 API 需要 token —— 这个脚本把 token 的读取、仓库地址解析、
 正文装配都封起来，让"发一个版本"变成一条命令。
 
+## ⚠️⚠️ 现在 CI 才是 Release 的**唯一**作者，本脚本是兜底
+
+推 tag 会触发 `.github/workflows/ci.yml` 的 `softprops/action-gh-release`，
+它建 Release（正文取 `docs/release_notes/<tag>.md`）并把 zip 附件挂上去。
+
+**正常情况下不要再跑本脚本** —— 两条路同时建 Release 会撞车：v0.4.1 那次两边
+`created_at` 是同一秒，结果同一个 tag 上挂了**两个** release，而且此后 API 对它们
+的 PATCH/DELETE 一律 500（GitHub 侧状态不一致），只能去网页上手工删一个。
+
+什么时候还用得上它：CI 没跑成（网络 / 权限 / workflow 被禁用）而 Release 必须补上时。
+⚠️ 另外它有个已知缺陷：更新已有 Release 时会把 `tag_name` 也发过去，GitHub 判
+"already_exists" 直接 422 —— 所以"更新正文"这条路径实际是坏的（v0.4.1 实测）。
+要用就先修这里，别指望 --dry-run 能看出来。
+
 ## token 放哪（**不要**贴进对话或写进仓库）
 
 脚本按顺序找：

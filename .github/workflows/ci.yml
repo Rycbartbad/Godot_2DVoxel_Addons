@@ -58,12 +58,22 @@ jobs:
           path: pixel_destruction*.zip
           if-no-files-found: error
 
+      ## ⚠️⚠️ 这一步是 Release 的**唯一**作者 —— 别在它旁边再跑 tools/make_release.py。
+      ##
+      ## 墓碑：v0.4.1 那次两条路**同时**建 Release，两边 created_at 是同一秒 ——
+      ## 结果同一个 tag 上挂了**两个** release（一个只有自动 changelog + zip，
+      ## 一个有完整发布说明但没附件），而且此后 API 对它们的 PATCH/DELETE 一律 500
+      ## （GitHub 侧状态不一致），只能去网页上手工删一个。
+      ## 所以：正文交给这里（body_path 指到仓库里的发布说明），
+      ## tools/make_release.py 退化成**CI 没跑成时的兜底**（见它的 docstring）。
       - name: 打 tag 时发布 Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: pixel_destruction*.zip
-          generate_release_notes: true
+          ## ⚠️ body_path 与 generate_release_notes **不能同时用**（后者会覆盖前者）。
+          ## 发布说明里已经带了该有的内容，changelog 链接放在它末尾更可控。
+          body_path: docs/release_notes/${{ github.ref_name }}.md
 
   ## API 参考：用 Godot 自带的 --doctool --gdscript-docs 导出结构，
   ## 再由 tools/gen_api_docs.py 拼成 Markdown（结构取自 XML，排版取自原始注释）。
