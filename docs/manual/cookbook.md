@@ -557,4 +557,5 @@ func _physics_process(delta):
 ⚠️ 但**别只看原生那一列**：GDScript 参照实现 2.5 ms/步，一帧里要塞好几个瓶子就不行了。
 而参照实现必须留着（逐位对拍的基准），所以扩展没加载时 `fluid_pbf.gd` 会
 `push_warning` 并退回它 —— 慢，但结果是对的。原生与 GDScript **逐位相同**，
-闸门 `tests/validation_fluid.gd`（28 项）。
+闸门 `tests/validation_fluid.gd`（**38 项**，含一条 `native_calls` 断言：
+"这条路真的走过了"—— 否则重编失败时"原生 == 参照"会退化成 GDScript 跟自己比）。
