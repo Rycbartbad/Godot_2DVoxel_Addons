@@ -260,6 +260,30 @@ px.world.max_angular_velocity = 50.0    # rad/s，0 = 不钳；默认 1000（宽
 - 自己写碰撞代理时同理：别在 GDScript 里逐像素扫 AABB + 贪心，用
   `GreedyRects.decompose(shape, max_rects)`（它就是分发入口）。
 
+### 连通分量标注也在原生里（`PixelRaster` op 3）
+
+`Destruction.components()`（`ShapeOps.component_map()` 底下就是它）现在走原生。
+768x100 满实心（1152 块）：
+
+| | GDScript 参照实现（**已开 WorkerThreadPool**）| 原生 |
+|---|---|---|
+| 一次全量标注 | 6.053 ms | **1.905 ms** |
+
+⚠️ 注意参照实现那一列是**并行之后**的数字 —— 这 3.2 倍是**单线程 C++ 对多线程 GDScript**
+拿到的，赢在每步没有函数调用开销（GDScript 一次调用 1289 ns、一次 Packed 下标写 23 ns）。
+这也解释了为什么"把整条管线搬进 GDExtension"比"只把泛洪搬上 GPU"更值：
+GPU 版内核本身只要 0.75 ms，但周围的字典/数组记账 14.7 ms GPU 加不到
+（见 `src/gpu/gpu_destruction.gd` 的文件头）。
+
+- 判据是**逐位相同**：同样的分组、同样的顺序、同样的掩码 —— **顺序不同也是不同**
+  （它会进 Rapier 的碰撞体顺序）。闸门 `tests/validation_components_native.gd`
+  （49 项断言 / 23 个用例：棋盘、满块、空块、缺块、负块坐标、对角不算连通、随机形状）。
+- 闸门里还钉了"**真的走了原生**"（`native_calls` 计数）—— 否则"悄悄退回 GDScript"
+  会让逐位对拍变成同义反复。
+- 走不到原生的情况：扩展没加载 / DLL 太旧（没有 `components` 方法）。两条路**逐位相同**。
+- 自己写体素模拟时同理：别在 GDScript 里逐块泛洪 + union-find，
+  用 `Destruction.components(shape)` 或 `ShapeOps.component_map(shape)`（它就是分发入口）。
+
 ### GPU：只对体素有用，对刚体没用
 
 | 该上 GPU 的 | 不该上 GPU 的 |

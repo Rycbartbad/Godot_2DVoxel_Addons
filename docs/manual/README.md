@@ -184,7 +184,7 @@ var p1 := px.total_momentum()
 |---|---|
 | 只处理变过的区域 | `shape.dirty_chunks()` / `shape.has_dirty()` / `clear_dirty()` |
 | 沿连通体素走一遍 | `shape.flood(from, matches, visit)` |
-| 知道某像素属于哪个连通体 | `ShapeOps.component_map(shape)` |
+| 知道某像素属于哪个连通体 | `ShapeOps.component_map(shape)`（原生，见 performance.md）|
 | 邻域 | `PixelShape.OFFSETS_4 / OFFSETS_8`（热循环里直接内联，别调 `neighbors()`） |
 | 手动标脏（批量写入后） | `shape.mark_dirty(cx, cy)` |
 

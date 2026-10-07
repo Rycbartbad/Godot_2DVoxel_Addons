@@ -575,7 +575,7 @@ static void run_rapier_cmd(RapierInstance *inst, const uint8_t *in, size_t in_n,
 // PixelRaster 自己的一组 StringName。
 // ⚠️ 不复用 RapierPhys 那几个缓冲区：复用会让两个类的方法名/参数名互相覆盖，
 //    注册出来的签名静默错位（而症状是"调用时参数对不上"）。
-static SN g_sn_pxr_class, g_sn_pxr_fill, g_sn_pxr_decomp, g_sn_pxr_a0, g_sn_pxr_a1, g_sn_pxr_ret;
+static SN g_sn_pxr_class, g_sn_pxr_fill, g_sn_pxr_decomp, g_sn_pxr_comp, g_sn_pxr_a0, g_sn_pxr_a1, g_sn_pxr_ret;
 
 // ---- op 2 的几何内核：块内贪心 + 极大行程融合 ----
 //
@@ -871,6 +871,239 @@ static void run_raster_decompose(CmdRd &r, uint8_t *out, size_t out_cap, size_t 
 	}
 }
 
+// ---- op 3 的几何内核：块内泛洪 + 接缝 union-find + 归组 ----
+//
+// ⚠️⚠️ 这是 src/core/destruction.gd 的 _components_cpu + _group + components 的
+//    **第二份实现**，判据只有一条：**逐位相同** —— 同样的分组、同样的顺序、同样的掩码。
+//    闸门 tests/validation_components_native.gd。
+//    **顺序不同也是不同**：分组顺序 = 节点首次出现的顺序，组内 chunk 顺序 = 首次出现的顺序
+//    （参照实现靠 Dictionary 的插入序）。
+//
+// 为什么值得搬进原生：这条路径是**纯位运算 + 数组**（块内泛洪是 uint64 迭代、
+// 接缝是 union-find、归组是拼装），没有 GDScript 特有的语义；
+// 而参照实现 768x100（1248 块）要 13.5 ms —— 那还是**已经开了 WorkerThreadPool
+// 并行之后**的数字。C++ 这边单线程，赢在每步没有函数调用开销
+// （GDScript 一次函数调用 1289 ns、一次 Packed 下标写 23 ns）。
+
+// 与 pixel_bits.gd 的 col_mask / row_mask / MASK_LOW56 同值。
+// ⚠️ 0x8080808080808080 这类字面量在 GDScript 里超 int64 上限、只能逐位构造；
+//    C++ 的 uint64 能直接写，但**值必须一样**。
+static const uint64_t PX_COL0 = 0x0101010101010101ULL;
+static const uint64_t PX_COL7 = 0x8080808080808080ULL;
+static const uint64_t PX_ROW0 = 0xFFULL;
+static const uint64_t PX_ROW7 = 0xFF00000000000000ULL;
+static const uint64_t PX_LOW56 = 0x00FFFFFFFFFFFFFFULL;
+
+// Bits.dilate4：4 邻域膨胀一步（跨行/跨块溢出已处理）
+static inline uint64_t px_dilate4(uint64_t m) {
+	return m | ((m & ~PX_COL7) << 1) | ((m & ~PX_COL0) >> 1) | (m << 8) | ((m >> 8) & PX_LOW56);
+}
+
+// Bits.flood：块内 4 邻域连通泛洪。位运算迭代，无分支、无队列。
+static inline uint64_t px_flood(uint64_t seed, uint64_t occ) {
+	uint64_t f = seed & occ;
+	if (f == 0) return 0;
+	for (;;) {
+		uint64_t nx = px_dilate4(f) & occ;
+		if (nx == f) break;
+		f = nx;
+	}
+	return f;
+}
+
+// Destruction._find（带路径压缩）
+static int32_t px_uf_find(std::vector<int32_t> &parent, int32_t i) {
+	int32_t root = i;
+	while (parent[(size_t)root] != root) root = parent[(size_t)root];
+	while (parent[(size_t)i] != root) {
+		int32_t next = parent[(size_t)i];
+		parent[(size_t)i] = root;
+		i = next;
+	}
+	return root;
+}
+
+// Destruction._union：**小下标当父**。换一种写法分组结果一样，但"逐位相同"
+// 是这里的判据 —— 不给自己留解释空间。
+static void px_uf_union(std::vector<int32_t> &parent, int32_t a, int32_t b) {
+	int32_t ra = px_uf_find(parent, a);
+	int32_t rb = px_uf_find(parent, b);
+	if (ra == rb) return;
+	if (ra < rb) parent[(size_t)rb] = ra;
+	else parent[(size_t)ra] = rb;
+}
+
+// Destruction._mask_index：第一个包含该 bit 的分量序号，找不到给 0（照抄）
+static int32_t px_mask_index(const std::vector<uint64_t> &masks, uint64_t bit) {
+	for (size_t i = 0; i < masks.size(); ++i)
+		if ((masks[i] & bit) != 0) return (int32_t)i;
+	return 0;
+}
+
+// op 3：连通分量标注（= Destruction.components()）。
+//
+//   3  components(i32 n_chunks, { i32 cx, i32 cy, i64 occ } * n_chunks)
+//        -> i32 n_groups, i32 total_pairs,
+//           { i32 n_pairs, { i32 cx, i32 cy, i64 mask } * n_pairs } * n_groups
+//      written = 8 + total_pairs*16；结果段放不下时**只写头**（written = 8，
+//      total_pairs 在里面）—— 调用方按它精确重开一次。与 op 2 同一条约定。
+//
+//      ⚠️ 传 cx/cy 而不是 chunk key：key 的编码（(cx << 32) | (cy & 0xFFFFFFFF)）
+//        是 PixelShape 的实现细节，让它只留在 GDScript 一侧（参照实现那边
+//        也是 make_key/key_x/key_y 三个函数在管）。
+static void run_raster_components(CmdRd &r, uint8_t *out, size_t out_cap, size_t &written) {
+	const size_t HEAD = 8;                       // n_groups, total_pairs
+	written = 0;
+	if (out_cap < HEAD) {
+		printf("[PixelRaster] components 结果段太小：out_cap=%zu\n", out_cap);
+		return;
+	}
+	int32_t n = r.i32();
+	if (n < 0) n = 0;
+	if (!r.ok) return;
+
+	struct CChunk {
+		int32_t cx = 0, cy = 0;
+		uint64_t occ = 0;
+		std::vector<uint64_t> masks;
+		std::vector<int32_t> nodes;
+	};
+	std::vector<CChunk> cs;
+	cs.reserve((size_t)n);
+	std::unordered_map<uint64_t, int32_t> by_key;
+	for (int32_t i = 0; i < n; ++i) {
+		int32_t cx = r.i32();
+		int32_t cy = r.i32();
+		int64_t occ = r.i64();
+		if (!r.ok) return;
+		CChunk c;
+		c.cx = cx;
+		c.cy = cy;
+		c.occ = (uint64_t)occ;
+		// ① 块内分量：反复取**最低置位**当种子 —— 与 _component_slice 同序
+		uint64_t remaining = c.occ;
+		while (remaining != 0) {
+			uint64_t seed = remaining & (~remaining + 1ULL);
+			uint64_t comp = px_flood(seed, c.occ);
+			c.masks.push_back(comp);
+			remaining &= ~comp;
+		}
+		uint64_t key = (uint64_t)(((int64_t)cx << 32) | (int64_t)(uint32_t)cy);
+		by_key.emplace(key, (int32_t)cs.size());
+		cs.push_back(std::move(c));
+	}
+	// ② 节点表：块序 + 块内分量序（= 参照实现的 node_chunk / node_mask）
+	std::vector<int32_t> node_chunk;
+	std::vector<uint64_t> node_mask;
+	for (int32_t i = 0; i < (int32_t)cs.size(); ++i) {
+		for (size_t j = 0; j < cs[(size_t)i].masks.size(); ++j) {
+			cs[(size_t)i].nodes.push_back((int32_t)node_chunk.size());
+			node_chunk.push_back(i);
+			node_mask.push_back(cs[(size_t)i].masks[j]);
+		}
+	}
+	int32_t node_count = (int32_t)node_chunk.size();
+	std::vector<int32_t> parent((size_t)node_count);
+	for (int32_t i = 0; i < node_count; ++i) parent[(size_t)i] = i;
+	// ③ 接缝归并：**只查 +X / +Y**（查双向会重复；参照实现就是单向）
+	for (int32_t i = 0; i < (int32_t)cs.size(); ++i) {
+		CChunk &c = cs[(size_t)i];
+		uint64_t rk = (uint64_t)(((int64_t)(c.cx + 1) << 32) | (int64_t)(uint32_t)c.cy);
+		auto it = by_key.find(rk);
+		if (it != by_key.end()) {
+			CChunk &rc = cs[(size_t)it->second];
+			uint64_t common = (c.occ & PX_COL7) & ((rc.occ & PX_COL0) << 7);
+			// ⚠️ 两边都只有 1 个分量时，连通的 bit 连的都是**同一对节点** ——
+			//    逐 bit 跑是纯重复（参照实现里 _group 27.1 ms 九成在这里）。
+			if (common != 0) {
+				if (c.masks.size() == 1 && rc.masks.size() == 1) {
+					px_uf_union(parent, c.nodes[0], rc.nodes[0]);
+				} else {
+					while (common != 0) {
+						int32_t bi = __builtin_ctzll(common);
+						px_uf_union(parent,
+							c.nodes[(size_t)px_mask_index(c.masks, 1ULL << bi)],
+							rc.nodes[(size_t)px_mask_index(rc.masks, 1ULL << (bi - 7))]);
+						common &= common - 1;
+					}
+				}
+			}
+		}
+		uint64_t dk = (uint64_t)(((int64_t)c.cx << 32) | (int64_t)(uint32_t)(c.cy + 1));
+		auto it2 = by_key.find(dk);
+		if (it2 != by_key.end()) {
+			CChunk &dc = cs[(size_t)it2->second];
+			uint64_t common = (c.occ & PX_ROW7) & ((dc.occ & PX_ROW0) << 56);
+			if (common != 0) {
+				if (c.masks.size() == 1 && dc.masks.size() == 1) {
+					px_uf_union(parent, c.nodes[0], dc.nodes[0]);
+				} else {
+					while (common != 0) {
+						int32_t bi = __builtin_ctzll(common);
+						px_uf_union(parent,
+							c.nodes[(size_t)px_mask_index(c.masks, 1ULL << bi)],
+							dc.nodes[(size_t)px_mask_index(dc.masks, 1ULL << (bi - 56))]);
+						common &= common - 1;
+					}
+				}
+			}
+		}
+	}
+	// ④ 按 root 归组：**顺序 = 节点首次出现的顺序**（参照实现靠 Dictionary 插入序）
+	struct CGroup {
+		std::vector<int32_t> cix;
+		std::vector<uint64_t> mask;
+		std::unordered_map<int32_t, size_t> at;
+	};
+	std::vector<CGroup> groups;
+	std::unordered_map<int32_t, int32_t> root_group;
+	for (int32_t i = 0; i < node_count; ++i) {
+		int32_t root = px_uf_find(parent, i);
+		auto it = root_group.find(root);
+		int32_t gi;
+		if (it == root_group.end()) {
+			gi = (int32_t)groups.size();
+			root_group.emplace(root, gi);
+			groups.push_back(CGroup());
+		} else {
+			gi = it->second;
+		}
+		CGroup &g = groups[(size_t)gi];
+		int32_t ci = node_chunk[(size_t)i];
+		auto it2 = g.at.find(ci);
+		if (it2 == g.at.end()) {
+			g.at.emplace(ci, g.cix.size());
+			g.cix.push_back(ci);
+			g.mask.push_back(node_mask[(size_t)i]);
+		} else {
+			g.mask[it2->second] |= node_mask[(size_t)i];
+		}
+	}
+	// ⑤ 写出
+	int32_t n_groups = (int32_t)groups.size();
+	int32_t total_pairs = 0;
+	for (size_t i = 0; i < groups.size(); ++i) total_pairs += (int32_t)groups[i].cix.size();
+	CmdWr w; w.p = out; w.cap = out_cap; w.i = 0;
+	w.i32(n_groups);
+	w.i32(total_pairs);
+	if (HEAD + (size_t)total_pairs * 16 <= out_cap) {
+		for (size_t i = 0; i < groups.size(); ++i) {
+			const CGroup &g = groups[i];
+			w.i32((int32_t)g.cix.size());
+			for (size_t j = 0; j < g.cix.size(); ++j) {
+				const CChunk &c = cs[(size_t)g.cix[j]];
+				w.i32(c.cx);
+				w.i32(c.cy);
+				int64_t m = (int64_t)g.mask[j];
+				w.raw(&m, 8);
+			}
+		}
+		written = w.i;
+	} else {
+		written = HEAD;
+	}
+}
+
 static void run_raster_cmd(const uint8_t *in, size_t in_n, uint8_t *out, size_t out_cap, size_t &written) {
 	written = 0;
 	CmdRd r; r.p = in; r.n = in_n; r.i = 0;
@@ -924,6 +1157,10 @@ static void run_raster_cmd(const uint8_t *in, size_t in_n, uint8_t *out, size_t 
 			}
 			case 2: {
 				run_raster_decompose(r, out, out_cap, written);
+				break;
+			}
+			case 3: {
+				run_raster_components(r, out, out_cap, written);
 				break;
 			}
 			default:
@@ -1020,6 +1257,15 @@ static void call_raster_fill(void *method_userdata, GDExtensionClassInstancePtr 
 // 分派靠命令流里的 op 字节。之所以还是两个方法：GDScript 侧要能
 // has_method("decompose") 判断 DLL 是不是太旧（老 DLL 里没有它）。
 static void call_raster_decompose(void *method_userdata, GDExtensionClassInstancePtr p_instance,
+		const GDExtensionConstVariantPtr *p_args, GDExtensionInt p_argument_count,
+		GDExtensionVariantPtr r_return, GDExtensionCallError *r_error) {
+	(void)p_instance;
+	call_cmd_glue(raster_dispatch, nullptr, p_args, p_argument_count, r_return, r_error);
+}
+
+// 与 fill_region / decompose 同一个签名，第三个方法名只是为了
+// has_method("components") 能判断 DLL 是不是太旧。
+static void call_raster_components(void *method_userdata, GDExtensionClassInstancePtr p_instance,
 		const GDExtensionConstVariantPtr *p_args, GDExtensionInt p_argument_count,
 		GDExtensionVariantPtr r_return, GDExtensionCallError *r_error) {
 	(void)p_instance;
@@ -1139,6 +1385,12 @@ static void register_pixel_raster() {
 	mi2.call_func = call_raster_decompose;
 	g_register_method(g_library, (GDExtensionConstStringNamePtr)g_sn_pxr_class.buf, &mi2);
 	printf("[PixelRaster] 已注册方法 decompose\n");
+
+	GDExtensionClassMethodInfo mi3 = mi;
+	mi3.name = (GDExtensionStringNamePtr)g_sn_pxr_comp.buf;
+	mi3.call_func = call_raster_components;
+	g_register_method(g_library, (GDExtensionConstStringNamePtr)g_sn_pxr_class.buf, &mi3);
+	printf("[PixelRaster] 已注册方法 components\n");
 }
 
 
@@ -1854,6 +2106,7 @@ extern "C" __declspec(dllexport) GDExtensionBool gdextension_init(
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_pxr_class.buf, "PixelRaster");
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_pxr_fill.buf, "fill_region");
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_pxr_decomp.buf, "decompose");
+	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_pxr_comp.buf, "components");
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_pxr_a0.buf, "input");
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_pxr_a1.buf, "out_template");
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_pxr_ret.buf, "result");
