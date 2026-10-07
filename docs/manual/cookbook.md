@@ -478,3 +478,83 @@ for i in n:
 ```
 
 灰尘清理挂在 `step()` 里，绕过它就**一次都不会跑**（阈值设多少都没用，且不报错）。
+
+---
+
+## 16. 瓶里的液体（PBF 粒子流体）
+
+`src/fluid/fluid_pbf.gd` 是一套**纯视觉**的粒子流体：不参与物理像素、不做碰撞，
+只给你一张「哪里是液体」的覆盖率掩码。
+
+**什么时候用它**：液体量跟着某个数值走（血量 / 燃料 / 水位），而且**容器会转**。
+它的重力就是一个向量，所以"玩家翻跟头液面跟着晃"是免费的。
+
+**什么时候别用**：液体要能被踩、要参与碰撞、要流到世界地形上。那要的是"液体变成像素"，
+是另一件事 —— 见 `docs/2d_pixel_physics_framework.md` 的缺口表。
+
+### 最小用法
+
+```gdscript
+const FluidPBF := preload("res://src/fluid/fluid_pbf.gd")
+
+var fluid := FluidPBF.new()
+fluid.resize_grid(26, 14)              # 网格覆盖你的容器内部
+fluid.spacing = 2.0                    # 一格 = 2 像素（见下面「单位」）
+fluid.radius = 2.0 * 0.463             # radius/spacing 必须保持在 0.463
+fluid.max_particles = 300
+fluid.init_particles(300)
+fluid.fill_rate = 2                    # 每步最多增删几个粒子 -> 液面一格一格走
+
+func _physics_process(delta):
+    fluid.dt = delta
+    fluid.set_fill_ratio(health.ratio())        # 只设目标，不立刻删
+    var g := _gravity_in_container_local() * fluid.spacing * 0.5
+    fluid.step(g.x, g.y)
+    for x in fluid.num_x:
+        for y in fluid.num_y:
+            if fluid.ink[x * fluid.num_y + y] != 0:
+                _plot(x, y)                          # 有液体
+```
+
+### 四条必须知道的
+
+1. **`set_fill_ratio()` 只设目标**，真正增删粒子发生在 `step()` 里，每步最多
+   `fill_rate` 个 —— 这就是"液面一格一格往下走"而不是"一下塌掉"的来源。
+   要一步到位请显式调 `snap_fill()`（初始化 / 测试用）。
+   ⚠️ 反过来设计（`set_fill_ratio` 顺手删到位）是个陷阱：它恰恰是每帧都会被调的
+   那个 API，一帧之内就会把液体删光。
+2. **`rest_density` 只在首帧定一次**，之后粒子数怎么变都不重算。它是压力的基准；
+   跟着血量漂的话，液体的手感会随血量变。
+3. **网格索引是 `x*ny + y`（x 主序）**，不是行主序。`ink` 也一样。
+   参照实现靠"同一列的相邻单元在数组里连续"把邻域遍历合并成一次 —— 改成行主序
+   不只是变慢，结果也会变。
+4. **平局判据是下标哈希**（`_index_hash`），不是"下标小的优先"。初始六角密排里
+   同一行粒子高度完全相同，按下标优先会一次选中一串**相邻**粒子 —— 液面上出现
+   一个缺口，而不是液面整体下沉。
+
+### 单位
+
+粒子和重力都活在**流体自己的域**里（`[0, num_x*spacing] x [0, num_y*spacing]`），
+不是世界像素 —— 调用方负责映射。
+
+关键不变量是 **`radius / spacing = 0.463`**（参照实现的值）：它是"粒子静止时刚好
+密排成一片"的条件。改 `spacing` 就要按同比例改 `radius`。
+
+重力按域的单位给：域高 `num_y * spacing`，要"和世界一样重"就乘上
+`spacing / 世界像素比例`。
+
+### 性能
+
+实测（`tests/bench_fluid.gd`，两边同一份数据、各 20 步预热后取均值）：
+
+| 规模 | 网格 | 粒子 | GDScript 参照 | 原生 `PixelFluid` | 倍数 |
+|---|---|---|---|---|---|
+| 参照规模（SandSim.c 同参数） | 17x18 | 130 | 1.134 ms/步 | **0.031 ms/步** | 36.5x |
+| 瓶子规模（ink-2 血瓶量级） | 26x14 | 300 | 2.484 ms/步 | **0.068 ms/步** | 36.6x |
+
+60 FPS 的预算是 16.7 ms/帧 —— 瓶子规模那一行占 **0.4%**。
+
+⚠️ 但**别只看原生那一列**：GDScript 参照实现 2.5 ms/步，一帧里要塞好几个瓶子就不行了。
+而参照实现必须留着（逐位对拍的基准），所以扩展没加载时 `fluid_pbf.gd` 会
+`push_warning` 并退回它 —— 慢，但结果是对的。原生与 GDScript **逐位相同**，
+闸门 `tests/validation_fluid.gd`（28 项）。

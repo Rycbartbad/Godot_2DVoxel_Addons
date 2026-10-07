@@ -17,6 +17,9 @@
 
 #include "gdextension_interface.h"
 #include <algorithm>
+// PixelFluid 的 push_apart 要用 std::sqrt（与 GDScript 的 sqrt() 同为 IEEE 正确舍入，
+// 这是两条路径能逐位对拍的前提之一）。
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
@@ -317,6 +320,14 @@ struct CmdRd {
 		i += count * 4;
 		return true;
 	}
+	// f64 批量段。PixelFluid 要读 2N 个 double 的粒子状态 —— 逐元素 f64() 要 N 次
+	// 调用，而这里一次 memcpy 就够（与 GDScript 侧的 to_byte_array 同一个理由）。
+	bool f64s(size_t count, double *dst) {
+		if (i + count * 8 > n) { ok = false; return false; }
+		if (count > 0) std::memcpy(dst, p + i, count * 8);
+		i += count * 8;
+		return true;
+	}
 };
 
 struct CmdWr {
@@ -325,6 +336,13 @@ struct CmdWr {
 	size_t i = 0;
 	void i32(int32_t v) { if (i + 4 <= cap) std::memcpy(p + i, &v, 4); i += 4; }
 	void f64(double v) { if (i + 8 <= cap) std::memcpy(p + i, &v, 8); i += 8; }
+	// 裸字节段（PixelFluid 要回吐 pos/vel/ink 三个批量数组）。
+	// ⚠️ 与其它写入器同一条规矩：**只在容量内 memcpy，但 i 照常前进** ——
+	//    于是 written > out_cap 是"结果段越界/命令流错位"的可靠指纹。
+	void raw(const void *src, size_t bytes) {
+		if (i + bytes <= cap && src != nullptr) std::memcpy(p + i, src, bytes);
+		i += bytes;
+	}
 };
 
 static void run_rapier_cmd(RapierInstance *inst, const uint8_t *in, size_t in_n,
@@ -1124,6 +1142,663 @@ static void register_pixel_raster() {
 }
 
 
+// ================= PixelFluid：PBF 粒子流体（纯 CPU，不依赖 Rapier） =================
+//
+// 语义真源是 src/fluid/fluid_pbf.gd —— **判据只有一条：逐位相同**
+// （闸门 tests/validation_fluid.gd）。所以这里每一步都照着那份抄，
+// 注释里标出对应的函数名。浮点能逐位一致的前提是构建带了 -ffp-contract=off
+// （见 tools/build_native.py 与 README 的构建段）：少了它编译器会把乘加融成 FMA，
+// 两条路径立刻分叉。
+//
+// 为什么值得搬进原生：GDScript 参照实现实测 **1.18 ms/步**（130 粒子 / 17x18 格，
+// 300 步 354 ms）。瓶子那边要 700+ 粒子、网格也大一倍 —— GDScript 是 10~20 ms/步，
+// 每帧都跑不动。
+//
+// 命令流（头部协议与 RapierPhys.cmd 相同：in = [i32 out_cap][i32 cmd_len][ops...]）：
+//   1  step(i32 n, i32 nx, i32 ny, i32 push_iters, i32 grid_iters,
+//           f64 spacing, radius, dt, bouncyness, over_relaxation, stiffness,
+//           flip_ratio, gx, gy, splat_radius,
+//           u8 solid[nx*ny], f64 pos[2n], f64 vel[2n])
+//        -> f64 pos[2n], f64 vel[2n], f64 rest_density, u8 ink[nx*ny]
+//      written = 32n + 8 + nx*ny
+//
+// ⚠️ 网格索引是 **INDEX(x,y) = x*ny + y**（x 主序），与参照实现一致 ——
+//    push_apart 靠"同一列的相邻单元在数组里连续"把整列 3 格合并成一次遍历。
+//    改成行主序会让那个合并失效，而且结果会变。别改。
+//
+// ⚠️ 实例**持有**网格临时缓冲（它们是每步从 pos/vel 重算的，不是第二份真源），
+//    但 pos/vel 的权威副本在 GDScript 侧 —— 每步都传进来、传回去。
+//    只有 rest_density 和 uPrev/vPrev 是跨步携带的，两边各自维护、同步更新。
+
+static const uint8_t PBF_AIR = 1;
+static const uint8_t PBF_FLUID = 0;
+static const uint8_t PBF_SOLID = 2;
+
+static inline int pbf_clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+static inline double pbf_clampd(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+struct FluidInstance {
+	int nx = 0, ny = 0;
+	// ⚠️ **权威状态在原生这边**（pos/vel/参数/掩码都由 op 1 灌一次）。
+	//    每步只回吐 ink 掩码 —— 这是"每步 500 KB 往返"变"10 KB"的关键：
+	//    4320 粒子时 pos+vel 是 138 KB，加上 slice/to_float64_array 的拷贝与分配，
+	//    GDScript 侧每步要付 ~2.5 ms，而模拟本身只要 ~1 ms。
+	int n = 0;
+	int push_iters = 1, grid_iters = 8;
+	double spacing = 0.041, radius = 0.019;
+	double bouncy = -0.9, over_relax = 1.9, stiffness = 1.0, flip_ratio = 0.9;
+	std::vector<uint8_t> solid;
+	std::vector<uint8_t> ctype;
+	std::vector<uint8_t> ink;
+	std::vector<uint8_t> ink_src;      // 闭运算要"边写边判"用不了，先存一份原样
+	std::vector<uint8_t> seen;         // 围棋闭运算的"有气"标记
+	std::vector<int32_t> stack;        // 泛洪栈（复用，别每帧分配）
+	std::vector<double> pos, vel;
+	std::vector<double> f, w, fprev;      // 2*ncells：前半 u 分量，后半 v 分量
+	std::vector<double> density, pscale, dcorr;
+	std::vector<int32_t> fluidcells, cellprefix, pids, pcell;
+	double rest_density = 0.0;
+
+	void resize(int nx_, int ny_) {
+		if (nx == nx_ && ny == ny_) return;
+		nx = nx_; ny = ny_;
+		const size_t nc = (size_t)nx * (size_t)ny;
+		solid.assign(nc, 0);
+		ctype.assign(nc, 0);
+		ink.assign(nc, 0);
+		ink_src.assign(nc, 0);
+		seen.assign(nc, 0);
+		stack.clear();
+		f.assign(nc * 2, 0.0);
+		w.assign(nc * 2, 0.0);
+		fprev.assign(nc * 2, 0.0);
+		density.assign(nc, 0.0);
+		pscale.assign(nc, 0.0);
+		dcorr.assign(nc, 0.0);
+		cellprefix.assign(nc + 1, 0);
+		fluidcells.clear();
+		// 尺寸变了，旧的静止密度基准就没有意义了。尺寸没变时**不清** ——
+		// 它是压力的基准，只应该在真正重建时重置（与参照实现的 resize_grid 同义）。
+		rest_density = 0.0;
+	}
+};
+
+// grid_to_particles 里的四路采样：把一条 if 抽出来，避免写四遍（写四遍就是
+// "同一规则写四处"，而这里的判据是逐位对拍）。运算顺序与参照实现一字不差。
+static inline void pbf_gather(const uint8_t *ctype, const double *F, const double *FP,
+		size_t base, int nrk, int offset, double dk,
+		double &d, double &picn, double &corrn) {
+	if (ctype[nrk] != PBF_AIR || ((nrk - offset >= 0) && ctype[nrk - offset] != PBF_AIR)) {
+		d += dk;
+		picn += dk * F[base + (size_t)nrk];
+		corrn += dk * (F[base + (size_t)nrk] - FP[base + (size_t)nrk]);
+	}
+}
+
+// 把落在**固体格**里的粒子搬回最近的可通行格心（与 fluid_pbf.gd 的 _contain_particles 同判据）。
+//
+// ⚠️ 参照实现没有这一步，因为它的域钳位（minX..maxX）和那一圈边界**正好重合** ——
+//    粒子不可能跑到"容器外"。容器一旦有形状（瓶子剪影），两者就不重合了：
+//    粒子会漂进不该有液体的格子，而压力求解跳过固体格、grid_to_particles 也不会
+//    把它们推出来，于是它们**永久卡在那里**，还继续占着 fill_ratio 的份额。
+//
+// ⚠️ 这一条**不碰压力求解** —— 那边早就在按 solidMask 判断四个面是不是墙了。
+//    所以 overRelaxation / stiffness / flipRatio 那几个标定值继续有效。
+//
+// 判据刻意写得笨：固定搜 9x9 方窗，取距离最小的可通行格心，平局时**先扫到的赢**。
+// 笨才可复现 —— 闸门是 C++ 与 GDScript 逐位对拍。
+static void pbf_contain(FluidInstance *S, double *P, int n, double spacing) {
+	const int nx = S->nx, ny = S->ny;
+	const uint8_t *SM = S->solid.data();
+	for (int i = 0; i < n; ++i) {
+		const double px = P[(size_t)i * 2];
+		const double py = P[(size_t)i * 2 + 1];
+		const int cx = pbf_clampi((int)(px / spacing), 0, nx - 1);
+		const int cy = pbf_clampi((int)(py / spacing), 0, ny - 1);
+		if (SM[cx * ny + cy] != 0) continue;
+		int best = -1;
+		double best_d2 = 0.0;
+		for (int dy = -4; dy <= 4; ++dy) {
+			const int ty = cy + dy;
+			if (ty < 0 || ty >= ny) continue;
+			for (int dx = -4; dx <= 4; ++dx) {
+				const int tx = cx + dx;
+				if (tx < 0 || tx >= nx) continue;
+				const int tc = tx * ny + ty;
+				if (SM[tc] == 0) continue;
+				const double gx = ((double)tx + 0.5) * spacing;
+				const double gy = ((double)ty + 0.5) * spacing;
+				const double d2 = (gx - px) * (gx - px) + (gy - py) * (gy - py);
+				if (best < 0 || d2 < best_d2) { best = tc; best_d2 = d2; }
+			}
+		}
+		if (best >= 0) {
+			P[(size_t)i * 2] = ((double)(best / ny) + 0.5) * spacing;
+			P[(size_t)i * 2 + 1] = ((double)(best % ny) + 0.5) * spacing;
+		}
+	}
+}
+
+static void fluid_do_step(FluidInstance *S, int n, double spacing, double radius, double dt,
+		double bouncy, double over_relax, double stiffness, double flip_ratio,
+		int push_iters, int grid_iters, double gx, double gy, double splat_radius) {
+	const int nx = S->nx, ny = S->ny;
+	const size_t nc = (size_t)nx * (size_t)ny;
+	double *P = S->pos.data();
+	double *V = S->vel.data();
+	// ⚠️ 域钳位是 r .. num*h - r，与参照实现的 h+r .. (num-1)*h-r **不同**：
+	//    参照实现多缩一格是因为它的容器就是那个矩形网格、外圈一格是实心边界。
+	//    掩码容器的墙就是域的边 —— 照抄会让第 0 行/列永远够不着（四周一条缝）。
+	//    外圈若真是实心的，pbf_contain 会把粒子推回来。
+	const double minx = radius, miny = radius;
+	const double maxx = (double)nx * spacing - radius;
+	const double maxy = (double)ny * spacing - radius;
+
+	// ---- 1. integrate ----
+	{
+		const double dvx = gx * dt, dvy = gy * dt;
+		for (int i = 0; i < n; ++i) {
+			const size_t k = (size_t)i * 2;
+			V[k] += dvx;
+			V[k + 1] += dvy;
+			P[k] += V[k] * dt;
+			P[k + 1] += V[k + 1] * dt;
+			double x = P[k], y = P[k + 1];
+			if (x < minx) { x = minx; V[k] = V[k] * bouncy; }
+			if (x > maxx) { x = maxx; V[k] = V[k] * bouncy; }
+			if (y < miny) { y = miny; V[k + 1] = V[k + 1] * bouncy; }
+			if (y > maxy) { y = maxy; V[k + 1] = V[k + 1] * bouncy; }
+			P[k] = x;
+			P[k + 1] = y;
+		}
+	}
+
+	// ---- 2. push_apart ----
+	if (n > 0) {
+		S->pids.resize((size_t)n);
+		S->pcell.resize((size_t)n);
+		for (size_t i = 0; i < nc; ++i) S->cellprefix[i] = 0;
+		for (int i = 0; i < n; ++i) {
+			const int xi = pbf_clampi((int)(P[(size_t)i * 2] / spacing), 0, nx - 1);
+			const int yi = pbf_clampi((int)(P[(size_t)i * 2 + 1] / spacing), 0, ny - 1);
+			const int c = xi * ny + yi;
+			S->pcell[(size_t)i] = c;
+			S->cellprefix[(size_t)c] += 1;
+		}
+		int32_t prefix = 0;
+		for (size_t i = 0; i < nc; ++i) { prefix += S->cellprefix[i]; S->cellprefix[i] = prefix; }
+		S->cellprefix[nc] = prefix;
+		for (int i = 0; i < n; ++i) {
+			const int c = S->pcell[(size_t)i];
+			S->cellprefix[(size_t)c] -= 1;
+			S->pids[(size_t)S->cellprefix[(size_t)c]] = i;
+		}
+		const double min_dist = 2.0 * radius;
+		const double min_dist2 = min_dist * min_dist;
+		for (int it = 0; it < push_iters; ++it) {
+			for (int i = 0; i < n; ++i) {
+				double px = P[(size_t)i * 2], py = P[(size_t)i * 2 + 1];
+				const int pxi = pbf_clampi((int)(px / spacing), 0, nx - 1);
+				const int pyi = pbf_clampi((int)(py / spacing), 0, ny - 1);
+				const int x0 = pxi > 0 ? pxi - 1 : 0;
+				const int y0 = pyi > 0 ? pyi - 1 : 0;
+				const int x1 = (pxi + 1 < nx) ? pxi + 1 : nx - 1;
+				const int y1 = (pyi + 1 < ny) ? pyi + 1 : ny - 1;
+				for (int xi = x0; xi <= x1; ++xi) {
+					// 同一列的相邻单元在 pids 里连续（INDEX 是 x 主序），
+					// 所以"整列 3 格"合并成一次区间遍历 —— 参照实现的关键优化。
+					const int32_t first = S->cellprefix[(size_t)(xi * ny + y0)];
+					const int32_t last = S->cellprefix[(size_t)(xi * ny + y1 + 1)];
+					for (int32_t j = first; j < last; ++j) {
+						const int id = S->pids[(size_t)j];
+						if (id == i) continue;
+						double dx = P[(size_t)id * 2] - px;
+						double dy = P[(size_t)id * 2 + 1] - py;
+						const double d2 = dx * dx + dy * dy;
+						if (d2 > min_dist2 || d2 == 0.0) continue;
+						const double d = std::sqrt(d2);
+						const double s = 0.5 * (min_dist - d) / d;
+						dx *= s;
+						dy *= s;
+						px -= dx;
+						py -= dy;
+						P[(size_t)id * 2] += dx;
+						P[(size_t)id * 2 + 1] += dy;
+					}
+				}
+				P[(size_t)i * 2] = px;
+				P[(size_t)i * 2 + 1] = py;
+			}
+		}
+		// 撞壁（参照实现把 HandleParticleCollisions 并进了这里，integrate 里也做了一次）
+		for (int i = 0; i < n; ++i) {
+			double x = P[(size_t)i * 2], y = P[(size_t)i * 2 + 1];
+			if (x < minx) { x = minx; V[(size_t)i * 2] = V[(size_t)i * 2] * bouncy; }
+			if (x > maxx) { x = maxx; V[(size_t)i * 2] = V[(size_t)i * 2] * bouncy; }
+			if (y < miny) { y = miny; V[(size_t)i * 2 + 1] = V[(size_t)i * 2 + 1] * bouncy; }
+			if (y > maxy) { y = maxy; V[(size_t)i * 2 + 1] = V[(size_t)i * 2 + 1] * bouncy; }
+			P[(size_t)i * 2] = x;
+			P[(size_t)i * 2 + 1] = y;
+		}
+		pbf_contain(S, P, n, spacing);
+	}
+
+	// ---- 3. particles_to_grid（交错半格采样：u 在 (x, y-h/2)，v 在 (x-h/2, y)）----
+	{
+		double *F = S->f.data();
+		double *W = S->w.data();
+		uint8_t *CT = S->ctype.data();
+		for (size_t i = 0; i < nc; ++i) {
+			F[i] = 0.0; F[nc + i] = 0.0;
+			W[i] = 0.0; W[nc + i] = 0.0;
+			CT[i] = (S->solid[i] == 0) ? PBF_SOLID : PBF_AIR;
+		}
+		for (int i = 0; i < n; ++i) {
+			const int xi = pbf_clampi((int)(P[(size_t)i * 2] / spacing), 0, nx - 1);
+			const int yi = pbf_clampi((int)(P[(size_t)i * 2 + 1] / spacing), 0, ny - 1);
+			CT[xi * ny + yi] = PBF_FLUID;
+		}
+		for (int component = 0; component < 2; ++component) {
+			const size_t base = (size_t)component * nc;
+			const double off_x = (component == 0) ? 0.0 : spacing * 0.5;
+			const double off_y = (component == 0) ? spacing * 0.5 : 0.0;
+			for (int i = 0; i < n; ++i) {
+				const double x = pbf_clampd(P[(size_t)i * 2], spacing, (double)(nx - 1) * spacing);
+				const double y = pbf_clampd(P[(size_t)i * 2 + 1], spacing, (double)(ny - 1) * spacing);
+				const int x0 = pbf_clampi((int)((x - off_x) / spacing), 0, nx - 2);
+				const int y0 = pbf_clampi((int)((y - off_y) / spacing), 0, ny - 2);
+				const double tx = ((x - off_x) - (double)x0 * spacing) / spacing;
+				const double ty = ((y - off_y) - (double)y0 * spacing) / spacing;
+				const double sx = 1.0 - tx, sy = 1.0 - ty;
+				const double w0 = sx * sy, w1 = tx * sy, w2 = tx * ty, w3 = sx * ty;
+				const double pv = V[(size_t)i * 2 + component];
+				const size_t nr0 = (size_t)(x0 * ny + y0);
+				const size_t nr1 = (size_t)((x0 + 1) * ny + y0);
+				const size_t nr2 = (size_t)((x0 + 1) * ny + (y0 + 1));
+				const size_t nr3 = (size_t)(x0 * ny + (y0 + 1));
+				F[base + nr0] += pv * w0; W[base + nr0] += w0;
+				F[base + nr1] += pv * w1; W[base + nr1] += w1;
+				F[base + nr2] += pv * w2; W[base + nr2] += w2;
+				F[base + nr3] += pv * w3; W[base + nr3] += w3;
+			}
+			for (size_t i = 0; i < nc; ++i) {
+				if (W[base + i] > 0.0) F[base + i] = F[base + i] / W[base + i];
+			}
+			// 固体面：速度取上一帧的网格值（无滑移的近似）。参照实现就是取 uPrev。
+			for (int x = 0; x < nx; ++x) {
+				for (int y = 0; y < ny; ++y) {
+					const size_t idx = (size_t)(x * ny + y);
+					if (component == 0) {
+						const bool is_solid = CT[idx] == PBF_SOLID;
+						const bool left_solid = (x > 0) && (CT[(size_t)((x - 1) * ny + y)] == PBF_SOLID);
+						if (is_solid || left_solid) F[idx] = S->fprev[idx];
+					} else {
+						const bool is_solid = CT[idx] == PBF_SOLID;
+						const bool bottom_solid = (y > 0) && (CT[(size_t)(x * ny + (y - 1))] == PBF_SOLID);
+						if (is_solid || bottom_solid) F[nc + idx] = S->fprev[nc + idx];
+					}
+				}
+			}
+		}
+		// 流体单元列表。**扫描顺序 x 外 y 内** —— 与参照实现同序：松弛是 Gauss-Seidel，
+		// 迭代顺序会进结果，所以这个顺序也是逐位对拍的一部分。
+		S->fluidcells.clear();
+		for (int x = 1; x < nx - 1; ++x) {
+			for (int y = 1; y < ny - 1; ++y) {
+				const size_t idx = (size_t)(x * ny + y);
+				if (CT[idx] == PBF_FLUID) S->fluidcells.push_back((int32_t)idx);
+			}
+		}
+	}
+
+	// ---- 4. density_update ----
+	{
+		double *D = S->density.data();
+		for (size_t i = 0; i < nc; ++i) D[i] = 0.0;
+		const double off = spacing * 0.5;
+		for (int i = 0; i < n; ++i) {
+			const double x = pbf_clampd(P[(size_t)i * 2], spacing, (double)(nx - 1) * spacing);
+			const double y = pbf_clampd(P[(size_t)i * 2 + 1], spacing, (double)(ny - 1) * spacing);
+			const int x0 = pbf_clampi((int)((x - off) / spacing), 0, nx - 2);
+			const int y0 = pbf_clampi((int)((y - off) / spacing), 0, ny - 2);
+			const double tx = ((x - off) - (double)x0 * spacing) / spacing;
+			const double ty = ((y - off) - (double)y0 * spacing) / spacing;
+			const double sx = 1.0 - tx, sy = 1.0 - ty;
+			D[x0 * ny + y0] += sx * sy;
+			D[(x0 + 1) * ny + y0] += tx * sy;
+			D[(x0 + 1) * ny + (y0 + 1)] += tx * ty;
+			D[x0 * ny + (y0 + 1)] += sx * ty;
+		}
+		if (S->rest_density == 0.0) {
+			double sum = 0.0;
+			int num_fluid = 0;
+			for (size_t i = 0; i < nc; ++i) {
+				if (S->ctype[i] == PBF_FLUID) { sum += D[i]; num_fluid += 1; }
+			}
+			if (num_fluid > 0) S->rest_density = sum / (double)num_fluid;
+		}
+	}
+
+	// ---- 5. grid_forces ----
+	{
+		double *F = S->f.data();
+		double *FP = S->fprev.data();
+		for (size_t i = 0; i < nc * 2; ++i) FP[i] = F[i];
+		const size_t m = S->fluidcells.size();
+		for (size_t k = 0; k < m; ++k) {
+			const size_t center = (size_t)S->fluidcells[k];
+			const int s = S->solid[center - (size_t)ny] + S->solid[center + (size_t)ny]
+					+ S->solid[center - 1] + S->solid[center + 1];
+			S->pscale[center] = -over_relax / (double)s;
+			const double compression = (S->rest_density > 0.0)
+					? (S->density[center] - S->rest_density) : 0.0;
+			S->dcorr[center] = (compression > 0.0) ? compression * stiffness : 0.0;
+		}
+		for (int it = 0; it < grid_iters; ++it) {
+			for (size_t k = 0; k < m; ++k) {
+				const size_t center = (size_t)S->fluidcells[k];
+				const double ps = S->pscale[center];
+				if (ps == 0.0) continue;
+				const size_t left = center - (size_t)ny, right = center + (size_t)ny;
+				const size_t bottom = center - 1, top = center + 1;
+				double div = F[right] - F[center] + F[nc + top] - F[nc + center];
+				div -= S->dcorr[center];
+				const double p = div * ps;
+				if (S->solid[left] != 0) F[center] -= p;
+				if (S->solid[right] != 0) F[right] += p;
+				if (S->solid[bottom] != 0) F[nc + center] -= p;
+				if (S->solid[top] != 0) F[nc + top] += p;
+			}
+		}
+	}
+
+	// ---- 6. grid_to_particles（FLIP/PIC 混合）----
+	{
+		double *F = S->f.data();
+		double *FP = S->fprev.data();
+		const uint8_t *CT = S->ctype.data();
+		for (int component = 0; component < 2; ++component) {
+			const size_t base = (size_t)component * nc;
+			const int offset = (component == 0) ? ny : 1;
+			const double off_x = (component == 0) ? 0.0 : spacing * 0.5;
+			const double off_y = (component == 0) ? spacing * 0.5 : 0.0;
+			for (int i = 0; i < n; ++i) {
+				const double x = pbf_clampd(P[(size_t)i * 2], spacing, (double)(nx - 1) * spacing);
+				const double y = pbf_clampd(P[(size_t)i * 2 + 1], spacing, (double)(ny - 1) * spacing);
+				const int x0 = pbf_clampi((int)((x - off_x) / spacing), 0, nx - 2);
+				const int y0 = pbf_clampi((int)((y - off_y) / spacing), 0, ny - 2);
+				const double tx = ((x - off_x) - (double)x0 * spacing) / spacing;
+				const double ty = ((y - off_y) - (double)y0 * spacing) / spacing;
+				const double sx = 1.0 - tx, sy = 1.0 - ty;
+				const double d0 = sx * sy, d1 = tx * sy, d2 = tx * ty, d3 = sx * ty;
+				const int nr0 = x0 * ny + y0;
+				const int nr1 = (x0 + 1) * ny + y0;
+				const int nr2 = (x0 + 1) * ny + (y0 + 1);
+				const int nr3 = x0 * ny + (y0 + 1);
+				double d = 0.0, picn = 0.0, corrn = 0.0;
+				pbf_gather(CT, F, FP, base, nr0, offset, d0, d, picn, corrn);
+				pbf_gather(CT, F, FP, base, nr1, offset, d1, d, picn, corrn);
+				pbf_gather(CT, F, FP, base, nr2, offset, d2, d, picn, corrn);
+				pbf_gather(CT, F, FP, base, nr3, offset, d3, d, picn, corrn);
+				if (d <= 0.0) continue;
+				const double inv_d = 1.0 / d;
+				const double pic_v = picn * inv_d;
+				const double corr = corrn * inv_d;
+				const double old_v = V[(size_t)i * 2 + component];
+				V[(size_t)i * 2 + component] = (1.0 - flip_ratio) * pic_v + flip_ratio * (old_v + corr);
+			}
+		}
+	}
+
+	// ---- 7. raster_ink（渲染，不影响物理）----
+	{
+		uint8_t *INK = S->ink.data();
+		for (size_t i = 0; i < nc; ++i) INK[i] = 0;
+		double rc = splat_radius;
+		if (rc <= 0.0) {
+			// 只标所在格（与 fluid_pbf.gd 的 _raster_ink 同判据）。
+			// ⚠️ 粒子离自己格心最远 0.707（格角），所以这里**不能用半径判据** ——
+			//    用 0.463（= radius/spacing）会让大部分粒子一格都标不上。
+			for (int i = 0; i < n; ++i) {
+				const int cx = pbf_clampi((int)(P[(size_t)i * 2] / spacing), 0, nx - 1);
+				const int cy = pbf_clampi((int)(P[(size_t)i * 2 + 1] / spacing), 0, ny - 1);
+				const int c = cx * ny + cy;
+				if (S->solid[c] != 0) INK[c] = 1;
+			}
+			return;
+		}
+		const double rc2 = rc * rc;
+		for (int i = 0; i < n; ++i) {
+			const double px = P[(size_t)i * 2] / spacing;
+			const double py = P[(size_t)i * 2 + 1] / spacing;
+			int x0 = (int)(px - rc); if (x0 < 0) x0 = 0;
+			int x1 = (int)(px + rc) + 1; if (x1 > nx - 1) x1 = nx - 1;
+			int y0 = (int)(py - rc); if (y0 < 0) y0 = 0;
+			int y1 = (int)(py + rc) + 1; if (y1 > ny - 1) y1 = ny - 1;
+			for (int x = x0; x <= x1; ++x) {
+				for (int y = y0; y <= y1; ++y) {
+					const double dx = ((double)x + 0.5) - px;
+					const double dy = ((double)y + 0.5) - py;
+					// 与掩码取交：粒子贴近容器边缘时，它的泼溅半径会溢出到容器外 ——
+					// 那会让液体看起来"糊出瓶壁"。
+					if (dx * dx + dy * dy <= rc2 && S->solid[x * ny + y] != 0) INK[x * ny + y] = 1;
+				}
+			}
+		}
+		// 闭运算（**围棋规则：没气就填**）—— 与 fluid_pbf.gd 的 _close_ink 同判据。
+		//
+		// 从"贴着容器外沿的空格"泛洪，走不到的空格就是没气 -> 填上。
+		// ⚠️ 第一版用的是局部判据"四邻里 >= 3 个是墨" —— 那在凹口、拐角、
+		//    两格宽的缝隙上都会给出错的结果（要么漏填要么糊出边界）。
+		//    "有没有气"是全局的、定义明确的。
+		// ⚠️ 种子不是"整张图的四边"：容器外的格子本来就该是空的，
+		//    拿它们当种子等于把容器内的封闭空腔也判成有气，那样一格都填不上。
+		uint8_t *SRC = S->ink_src.data();
+		std::memcpy(SRC, INK, nc);
+		uint8_t *SEEN = S->seen.data();
+		std::memset(SEEN, 0, nc);
+		std::vector<int32_t> &stk = S->stack;
+		stk.clear();
+		for (int x = 0; x < nx; ++x) {
+			for (int y = 0; y < ny; ++y) {
+				const int c = x * ny + y;
+				if (SRC[c] != 0 || SEEN[c] != 0) continue;
+				bool edge = (x == 0 || x + 1 == nx || y == 0 || y + 1 == ny);
+				if (!edge) {
+					edge = (S->solid[c - ny] == 0 || S->solid[c + ny] == 0
+							|| S->solid[c - 1] == 0 || S->solid[c + 1] == 0);
+				}
+				if (!edge) continue;
+				SEEN[c] = 1;
+				stk.push_back(c);
+			}
+		}
+		while (!stk.empty()) {
+			const int c = stk.back();
+			stk.pop_back();
+			const int x = c / ny, y = c % ny;
+			const int nb[4] = { (x > 0) ? c - ny : -1, (x + 1 < nx) ? c + ny : -1,
+					(y > 0) ? c - 1 : -1, (y + 1 < ny) ? c + 1 : -1 };
+			for (int k = 0; k < 4; ++k) {
+				const int q = nb[k];
+				if (q < 0 || SEEN[q] != 0 || SRC[q] != 0 || S->solid[q] == 0) continue;
+				SEEN[q] = 1;
+				stk.push_back(q);
+			}
+		}
+		for (size_t c = 0; c < nc; ++c) {
+			if (SRC[c] == 0 && SEEN[c] == 0 && S->solid[c] != 0) INK[c] = 1;
+		}
+	}
+}
+
+static void run_fluid_cmd(FluidInstance *S, const uint8_t *in, size_t in_n,
+		uint8_t *out, size_t out_cap, size_t &written) {
+	written = 0;
+	CmdWr w; w.p = out; w.cap = out_cap; w.i = 0;
+	CmdRd r; r.p = in; r.n = in_n; r.i = 0;
+	while (r.ok && r.i < r.n) {
+		const uint8_t op = r.u8();
+		if (!r.ok) break;
+		switch (op) {
+			// 1  load：把权威状态灌进来（粒子集 / 掩码 / 参数变了才发），**不产出**
+			case 1: {
+				int32_t n = r.i32();
+				const int32_t nx = r.i32();
+				const int32_t ny = r.i32();
+				const int32_t pi = r.i32();
+				const int32_t gi = r.i32();
+				const double sp = r.f64(), ra = r.f64();
+				const double bo = r.f64(), ov = r.f64();
+				const double st = r.f64(), fl = r.f64();
+				if (!r.ok) break;
+				if (n < 0) n = 0;
+				if (nx < 3 || ny < 3) {
+					printf("[PixelFluid] 网格太小：%dx%d（至少要 3x3）\n", (int)nx, (int)ny);
+					r.ok = false;
+					break;
+				}
+				const size_t nc = (size_t)nx * (size_t)ny;
+				S->resize(nx, ny);
+				S->push_iters = pi;
+				S->grid_iters = gi;
+				S->spacing = sp;
+				S->radius = ra;
+				S->bouncy = bo;
+				S->over_relax = ov;
+				S->stiffness = st;
+				S->flip_ratio = fl;
+				const uint8_t *solid = r.bytes(nc);
+				if (!r.ok) break;
+				std::memcpy(S->solid.data(), solid, nc);
+				S->pos.resize((size_t)n * 2);
+				S->vel.resize((size_t)n * 2);
+				if (!r.f64s((size_t)n * 2, S->pos.data())) break;
+				if (!r.f64s((size_t)n * 2, S->vel.data())) break;
+				S->n = n;
+				break;
+			}
+			// 2  step：每步只收 4 个 f64，**只吐 ink 掩码**
+			case 2: {
+				const double dt = r.f64(), gx = r.f64(), gy = r.f64(), sr = r.f64();
+				if (!r.ok) break;
+				const size_t nc = (size_t)S->nx * (size_t)S->ny;
+				if (nc > out_cap) {
+					printf("[PixelFluid] 结果段容量不够：need=%zu out_cap=%zu\n", nc, out_cap);
+					r.ok = false;
+					break;
+				}
+				fluid_do_step(S, S->n, S->spacing, S->radius, dt, S->bouncy, S->over_relax,
+						S->stiffness, S->flip_ratio, S->push_iters, S->grid_iters,
+						gx, gy, sr);
+				w.raw(S->ink.data(), nc);
+				written = w.i;
+				break;
+			}
+			// 3  dump：把 pos/vel 回吐给 GDScript（只在它真要读粒子时才发）
+			case 3: {
+				const size_t bytes = (size_t)S->n * 16;   // 2n 个 f64
+				if (bytes * 2 + 8 > out_cap) {
+					printf("[PixelFluid] dump 容量不够：need=%zu out_cap=%zu\n", bytes * 2 + 8, out_cap);
+					r.ok = false;
+					break;
+				}
+				w.raw(S->pos.data(), bytes);
+				w.raw(S->vel.data(), bytes);
+				// rest_density 也要带回来：它由原生首帧定出、之后不再变，
+				// GDScript 那份不跟着同步就永远是 0（而 0 会被读成"还没定出"）。
+				w.f64(S->rest_density);
+				written = w.i;
+				break;
+			}
+			default:
+				// 与 RapierPhys / PixelRaster 同一条规矩：未知操作码**立刻停**
+				// （它的载荷长度未知，继续读会把后面的字节当操作码，整条流错位）
+				printf("[PixelFluid] 未知操作码 %d（命令流错位），就此中止\n", (int)op);
+				r.ok = false;
+				break;
+		}
+	}
+	if (written > out_cap) {
+		printf("[PixelFluid] 结果段越界：written=%zu > out_cap=%zu（命令流很可能错位）\n",
+				written, out_cap);
+	}
+}
+
+// PixelFluid 自己的一组 StringName。
+// ⚠️ 不复用 RapierPhys / PixelRaster 那几个缓冲区：复用会让类的名字互相覆盖，
+//    注册出来的签名静默错位（症状是"调用时参数对不上"）。
+static SN g_sn_pf_class, g_sn_pf_step, g_sn_pf_a0, g_sn_pf_a1, g_sn_pf_ret;
+
+static GDExtensionObjectPtr create_fluid_instance(void *p_userdata, GDExtensionBool p_notify_postinitialize) {
+	GDExtensionObjectPtr obj = g_construct_object((GDExtensionConstStringNamePtr)g_sn_parent.buf);
+	if (obj == nullptr) return nullptr;
+	FluidInstance *d = new FluidInstance();
+	g_object_set_instance(obj, (GDExtensionConstStringNamePtr)g_sn_pf_class.buf, (GDExtensionClassInstancePtr)d);
+	return obj;
+}
+
+static void free_fluid_instance(void *p_userdata, GDExtensionClassInstancePtr p_instance) {
+	if (p_instance != nullptr) delete (FluidInstance *)p_instance;
+}
+
+static void fluid_dispatch(void *ctx, const uint8_t *in, size_t in_n,
+		uint8_t *out, size_t out_cap, size_t &written) {
+	run_fluid_cmd((FluidInstance *)ctx, in, in_n, out, out_cap, written);
+}
+
+static void call_fluid_step(void *method_userdata, GDExtensionClassInstancePtr p_instance,
+		const GDExtensionConstVariantPtr *p_args, GDExtensionInt p_argument_count,
+		GDExtensionVariantPtr r_return, GDExtensionCallError *r_error) {
+	call_cmd_glue(fluid_dispatch, p_instance, p_args, p_argument_count, r_return, r_error);
+}
+
+static void register_pixel_fluid() {
+	GDExtensionClassCreationInfo6 info = {};
+	info.is_virtual = false;
+	info.is_abstract = false;
+	info.is_exposed = true;
+	info.is_runtime = false;
+	info.create_instance_func = create_fluid_instance;
+	info.free_instance_func = free_fluid_instance;
+	g_register_class6(g_library, (GDExtensionConstStringNamePtr)g_sn_pf_class.buf,
+		(GDExtensionConstStringNamePtr)g_sn_parent.buf, &info);
+	printf("[PixelFluid] 类已注册\n");
+
+	GDExtensionClassMethodInfo mi = {};
+	mi.name = (GDExtensionStringNamePtr)g_sn_pf_step.buf;
+	mi.call_func = call_fluid_step;
+	mi.ptrcall_func = nullptr;
+	mi.method_flags = GDEXTENSION_METHOD_FLAG_NORMAL;
+	mi.has_return_value = true;
+	static GDExtensionPropertyInfo ret_info = {};
+	ret_info.type = GDEXTENSION_VARIANT_TYPE_PACKED_BYTE_ARRAY;
+	ret_info.name = (GDExtensionStringNamePtr)g_sn_pf_ret.buf;
+	ret_info.class_name = (GDExtensionStringNamePtr)g_sn_empty_class.buf;
+	ret_info.hint_string = (GDExtensionStringPtr)g_str_empty_hint;
+	mi.return_value_info = &ret_info;
+	mi.return_value_metadata = GDEXTENSION_METHOD_ARGUMENT_METADATA_NONE;
+	static GDExtensionPropertyInfo args[2] = {};
+	args[0].type = GDEXTENSION_VARIANT_TYPE_PACKED_BYTE_ARRAY;
+	args[0].name = (GDExtensionStringNamePtr)g_sn_pf_a0.buf;
+	args[1].type = GDEXTENSION_VARIANT_TYPE_PACKED_BYTE_ARRAY;
+	args[1].name = (GDExtensionStringNamePtr)g_sn_pf_a1.buf;
+	for (int i = 0; i < 2; ++i) {
+		args[i].class_name = (GDExtensionStringNamePtr)g_sn_empty_class.buf;
+		args[i].hint_string = (GDExtensionStringPtr)g_str_empty_hint;
+	}
+	static GDExtensionClassMethodArgumentMetadata meta[2] = {
+		GDEXTENSION_METHOD_ARGUMENT_METADATA_NONE, GDEXTENSION_METHOD_ARGUMENT_METADATA_NONE };
+	mi.argument_count = 2;
+	mi.arguments_info = args;
+	mi.arguments_metadata = meta;
+	mi.default_argument_count = 0;
+	mi.default_arguments = nullptr;
+	g_register_method(g_library, (GDExtensionConstStringNamePtr)g_sn_pf_class.buf, &mi);
+	printf("[PixelFluid] 已注册方法 step\n");
+}
+
+
 static void initialize(void *p_userdata, GDExtensionInitializationLevel p_level) {
 	if (p_level != GDEXTENSION_INITIALIZATION_SCENE) return;
 	GDExtensionClassCreationInfo6 info = {};
@@ -1131,11 +1806,13 @@ static void initialize(void *p_userdata, GDExtensionInitializationLevel p_level)
 	info.is_abstract = false;
 	info.is_exposed = true;
 	info.is_runtime = false;
-	// 两个类各自注册自己的类与实例（都继承 RefCounted）：
+	// 三个类各自注册自己的类与实例（都继承 RefCounted）：
 	//   RapierPhys  —— 物理
 	//   PixelRaster —— 渲染栅格化（不依赖 Rapier）
+	//   PixelFluid  —— PBF 粒子流体（不依赖 Rapier）
 	register_rapier_phys();
 	register_pixel_raster();
+	register_pixel_fluid();
 }
 
 static void deinitialize(void *p_userdata, GDExtensionInitializationLevel p_level) {
@@ -1180,6 +1857,11 @@ extern "C" __declspec(dllexport) GDExtensionBool gdextension_init(
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_pxr_a0.buf, "input");
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_pxr_a1.buf, "out_template");
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_pxr_ret.buf, "result");
+	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_pf_class.buf, "PixelFluid");
+	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_pf_step.buf, "step");
+	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_pf_a0.buf, "input");
+	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_pf_a1.buf, "out_template");
+	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_pf_ret.buf, "result");
 	g_sn_new((GDExtensionUninitializedStringNamePtr)g_sn_empty_class.buf, "");
 	g_str_new((GDExtensionUninitializedStringPtr)g_str_empty_hint, "");
 	// PackedByteArray 的构造索引 1 = 拷贝构造

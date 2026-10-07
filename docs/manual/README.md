@@ -188,6 +188,17 @@ var p1 := px.total_momentum()
 | 邻域 | `PixelShape.OFFSETS_4 / OFFSETS_8`（热循环里直接内联，别调 `neighbors()`） |
 | 手动标脏（批量写入后） | `shape.mark_dirty(cx, cy)` |
 
+### 液体（纯视觉的粒子流体）
+
+| 我要 | 用 |
+|---|---|
+| 一瓶会跟着容器转的液体 | `FluidPBF`（`src/fluid/fluid_pbf.gd`，见 cookbook 第 16 节） |
+| 液体量跟着血量 / 燃料走 | `fluid.set_fill_ratio(r)` + `fluid.fill_rate`（**连续**掉，不是一下删完） |
+| 一步到位（初始化 / 测试） | `fluid.snap_fill()` |
+| 知道哪里是液体 | `fluid.ink`（`x*num_y + y`，x 主序） |
+
+> ⚠️ 这是**表现层**的东西：它不进物理像素、不做碰撞。要"液体能被踩"是另一件事。
+
 ### 查找与组织
 
 | 我要 | 用 |

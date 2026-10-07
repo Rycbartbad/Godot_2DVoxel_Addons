@@ -679,7 +679,7 @@ M0~M5 的代码在本仓库里已经全部可运行，M4 的数字见第 5.6 节
 | 关节岛与 `IsBodyJointedToStatic` | ✅ | `PWorld.is_jointed_to_static(body)` 沿关节图 BFS（直接或间接连到静态世界）；休眠仍交给 Rapier 的岛管理器 |
 | 碰撞层 / 掩码 | ✅ | `PBody.collision_layer / collision_mask` -> Rapier `InteractionGroups`（**双向**判据）；查询侧 `Query.require / include`（单向）。**形状级**过滤未做 |
 | 关节体（多 Shape 的 Body） | ⚠️ 部分 | 数据结构支持多 Shape，但分裂时按 Shape 独立处理 |
-| 全局液体 / 火焰 / 载具 | ❌ | 需要独立的粒子与场系统 |
+| 全局液体 / 火焰 / 载具 | ⚠️ 部分 | **液体有原语了**：`src/fluid/fluid_pbf.gd` + 原生 `PixelFluid`（PBF 粒子流体，纯视觉、不做碰撞；重力就是一个向量，所以容器转液面就跟着晃）。**火焰 / 载具仍缺**；液体"变成像素参与碰撞"也仍缺 —— 见 `docs/manual/cookbook.md` 第 16 节 |
 | 精确 OBB 扫掠 | ⚠️ 部分 | 现在是 Minkowski AABB 近似；精确版需要 rect 级的扫掠 |
 | 跨平台确定性 | ❌ | **同平台同构**是可复现的（岛并行逐位一致，堆叠漂移 0.000），但 GDScript 浮点 + 跨平台差异不适合 lockstep 联机 |
 
