@@ -7,7 +7,6 @@ extends RefCounted
 
 const PBody := preload("res://src/physics/pbody.gd")
 const Collide := preload("res://src/physics/collide.gd")
-const Solver := preload("res://src/physics/solver.gd")
 
 const Destruction := preload("res://src/core/destruction.gd")
 const PixelShape := preload("res://src/core/pixel_shape.gd")
@@ -52,7 +51,6 @@ var terminal_speed := 650.0
 var max_angular_velocity := 1000.0
 var fixed_dt := 1.0 / 60.0
 var max_substeps := 4
-var solver := Solver.new()
 
 var sleeping_enabled := true
 var sleep_linear := 6.0
@@ -469,19 +467,18 @@ var max_rects_per_shape := 0
 var profile_enabled := false
 var profile_counts: Dictionary = {}
 
-var manifolds: Array = []
-
-## 本次子步流形走"打包数据"还是"对象数组"——**整个子步只有一个判断点**。
+## ⚠️ 墓碑：这里原来有 `var manifolds: Array` 与 `var _packed_manifolds := false`。
 ##
-## ⚠️ 这个字段的由来是一个真实事故：最初三处消费者各自判断 @@use_native_solve@@，
-## 但 @@_broadphase_native@@ 看的是它、@@_solve@@ 看的却是它**且** @@grabs.is_empty()@@。
-## 结果按住拖动时：宽相跳过了对象装配（manifolds 置空），求解器却因为"有抓取"
-## 退回对象路径 —— 拿到空数组、**所有接触约束消失**，表现为
-## "拖动一个方块，其它方块全部掉穿地面"（只有被抓的那个还被抓取约束吊着）。
+## 它们是「GDScript 宽相把接触装配成对象数组、再由 GDScript 求解器消费」那套路径的
+## 产物。宽相 / 求解交给 Rapier 之后：
+##   · `manifolds` **从来没被填过**（唯一的读者是 debug_overlay 的一个空循环）；
+##   · `_packed_manifolds` 只剩声明（宽相里确实判过一次，但那条路已经不存在了）。
+## 两个都已删除。这段留着是因为它记的教训仍然有效：
 ##
-## 现在一律读这个字段，并且它在 @@_broadphase@@ 里**只算一次**，
-## 所以同一子步内宽相 / 唤醒 / 求解 / 休眠看到的是同一个值，不可能再分叉。
-var _packed_manifolds := false
+##   最初三处消费者各自判断 @@use_native_solve@@，而且宽相与求解看的口径还不一样 ——
+##   按住拖动时宽相跳过对象装配、求解器却因为「有抓取」退回对象路径，拿到空数组，
+##   于是**所有接触约束消失**（症状：拖动一个方块，其它方块全部掉穿地面）。
+##   **同一子步内「走哪条路」只能有一个真源** —— 以后新增开关别再让两个地方各判一次。
 
 
 var grabs: Array = []
@@ -513,6 +510,22 @@ var material_density := PackedFloat32Array()
 ## ⚠️ Rapier 的接触系数由**两个碰撞体合成**（CoefficientCombineRule，默认 Average）：
 ##    地面 0.8 + 箱子 0.2 -> 接触处 0.5。所以"让某个材质说了算"要两边设同一个值。
 var material_friction := PackedFloat32Array()
+
+## op 5（重建碰撞体）给**新**碰撞体设的初始摩擦系数。
+##
+## ⚠️ 它原来叫 `solver.global_friction` —— 求解内核整体删除后，它是 Solver 里
+##    **唯一**还有读者的参数（op 5 的命令流尾巴带着它），所以搬到这里。
+##    默认 0.5 = Rapier 自己的默认值；重建之后每体的 b.friction 会紧跟着重推一次
+##    （见「新碰撞体的摩擦/恢复回到 Rapier 默认」那一段）。
+var global_friction := 0.5
+
+## 允许的穿透深度（像素）——**判据用的容差，不是求解参数**。
+##
+## ⚠️ 它原来是 Solver 的求解参数（穿透修正 / 推测接触的配套）。求解交给 Rapier
+##    之后它不再参与任何计算，但「盒子不能陷进地面」这条判据需要一个**引擎侧**的
+##    阈值：在测试里硬编码数值正是开发日志记过的坑（test_parallel 把「不该陷过 1.0」
+##    写死，参数一调就误报）。所以留成 PWorld 的常量，判据读它。
+const PENETRATION_SLOP := 1.0
 var material_restitution := PackedFloat32Array()
 # ⚠️ 这里曾经有个 _friction_fn 缓存字段，**已删除** —— 见 friction_callable()。
 # ⚠️ 这里曾经有个 _restitution_fn 缓存字段，**已删除** —— 见 restitution_callable()。
@@ -1249,7 +1262,7 @@ func _substep_rapier(dt: float) -> void:
 				cmds.encode_float(off + 8, r.size.x)
 				cmds.encode_float(off + 12, r.size.y)
 				off += 16
-			_rp_f64(cmds, solver.global_friction)
+			_rp_f64(cmds, global_friction)
 			b._rp_rects_rev = b.rects_rev
 			# ⚠️ 重建碰撞体 = Rapier 侧的分组回到**默认全 1**（新碰撞体不会继承旧分组）。
 			#    把镜像打回"未推送"，让下面那段重新推一次 —— 否则"擦掉一块地形"
@@ -2216,11 +2229,11 @@ class Contact:
 ##
 ## ## 为什么不用求解器的 normal_impulse
 ##
-## 第一版是遍历流形取 Solver.Point.normal_impulse。那在**默认配置下完全空转**：
-## 默认 use_native_solve && use_native_broadphase → _packed_manifolds = true →
-## _broadphase_native() 把 manifolds 置空，冲量留在 C++ 里且**不回写**。
-## 于是遍历的是一个空数组，Contact.impulse 永远是近似值、tangent_impulse 恒为 0，
-## 而且不报任何错。
+## 第一版是遍历流形取 Solver.Point.normal_impulse。那在 native 路径下完全空转：
+## 宽相把 manifolds 置空，冲量留在 C++ 里且**不回写** —— 于是遍历的是一个空数组，
+## Contact.impulse 永远是近似值、tangent_impulse 恒为 0，而且不报任何错。
+## （那条路径连同 manifolds 字段一起删掉了；这段留着是因为教训仍然有效：
+##   **「读一个没人填的容器」不会有任何报错**。）
 ##
 ## 现在这个算法**对两条路径都成立** —— 它只看速度，不关心冲量是在哪算的。
 ## 顺便还解决了近似值的最大毛病（偏心撞击高估，因为忽略转动项）：
@@ -2589,14 +2602,6 @@ func fracture(body: PBody, damage, burst_speed: float = 40.0) -> Array:
 		floori(dmg_bounds.position.x), floori(dmg_bounds.position.y),
 		ceili(dmg_bounds.size.x) + 1, ceili(dmg_bounds.size.y) + 1)
 	for s in body.shapes:
-		# 优先走 GPU：一次 dispatch 同时完成破坏 + 分量标注
-		var accel: Dictionary = Destruction.apply_damage_and_split_gpu(s, damage, min_fragment_pixels)
-		if not accel.is_empty():
-			removed += int(accel["removed"])
-			for p in accel["parts"]:
-				parts.append(p)
-			continue
-		# CPU 回退路径
 		# ⚠️⚠️ 判据必须在 apply_damage **之前**取！
 		#    挖完之后，洞的边缘像素天然邻接空像素 —— 那时再问"碰到边界了吗"
 		#    永远返回 true，跳过永远不生效（我第一版就是这么写的，
@@ -2704,8 +2709,6 @@ func fracture(body: PBody, damage, burst_speed: float = 40.0) -> Array:
 		# 传 false 会让每个碎片白跑一次全量连通性标注（~14 ms/个）。
 		add_body(frag, [parts[i]], Callable(), true)
 		spawned.append(frag)
-	if not spawned.is_empty():
-		solver.clear_warm()
 	return spawned
 
 

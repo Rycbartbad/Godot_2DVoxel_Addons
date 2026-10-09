@@ -187,7 +187,6 @@ physics/            物理核心（与渲染/应用层完全解耦）
   grab.gd           鼠标拖动（**策略层**：每子步算一个限力，不是求解器约束）
   sweep.gd          精确 OBB 扫掠（保守推进），连续碰撞
   collide.gd        OBB-OBB 的 SAT（几何工具，sweep 在用）
-  solver.gd         求解参数与流形结构（求解本身在 Rapier 里）
 
 core/               像素与破坏
   pixel_bits.gd     位运算工具
@@ -196,7 +195,7 @@ core/               像素与破坏
   shape_ops.gd      形状级操作（创建/切分/合并/相邻/最近点/按材质查询）
   greedy_rects.gd   像素团 -> 矩形分解
   mass_props.gd     质量/惯量/质心
-  destruction.gd    ★ 破坏：Damage 描述 + 连通性分裂（CPU/GPU 双路径）
+  destruction.gd    ★ 破坏：Damage 描述 + 连通性分裂（走原生 PixelRaster，缺扩展时退回 GDScript 参照实现）
   brush.gd          画笔/擦除的像素级操作
   pixel_editor.gd   应用层编辑（笔画 -> 多个 Body）
   pixel_scale.gd    "一个体素在屏幕上多大"
@@ -214,9 +213,6 @@ render/             可选
   pixel_renderer.gd 每个 Body 一张 ImageTexture 的 Sprite2D
   pixel_shading.gd  逐像素着色（体积感），渲染/精灵共用
   debug_overlay.gd  调试叠加层（接触点 / OBB / 统计）
-
-gpu/                可选
-  gpu_destruction.gd  用 RenderingDevice 做破坏 + 分量标注（默认关闭）
 
 fluid/              可选
   fluid_pbf.gd      ★ PBF 粒子流体（纯视觉；本文件是语义真源，原生实现与它逐位对拍）

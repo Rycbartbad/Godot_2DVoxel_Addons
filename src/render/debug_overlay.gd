@@ -202,11 +202,18 @@ func _draw() -> void:
 				HORIZONTAL_ALIGNMENT_LEFT, -1, font_size - 2, col)
 
 	# ---- 接触点 + 法向 ----
+	#
+	# ⚠️ 数据源换过一次：以前遍历 `world.manifolds`（GDScript 宽相装配的对象数组）。
+	#    宽相/求解交给 Rapier 之后 `manifolds` **永远是空的** —— 这个开关于是**静默失效**
+	#    （勾着也什么都不画，而它是 docs/manual/nodes.md 里写明的功能）。
+	#    现在走 Rapier 的接触导出：对数取 last_contacts，每个点自带世界系位置与法向。
 	if show_contacts:
-		for m in world.manifolds:
-			for p in m.points:
-				draw_circle(p.position, 2.5 * u, contact_color)
-				draw_line(p.position, p.position + m.normal * contact_normal_len,
+		for i in world.last_contacts:
+			var g: Dictionary = world.contact_info(i)
+			for pt: Dictionary in g.get("points", []):
+				var pos: Vector2 = pt["position"]
+				draw_circle(pos, 2.5 * u, contact_color)
+				draw_line(pos, pos + (pt["normal"] as Vector2) * contact_normal_len,
 					contact_color, 1.5 * u)
 
 	# ---- 统计（贴在屏幕左上角，跟着相机走）----
@@ -264,8 +271,7 @@ func _draw_stats(bodies: Array, font: Font, frame: Dictionary, y0: float) -> flo
 			awake += 1
 	var lines := PackedStringArray([
 		"刚体 %d（动态 %d，清醒 %d，休眠 %d）" % [bodies.size(), dyn, awake, dyn - awake],
-		"流形 %d  接触点 %d  子步 %d" % [
-			world.manifolds.size(), world.last_contacts, world.last_substeps],
+		"接触对 %d  子步 %d" % [world.last_contacts, world.last_substeps],
 		"总动量 (%.1f, %.1f)  总角动量 %.1f  总动能 %.1f" % [
 			world.total_momentum().x, world.total_momentum().y,
 			world.total_angular_momentum(world.center_of_mass_world()),

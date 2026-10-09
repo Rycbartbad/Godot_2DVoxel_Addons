@@ -37,7 +37,7 @@ OUT = os.path.join(ROOT, "docs", "api")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from godot_bin import find_godot  # noqa: E402
 
-MODULE_ORDER = ["physics", "core", "render", "gpu", "demo"]
+MODULE_ORDER = ["physics", "core", "render", "nodes", "fluid", "demo"]
 
 ## 引擎脚本没有 class_name，Godot 导出的类名是**文件路径**，
 ## 靠文件名转 CamelCase 会得到 Pbody/Pworld 这种错拼。

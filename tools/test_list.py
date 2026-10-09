@@ -32,6 +32,8 @@ GATES = [
     "validation_dynamics", "validation_nodes", "validation_alignment",
     "validation_shape_plugin", "validation_stress", "validation_facade_api",
     "validation_fluid",
+    ## 这两条原本零引用（「自称闸门却没人接线」）：汇总行格式统一后才进得了名单。
+    "validation_facade_render", "validation_tile_incremental",
 ]
 
 

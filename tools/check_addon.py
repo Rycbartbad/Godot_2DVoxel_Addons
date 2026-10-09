@@ -34,7 +34,6 @@ REQUIRED = [
     "physics/collide.gd",
     "physics/sweep.gd",
     "physics/query.gd",
-    "physics/solver.gd",
     "physics/grab.gd",
     "native/fastphys.cpp",
     "native/rapier_bridge/Cargo.toml",

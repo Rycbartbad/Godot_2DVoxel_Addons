@@ -6,8 +6,7 @@ extends SceneTree
 ##   · profile_sync.gd 量的是**擦除的增量贴图**（0.36 ms/笔）。
 ## 而玩家看到的卡顿是"破坏 + **首次渲染新碎片**"这一帧，两半加起来才是账。
 ##
-## 口径：--headless = **CPU 回退路径**（无 RenderingDevice）。有 GPU 时
-## apply_damage_and_split_gpu 会接管"伤害 + 分量标注"，其余段（组装/质量属性/建体/建图）仍是 CPU。
+## 口径：全部走 CPU 路径（GPU 破坏路径已删除 —— 它默认关闭、实测比 CPU 慢）。
 const PWorld := preload("res://src/physics/pworld.gd")
 const PBody := preload("res://src/physics/pbody.gd")
 const PixelShape := preload("res://src/core/pixel_shape.gd")

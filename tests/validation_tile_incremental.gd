@@ -115,8 +115,8 @@ func _initialize() -> void:
 	_check(r, ground, "连续 12 笔")
 	print("---")
 	print("最后块数 %d，矩形 %d" % [(_snapshot(r, ground.id) as Dictionary).size(), ground.rects.size()])
-	if failed == 0:
-		print("全部通过：%d 项断言" % passed)
-	else:
-		print("失败 %d / %d 项" % [failed, passed + failed])
+	# ⚠️ 汇总行必须是这个格式：CI 用 grep "0 failed" 判、promote.py 用正则取数
+	#    （tools/test_list.py 里那张闸门名单的前提）。原来只印「全部通过：N 项断言」，
+	#    所以这条闸门一直没被接线 —— 格式统一之后才进得了名单。
+	print("=== %d passed, %d failed ===" % [passed, failed])
 	quit(0 if failed == 0 else 1)

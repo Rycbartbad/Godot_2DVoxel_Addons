@@ -63,11 +63,12 @@ python tools/check_docs.py -v
 
 ## ⚠️⚠️ 跑测试的正确姿势（这里踩过整整一轮）
 
-`tests/` 下有 **134 个 .gd**，但**只有 `test_*` 和 `validation_*` 是自检测试**。
-其余是探针（`diag_*` / `probe_*`）、基准（`bench_*`）、剖析（`profile_*`）。
+⚠️ 这一段后来被简化了：**闸门名单只有一个真源** —— `python tools/test_list.py`
+（CI 与 `tools/promote.py` 都从它读）。加测试改那一份，不要再手写筛法。
 
-**直接全跑会挂死** —— 探针脚本大多**没有 `quit()`**，Godot 会一直跑下去。
-我因此白等了两轮。正确的筛法：
+`tests/` 里剩下的多数是探针（`diag_*`）、基准（`bench_*`）、剖析（`profile_*`）——
+**它们没有断言、很多没有 `quit()`，全跑会挂死**（我因此白等过两轮）。
+2026-10 清理过一批零引用探针（见 development_log），要再跑探针请单个指定。
 
 ```powershell
 $tests = Get-ChildItem tests -Filter '*.gd' | Where-Object {
@@ -87,7 +88,6 @@ foreach ($f in $tests) {
 | 现象 | 真相 |
 |---|---|
 | `check_manual_api` / `validation_facade_api` / `validation_fusion` exit=1 | **设计如此**：找不到 addon 就用失败码大声报错（"教错 API 的手册比没有手册更糟"）。先在树内构建 addon。想临时放行：`DSH_ALLOW_MISSING_ADDON=1` |
-| `test_gpu` exit=2 | **跳过码**（`test_gpu.gd:67`）：headless 下没有 RenderingDevice，要用 `--rendering-driver vulkan` 才真跑 |
 | `validation_alignment` **卡住不返回** | **既有问题，与你的改动无关** —— 新旧两版都卡在 "B2. 精灵摆放 vs 刚体变换"。要查就单独查 |
 
 ## 当前状态（交接时）
@@ -162,8 +162,8 @@ foreach ($f in $tests) {
 
 **这个判据是可证的**（不是"看起来差不多"）：唯一调用方 `PWorld.fracture()`
 传的 `dmg_rect` 是 `damage.bounds()` 向外取整 +1；而 `make_keep_mask`（CPU）
-和 `destruction.glsl`（GPU）都只在 `damage.hits(像素中心)` 为真时删除，
-`hits` 的范围恰好就是 `bounds()`。两条路径都逐行核过。
+只在 `damage.hits(像素中心)` 为真时删除，`hits` 的范围恰好就是 `bounds()`。
+（原来还有一条 GPU 路径要一起核 —— 它已删除，见框架文档第 7 节。）
 
 **等价性证据**（全部通过）：
 
@@ -282,8 +282,9 @@ Vex-2.0 贪心盒 -> 每个盒一个 Roblox Part（一次性转化）、
 
 ## 六、待核实
 
-- **原生求解路径下的冲量回填**：`_fill_contact_impulses()` 在
-  `_packed_manifolds = true`（默认）时遍历的是**空数组**。请先量再信。
+- ~~**原生求解路径下的冲量回填**~~：**已解决** —— 冲量不再从求解器内部掏，改成
+  「求解前后各测一次相对法向速度、差值乘有效质量」（见 PWorld 里那段说明）。
+  `manifolds` / `_packed_manifolds` 两个字段也已删除。
 - `frags:240` 回退路径在第 142 步起有 `1.92e-5` 偏差（疑似 warm-start 缓存键序）。
 - **`Query.raycast` 在实心地面上也返回不到命中** —— 未解释。它会挡住任何
   "直接问 Rapier 要答案"的验证手段，值得单独查。

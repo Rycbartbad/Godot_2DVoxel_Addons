@@ -23,11 +23,10 @@ godot --headless --path . --script res://tests/dump_state.gd    # 逐位状态�
 | --- | --- |
 | **闸门名单** | `python tools/test_list.py` —— CI 与 `tools/promote.py` 都从这**一份**读（以前两处各写一份，已经分叉过：CI 那份引用过一个已删除的 `test_parallel`） |
 | 单元断言 | `tests/test_core.gd`（35）/ `test_physics.gd`（32）/ `test_interaction.gd`（41）/ `test_determinism.gd`（6） |
-| 物理验证 | `tests/validation_*.gd`（sweep 14/14、extreme、grab、stroke…） |
+| 物理验证 | `tests/validation_*.gd`（sweep 14/14、stroke、grab、contacts…） |
 | 逐位回归 | `tests/dump_state.gd` —— 8 个固定场景的 12 位小数摘要，**基准值见 `docs/development_log.md`** |
 | 接口验证 | `tests/validation_api.gd`（17 项）+ `addons/pixel_destruction/examples/facade_demo.gd`（24 项） |
-| 性能 | `tests/bench_phase.gd` / `bench_grab_cost.gd` / `bench_solver.gd` |
-| GPU | 加 `--display-driver windows --rendering-driver vulkan` 再跑 `tests/test_gpu.gd` |
+| 性能 | `tests/bench_grab_cost.gd` / `bench_collide.gd` / `bench_decompose_native.gd`（其余见 `docs/manual/performance.md`） |
 
 ## 首次使用时需让编辑器先注册扩展
 
@@ -174,10 +173,9 @@ python tools/gen_api_docs.py --check    # 只查覆盖率，有未文档化的�
 ## 目录
 
 ```
-src/physics/    物理核心：世界 / 刚体 / 窄相 / 求解器 / 宽相 / sweep / 抓取
+src/physics/    物理核心：世界 / 刚体 / sweep / 抓取（宽相与求解在 Rapier 里，见 gdext/）
 src/core/       像素与破坏：chunk、形状、贪心分解、质量、破坏、画笔
 src/render/     像素渲染（每个刚体一张 ImageTexture）
-src/gpu/        RenderingDevice 破坏加速（可选）
 src/demo/       演示场景逻辑
 tests/          单元断言 + 物理验证 + 逐位回归 + 性能基准
 docs/           开发日志（三十多个坑的完整记录）与框架文档

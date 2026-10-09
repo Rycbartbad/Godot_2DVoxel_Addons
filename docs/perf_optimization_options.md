@@ -92,12 +92,11 @@
   ⚠️ 未量：矩形数对 step 时间的实际影响。
 - 子步数与 warm-start 策略：项目里已有相关逻辑和调优记录（见 pworld 的注释）。
 
-### 方案 E：GPU 路径只覆盖一半
+### 方案 E：GPU 路径只覆盖一半（**已作废**）
 
-`apply_damage_and_split_gpu` 用 compute shader 一次 dispatch 同时做"破坏 + 分量标注"，
-但**只在有 RenderingDevice 时启用**，而 `_assemble`/`_group`/decompose/MassProps 仍是 CPU。
-⚠️ 本清单所有数字都是 `--headless` 的 **CPU 回退路径** —— 有 GPU 的机器上
-瓶颈分布可能不同（伤害那段可能已经在 GPU 上），但"生成新实体"那一段**无论如何都是 CPU**。
+⚠️ 这条方案连同 GPU 破坏路径一起删除了（它默认关闭、实测总账不赚）。
+留一行是因为它的判断仍然成立：把管线里的**一个内核**搬上加速器，收益会被周围
+没搬的部分吃掉 —— 要搬就搬整条管线（后来搬进了 GDExtension）。
 
 ### 方案 F：并行化
 

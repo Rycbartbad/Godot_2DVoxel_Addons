@@ -85,8 +85,8 @@ func _initialize() -> void:
 	_c("洞的中心确实没画", _drawn_px(r, ground.id) < before, "")
 
 	print("---")
-	if _fail == 0:
-		print("全部通过：%d 项断言" % _pass)
-	else:
-		print("失败 %d / %d 项" % [_fail, _pass + _fail])
+	# ⚠️ 汇总行必须是这个格式：CI 用 grep "0 failed" 判、promote.py 用正则取数
+	#    （tools/test_list.py 里那张闸门名单的前提）。原来只印「全部通过：N 项断言」，
+	#    所以这条闸门一直没被接线 —— 格式统一之后才进得了名单。
+	print("=== %d passed, %d failed ===" % [_pass, _fail])
 	quit(0 if _fail == 0 else 1)

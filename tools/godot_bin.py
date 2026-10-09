@@ -3,9 +3,9 @@
 
 ## 为什么要抽出来
 
-promote.py / gen_api_docs.py / doctor.py 各写了一份"先看环境变量、再看 PATH、
-再扫硬编码目录"的复制品，而且**环境变量名还不一样**（GODOT_BIN vs GODOT_EXE）——
-同一个项目教人记两个变量名，等于两个都不记。
+promote.py / gen_api_docs.py（以及后来删掉的 doctor.py）各写了一份"先看环境变量、
+再看 PATH、再扫硬编码目录"的复制品，而且**环境变量名还不一样**（GODOT_BIN vs
+GODOT_EXE）—— 同一个项目教人记两个变量名，等于两个都不记。
 
 ## 查找顺序
 

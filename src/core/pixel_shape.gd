@@ -139,10 +139,9 @@ func mark_dirty_key(k: int) -> void:
 ##    表现是形状与碰撞体错位（用户报过两次，两次都很像"只差一点点"）。
 ##
 ##    当前唯一的调用方 PWorld.fracture() 传的是 dmg_rect ——
-##    damage.bounds() 向外取整 +1；而 make_keep_mask（CPU）和
-##    destruction.glsl（GPU）都只在 damage.hits(像素中心) 为真时删除，
-##    hits 的范围恰好就是 bounds()，所以"被删像素 ⊆ dmg_rect"是**可证的**。
-##    两条路径都逐行核过，不是"看起来差不多"。
+##    damage.bounds() 向外取整 +1；而 make_keep_mask 只在 damage.hits(像素中心)
+##    为真时删除，hits 的范围恰好就是 bounds()，所以"被删像素 ⊆ dmg_rect"是**可证的**。
+##    逐行核过，不是"看起来差不多"。
 ##
 ## 用法见 PWorld.fracture()。
 func mark_dirty_range(rect: Rect2i) -> void:

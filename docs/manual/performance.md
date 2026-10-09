@@ -334,8 +334,8 @@ px.world.max_angular_velocity = 50.0    # rad/s，0 = 不钳；默认 1000（宽
 ⚠️ 注意参照实现那一列是**并行之后**的数字 —— 这 3.2 倍是**单线程 C++ 对多线程 GDScript**
 拿到的，赢在每步没有函数调用开销（GDScript 一次调用 1289 ns、一次 Packed 下标写 23 ns）。
 这也解释了为什么"把整条管线搬进 GDExtension"比"只把泛洪搬上 GPU"更值：
-GPU 版内核本身只要 0.75 ms，但周围的字典/数组记账 14.7 ms GPU 加不到
-（见 `src/gpu/gpu_destruction.gd` 的文件头）。
+当年那条 GPU 路径的实测就是——GPU 版内核本身只要 0.75 ms，但周围的字典/数组记账
+14.7 ms GPU 加不到（那条路径已删除，见框架文档第 7 节）。
 
 - 判据是**逐位相同**：同样的分组、同样的顺序、同样的掩码 —— **顺序不同也是不同**
   （它会进 Rapier 的碰撞体顺序）。闸门 `tests/validation_components_native.gd`
@@ -351,10 +351,12 @@ GPU 版内核本身只要 0.75 ms，但周围的字典/数组记账 14.7 ms GPU 
 | 该上 GPU 的 | 不该上 GPU 的 |
 |---|---|
 | 体素元胞自动机（游戏层） | 刚体物理（几百个物体，传输开销大于收益） |
-| 破坏的连通性标注（已实现） | 宽相/求解（C++ 单线程就够了） |
+| 渲染（ImageTexture 放大绘制） | 宽相/求解（C++ 单线程就够了） |
 
-破坏管线已经有 GPU 路径（`Destruction.apply_damage_and_split_gpu`，用 RenderingDevice），
-无 GPU 时自动退回 CPU ✓。
+⚠️ 破坏管线**曾经**有过一条 RenderingDevice 路径（`apply_damage_and_split_gpu` + `src/gpu/`）：
+内核逐位正确，但 576 chunks 时 GPU 侧只花 0.74 ms、整个函数 15.5 ms —— 周围没搬走的
+记账把收益吃光了，所以它一直默认关闭，最终**整条删除**。要加速就搬整条管线（现在在
+GDExtension 里：`PixelRaster` op 2/3）。
 
 ---
 
@@ -373,16 +375,20 @@ GPU 版内核本身只要 0.75 ms，但周围的字典/数组记账 14.7 ms GPU 
 ## 5. 怎么自己测
 
 ```bash
-# 分阶段耗时（最有用）
-godot --headless --path . --script res://tests/bench_phase.gd
+# 单个操作的微基准（按需选，别全跑）
+godot --headless --path . --script res://tests/bench_encode.gd        # 打包缓冲读写
+godot --headless --path . --script res://tests/bench_brush.gd         # 画笔光栅化
+godot --headless --path . --script res://tests/bench_grab_cost.gd     # 拖动开销
+godot --headless --path . --script res://tests/bench_collide.gd        # 窄相
+godot --headless --path . --script res://tests/bench_decompose_native.gd  # 矩形分解
+godot --headless --path . --script res://tests/bench_erase.gd         # 擦除
+godot --headless --path . --script res://tests/bench_threads.gd        # 线程
 
-# 单个操作的微基准
-godot --headless --path . --script res://tests/bench_encode.gd      # 打包缓冲读写
-godot --headless --path . --script res://tests/bench_brush.gd       # 画笔光栅化
-godot --headless --path . --script res://tests/bench_grab_cost.gd   # 拖动开销
+# 破坏路径的分段剖析
+godot --headless --path . --script res://tests/diag_split_profile.gd
 
-# 分阶段剖析（更多计数器）
-godot --headless --path . --script res://tests/profile_stages.gd
+# ⚠️ bench_phase / bench_solver / profile_stages 随 GDScript 求解器一起删除了
+#    （它们调的是已经不存在的 _integrate_forces / _broadphase / solver.solve）。
 ```
 
 ### 剖析的三个纪律

@@ -81,8 +81,8 @@ float32/float64 边界换来的，见 [PRECISION.md](PRECISION.md)。
 
 ```
 world.fracture(body, damage, burst_speed)
-  ├─ 优先 GPU：apply_damage_and_split_gpu()  一次 dispatch 同时做破坏 + 分量标注
-  ├─ 回退 CPU：apply_damage() + split()
+  ├─ 连通性：Destruction.split()（原生 PixelRaster op 3，缺扩展时退回 GDScript 参照实现）
+  ├─ 破坏：apply_damage()（keep 掩码按 chunk 合并）
   ├─ 最大的那块留在原 Body（保持引用与 id 稳定）
   └─ 其余每块 spawn 成新 Body（带上 burst_speed 的初速度）
 ```
@@ -94,5 +94,5 @@ world.fracture(body, damage, burst_speed)
 
 - 想换碰撞形状：`greedy_rects.gd` 换成别的分解方式即可，物理层只吃 `rects`。
 - 想换渲染：`PixelRenderer` 是唯一与渲染相关的模块，替换它不影响物理。
-- 想换求解器：`solver.gd` 的接口是 `prepare / solve / store_warm`，
-  照这个接口换实现即可（`solve_batch.gd` 就是一个 SoA 变体）。
+- 想换求解器：求解**整体在 Rapier 里**（`native/rapier_bridge`），GDScript 侧没有求解代码。
+  要换就把桥接层换掉（`gdext/fastphys.cpp` 的命令流协议是唯一的接口）。

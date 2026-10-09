@@ -447,52 +447,37 @@ Demo 里 `-` / `=` 调节方块大小（= 相机缩放），`0` 复位到 3，�
 
 ---
 
-## 7. GPU 加速：内核做对了，但当前架构下不划算
+## 7. GPU 破坏路径：做过、量过、**已删除**
 
-### 7.1 已经跑在 GPU 上的部分
+⚠️ 这一节原来记的是 `src/gpu/destruction.glsl` + `gpu_destruction.gd` 那条 compute
+shader 路径。它**已经删除**（连同 `Destruction.apply_damage_and_split_gpu` 与
+`tests/test_gpu.gd`），理由就是本节量出来的结论 —— 留在这里，免得以后有人再走一遍：
+
+- 内核本身是对的：一次 dispatch 完成「破坏掩码应用 → chunk 内 4 邻域连通分量 → 分量掩码」，
+  chunk 之间并行、chunk 内部复用 CPU 那套 uint64 位运算泛洪，与 CPU **逐位一致**
+  （`tests/test_gpu.gd` 曾逐 chunk 比对，0/64 个 chunk 有差异）。
+- 但**总账不赚**：576 chunks 时 GPU 侧只要 0.74 ms，整个函数 15.5 ms —— 剩下 14.7 ms
+  全在 GDScript 的记账上（occ_pairs 组装、材质同步、Dictionary 写入、接缝 union-find）。
+  GPU 加不到这些地方去。
+- 所以它一直 `ENABLED = false`（默认关闭），而**真正的出路是把整条管线搬进 GDExtension**
+  —— 那件事后来做了（`PixelRaster` op 2/3，见 `docs/manual/performance.md`）。
+
+**教训**：把管线里的**一个内核**搬上加速器，收益会被周围没搬的部分吃掉。
+要搬就搬整条管线；否则先把「要加速的那一段占总时间多少」量清楚。
+
+### 7.1 仍然跑在 GPU 上的部分
 
 渲染：体素数据写进 `ImageTexture` 后由 GPU 放大绘制，采样用最近邻。
-
-### 7.2 破坏内核（compute shader，`src/gpu/destruction.glsl`）
-
-一次 dispatch 完成：破坏掩码应用 → chunk 内 4 邻域连通分量 → 输出分量掩码。
-
-设计上绕了一大圈才走对：
-
-| 版本 | 做法 | 结果 |
-|---|---|---|
-| v1 | 每 chunk 64 线程 + 共享内存做标签传播 | 有竞态：空像素渗标签、收敛判定提前 6~7 轮退出 |
-| v2 | v1 + 固定 64 轮泛洪（躲竞态） | 正确但**比 CPU 还慢**（barrier 太多） |
-| **v3** | **GPU 在 chunk 之间并行，chunk 内部复用 CPU 那套 uint64 位运算泛洪** | **与 CPU 逐位一致** |
-
-v3 的关键洞察：GLSL 没有 uint64，就用 `uvec2` 手写 64 位位运算，
-把 CPU 的 `dilate4` / `flood` **原样搬进 shader**。好处是彻底的：
-没有共享内存、没有 barrier、没有 atomic → 结构上不可能有竞态，且结果与 CPU 逐位相同。
-
-**正确性验证**（`tests/test_gpu.gd`，12/12 通过）：6 组形状 × (残留占用 · 分片结果) 全部一致，
-逐 chunk 比对分量掩码 **0/64 个 chunk 有差异**。
-
-### 7.3 实测：为什么默认还是关掉
-
-| 规模 | CPU | GPU | 提交 / 回读 / 拆包 |
-|---|---|---|---|
-| 64 chunks | 1.52 ms | —（低于阈值） | — |
-| 256 chunks | 6.44 ms | 7.74 ms | 3.84 / 0.48 / 0.01 |
-| 576 chunks | 15.59 ms | 15.50 ms | 0.51 / 0.23 / 0.01 |
-
-576 chunks 那次，**GPU 侧只花 0.74 ms**，而整个函数耗时 15.5 ms ——
-剩下 14.7 ms 全在 GDScript 的记账上：occ_pairs 组装、材质同步、
-`comp_masks` / `node_of` 的 Dictionary 写入、接缝 union-find。
-
-**结论：瓶颈不在 GPU 能加速的那部分。** 把泛洪搬上 GPU 是对的，但周围的数据结构开销没动，
-所以总账不亏不赚。真正的出路是把**整条管线**搬进 GDExtension（C++），
-而不是只把其中一个内核搬上 GPU。当前 `ENABLED = false`，想验证自己打开。
 
 ---
 
 ## 7b. 多线程
 
 原则：**只并行"输出互不相交"的映射**，这样既不需要锁、结果也完全可复现。
+
+> ⚠️ 7b 记的是 **GDScript 求解器时代**的多线程工作。求解整体交给 Rapier 之后，
+> `_parallel_solve` / 着色并行 / `bench_parallel.gd` 都随求解内核一起删除了。
+> 结论（「这条路已经到头、别在 GDScript 里加并行度」）仍然有效，数字是当时的实测。
 
 ### 7b.1 按岛并行求解（`PWorld._parallel_solve`）
 
@@ -675,15 +660,15 @@ M0~M5 的代码在本仓库里已经全部可运行，M4 的数字见第 5.6 节
 | **抗隧穿/抗粘黏** | ✅ | 推测接触 + split impulse（位置修正走伪速度通道，不进摩擦上限） |
 | **子步预算** | ✅ | 子步数按"醒着的动态体数"摊薄，避免一屏碎块把帧时间乘以 16 |
 | **僵尸对象回收** | ✅ | `cull_outside()` —— 掉出世界的物体会永远加速并把子步永久顶满 |
-| **岛划分正确性** | ✅ | 静态体**不**连接岛（求解器永远不会写它），流形归到动态体所在的岛。修前"一整块地面把全场焊成 1 个岛"，岛并行名存实亡（坑 18） |
+| **岛划分正确性** | ⚠️ 历史 | 这条是 **GDScript 求解器时代**的结论（静态体不连接岛、流形归到动态体所在岛）。求解交给 Rapier 之后这条路径连同 `_parallel_solve` 一起删除，现在是 Rapier 的岛管理器负责休眠 |
 | **可复现性** | ✅ | 同配置跑两次**逐位相同** + 长时间不发散 / 不漂移（`tests/test_determinism.gd`，6 项）。⚠️ 原来的「岛并行 == 串行逐位一致」三条断言已随 GDScript 求解路径一起删除 —— 见该测试的文件头 |
 
 ### 10.2 仍然是缺的
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
-| **岛内图着色并行 / 两层混合并行** | ❌ **已评估并否决** | 不是"没做"而是"做了发现不该做"：全图着色 0.90~1.13x（一律不如岛并行 1.37~1.64x）；嵌套任务会死锁；分波写法在最有利场景（最大岛占 92%）下仍是 0.95x。**根因是 GDScript 属性读写在 16 线程下膨胀 93 倍**，并发拐点约 4 线程 —— 在这个语言里加并行度是负收益，先换语言/下沉 GDExtension 才有意义 |
-| **GDExtension 下沉** | ❌ | 实测：GPU 内核逐位正确但整体**不快** —— 576 chunks 里 GPU 侧只花 0.74 ms，剩下 14.7 ms 全在 GDScript 记账。真正的出路是把整条管线搬进 C++ |
+| **岛内图着色并行 / 两层混合并行** | ❌ **已评估并否决**（GDScript 路径已删除） | 不是"没做"而是"做了发现不该做"：全图着色 0.90~1.13x（一律不如岛并行 1.37~1.64x）；嵌套任务会死锁；分波写法在最有利场景（最大岛占 92%）下仍是 0.95x。**根因是 GDScript 属性读写在 16 线程下膨胀 93 倍**，并发拐点约 4 线程 —— 在这个语言里加并行度是负收益，先换语言/下沉 GDExtension 才有意义 |
+| **GDExtension 下沉** | ✅ | 已经做了：物理整条管线在 Rust/Rapier（`rapier_bridge`），栅格化 / 矩形分解 / 连通分量标注 / 流体在 `PixelRaster`、`PixelFluid`（`gdext/fastphys.cpp`）。GPU 那条实验路径（逐位正确但总账不赚）已删除 —— 见第 7 节 |
 | 关节（铰链 / 滑动 / 弹簧） | ✅ | 五种（铰链/滑轨/焊接/绳/弹簧）+ 限位 + 马达 + 断裂阈值，求解在 Rapier 的冲量关节里。**破坏时关节转移**仍未做：碎片是新刚体，挂在旧刚体上的关节会随它一起删 |
 | 关节岛与 `IsBodyJointedToStatic` | ✅ | `PWorld.is_jointed_to_static(body)` 沿关节图 BFS（直接或间接连到静态世界）；休眠仍交给 Rapier 的岛管理器 |
 | 碰撞层 / 掩码 | ✅ | `PBody.collision_layer / collision_mask` -> Rapier `InteractionGroups`（**双向**判据）；查询侧 `Query.require / include`（单向）。**形状级**过滤未做 |
@@ -708,19 +693,11 @@ M0~M5 的代码在本仓库里已经全部可运行，M4 的数字见第 5.6 节
 | 240 碎块 | 7.0 ms |
 | 修前（同样的场景） | **513 / 522 ms** |
 
-**瓶颈分解（修正版，@@tests/profile_stages.gd@@，带调用次数）**：
-
-| 阶段 | 占整步 |
-|---|---|
-| **求解器（SOLVE 总）** | **52~63%**（优化前 62~72%） |
-| broadphase + narrow | 25~33% |
-| 其余（积分 / AABB / 休眠 / 记账） | < 2% |
-
-⚠️ 早先那份剖面把瓶颈写成 @@broadphase + narrow@@（75%），是**测法错了**：
-它手工展开子步却直接调 @@solver.solve()@@（绕过了 @@_solve()@@ 的岛并行分支），
-并且计数器混用了"每帧"和"每子步"两种口径。修正后结论正好反过来 —— **求解器才是大头**。
-
-可惜求解器恰好是**不能**靠加线程解决的那部分（见 10.2）。
+> ⚠️ 这一段原来贴的是 `tests/profile_stages.gd` 的瓶颈分解（求解 52~63% / 宽相 25~33%）。
+> 那张剖面和它测的 GDScript 求解器 / 宽相**一起删掉了**（求解现在在 Rapier 里，这几个阶段
+> 在 GDScript 侧已经没有对应物）。数字留在这里只作为「当时瓶颈在哪」的记录。
+> 要看当前的代价分布：`tests/bench_grab_cost.gd` / `bench_collide.gd` /
+> `bench_decompose_native.gd` / `tests/diag_split_profile.gd`。
 
 ---
 
@@ -791,6 +768,11 @@ M0~M5 的代码在本仓库里已经全部可运行，M4 的数字见第 5.6 节
 
 ## 12. 代码地图
 
+> ⚠️ 下面这张表是**当时快照**：`tests/` 与 `src/physics/` 都删过几批文件
+> （GDScript 宽相/窄相/求解器、GPU 破坏路径、几十个一次性探针 —— 见
+> `docs/development_log.md` 与 `tools/test_list.py`）。**当前闸门名单以
+> `python tools/test_list.py` 为准**，不要拿这张表当文件清单。
+
 ```text
 project.godot                          项目配置（最近邻采样、960x540）
 scenes/demo.tscn                       可运行 Demo
@@ -803,15 +785,11 @@ src/core/greedy_rects.gd               贪心矩形分解（+ 合并 pass + 预�
 src/core/mass_props.gd                 质量/质心/惯性（单趟扫描 + 平行轴定理）
 src/core/brush.gd                      画笔：圆盘落笔 + 线段插值 + 擦除
 src/core/pixel_scale.gd                "大块像素"：体素世界尺寸（渲染缩放与相机解耦）
-src/gpu/destruction.glsl               GPU 破坏内核（uvec2 手写 uint64，与 CPU 逐位一致）
-src/gpu/gpu_destruction.gd             GPU 后端封装（默认关闭，见第 7 章）
 src/core/pixel_editor.gd               交互层：拾取 / 绘制 / 擦除（与输入、渲染解耦）
 
 src/physics/pbody.gd                   3-DOF 刚体、质量属性重建、AABB
-src/physics/broadphase.gd              SAP 排序扫描
 src/physics/collide.gd                 OBB SAT + 参考面/入射面裁剪 → 2 点流形 + 特征 id
 src/physics/grab.gd                    抓取约束（速度层鼠标关节，限速 + 限力）
-src/physics/solver.gd                  顺序冲量 + 2 点块求解器 + 特征 id warm start
 src/physics/pworld.gd                  固定步长管线、岛屿休眠、fracture（破坏+分裂+生成碎片）
 
 src/render/pixel_renderer.gd           Body -> Sprite2D + ImageTexture
@@ -821,13 +799,11 @@ tests/test_core.gd                     35 项：位运算、掩码、分裂、�
 tests/test_physics.gd                  32 项：落地、堆叠零漂移、休眠、破坏分裂守恒、绕质心旋转
 tests/test_interaction.gd              41 项：绘制 / 跨瓦片 / 笔画连续 / 擦除分裂 / 抓取 / 甩出
 tests/test_determinism.gd             6 项：可复现（逐位相同）/ 不发散 / 不漂移
-tests/test_gpu.gd                       GPU 内核正确性 + 性能对比（需 Vulkan 窗口运行）
 tests/validation_highspeed.gd           高速隧穿 / 嵌入深度 / 粘黏 / 拉出
 tests/validation_stroke.gd              单笔画在世界坐标上的连通性
 tests/validation_stroke_exact.gd        笔触形状精确性（与无裁剪参照做双向差集）
 tests/validation_stroke_drag.gd         拖动笔触连续性（断列 / 丢瓦片 / 最薄厚度）
 tests/bench_brush.gd                    画笔光栅化 A/B（补点盖圆盘 vs 到线段距离）
-tests/bench_solver.gd                   求解器内层成本（带 solve/broad 比值抵消机器漂移）
 tests/bench_collide.gd                  窄相 A/B（一次多余的 SAT 值多少）
 tests/dump_state.gd                     刚体状态 dump —— 物理改动的**逐位等价性判据**
 tests/bench_datalayout.gd               数据布局：对象属性 vs packed 数组（串行成本 + 并发膨胀）
@@ -844,15 +820,12 @@ tests/diag_multi_world.gd               同进程多世界的状态隔离
 > / @@bench_solve.cpp@@，以及 bench_native_collide / dump_collide_random / bench_batch
 > / bench_variant。它们存在的理由是"GDScript 与 C++ 逐字节等价"那个验证机制 ——
 > 物理交给 Rapier 之后，这个机制连同它要验证的东西一起消失了。
-tests/profile_many.gd                   多碎片场景**分阶段**画像（活跃 / 半落定 / 落定）
 tests/diag_sleep.gd                     休眠诊断：谁在抖、岛多大、计时卡在哪
 tests/validation_rect_shapes.gd         矩形分解精确性（凹陷形状）
 tests/validation_rect_exactness.gd      矩形分解精确性（预算触发）
-tests/validation_stack_drift.gd         块求解器有效性验证（参数扫描）
 tests/validation_threads.gd             GDScript 多线程写法的安全性探测
 tests/bench_threads.gd                  岛并行 / CCD 开销基准
 tests/bench.gd                         性能基准
-tests/profile_stages.gd                整步耗时分解（**带调用次数**，走真正的 _solve）
 tests/bench_parallel.gd                岛并行 / 着色 A/B（交叉重复取最小值）
 tests/bench_priority.gd                并行任务参数扫描（优先级 x 任务数）
 tests/bench_trace.gd                   岛任务跑在哪个线程 / 各自耗时（定位并发膨胀）

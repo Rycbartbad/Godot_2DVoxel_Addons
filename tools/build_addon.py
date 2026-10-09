@@ -36,7 +36,7 @@ DEFAULT_OUT = os.path.join(ROOT, "addons", "pixel_destruction")
 ## ⚠️ 加了新模块**必须**加到这里：漏了的话那个目录不进 addon，
 ##    使用方 preload 时直接找不到文件 —— 而本仓库自己跑得好好的（src/ 还在），
 ##    所以这个错误只会在**别人**的项目里发作。
-MODULES = ["physics", "core", "render", "gpu", "nodes", "fluid"]
+MODULES = ["physics", "core", "render", "nodes", "fluid"]
 
 ## ⚠️ addons/pixel_destruction/ 是 src/ 的**拷贝**，两者在同一棵 Godot 项目树里。
 ## 不忽略它就会出两类硬错误：
