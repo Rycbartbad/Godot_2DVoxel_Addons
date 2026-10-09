@@ -308,7 +308,8 @@ Rapier 没有这个旋钮）、`rp_max_linear_velocity`、`min_fragment_pixels`�
 `angular_velocity` / `mass` / `inertia` / `inv_mass` / `inv_inertia` /
 `local_com` / `awake` / `sleep_timer`。
 
-几何：`shapes`（PixelShape 数组）/ `rects`（贪心分解出的 Rect2 数组）/
+几何：`shapes`（PixelShape 数组）/ `rects`（贪心分解出的 Rect2 数组，**精确覆盖**）/
+`polys`（**惰性**读回：Rapier 里真的在用的碰撞体形状）/
 `aabb` / `swept_aabb` / `bounding_radius()` /
 **`local_hull()` / `world_hull()` / `hull_contains(p)`**（凸包 —— 与 AABB 并列的另一种包围体，
 跟着刚体转所以更紧；**惰性**：第一次问才现算，形状一改就作废）。

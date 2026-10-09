@@ -173,10 +173,22 @@ func _draw() -> void:
 		if show_swept_aabbs:
 			draw_rect(b.swept_aabb, swept_color, false, u)
 
-		# ---- 碰撞矩形（物理真正用的形状）----
+		# ---- 碰撞体（物理真正用的形状）----
+		#
+		# ⚠️ 这里读的是 **Rapier 里真的在用的形状**（world.fetch_polys -> op 44），
+		#    不是 GDScript 侧另算一份。拟合之后碰撞体是**凸多边形**（斜边是直的），
+		#    照 b.rects 画会画出一堆轴对齐矩形 —— 那是**另一套形状**，
+		#    比不画更糟（会把人引到"碰撞体还是矩形"的错误结论上）。
+		#    走矩形那条路时读回来的就是矩形（4 个角），同一段代码两条路都对。
 		if show_obbs:
-			for r: Rect2 in b.rects:
-				_draw_obb(b, r, col, u)
+			for poly: PackedVector2Array in world.fetch_polys(b):
+				if poly.size() < 3:
+					continue
+				var pts := PackedVector2Array()
+				for p: Vector2 in poly:
+					pts.append(b.to_world(p))
+				pts.append(pts[0])
+				draw_polyline(pts, col, u)
 
 		# ---- 质心 ----
 		if show_com and not b.is_static:

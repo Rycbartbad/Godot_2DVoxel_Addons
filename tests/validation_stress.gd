@@ -72,7 +72,13 @@ func _initialize() -> void:
 				got = true
 				# 静态体视作无穷大质量 -> m_eff = 落体质量
 				var want := f.mass * absf(c.approach)
-				_c("冲量 ≈ 有效质量 × 接近速度", absf(c.impulse - want) < 1e-6,
+				# ⚠️ 容差必须是**相对**的：这里原来是绝对 1e-6，而量级是 2.5e4 ——
+				#    float32 在 2.5e4 附近的分辨率就是 ~0.002，1e-6 比它小三个数量级。
+				#    它以前能过，只是因为两边走的是**同一条** float32 路径（cuboid-cuboid），
+				#    舍入恰好抵消；换成凸多边形碰撞体（Rapier 另一条接触路径）之后，
+				#    两边舍入不同，差 0.002 —— 那不是物理错，是"容差定得比精度还小"。
+				#    判据仍然是"冲量 = 有效质量 x 接近速度"，只是按可表示精度来判。
+				_c("冲量 ≈ 有效质量 × 接近速度", absf(c.impulse - want) < maxf(1e-3, want * 1e-5),
 					"%.3f vs %.3f（m_eff=%.1f）" % [c.impulse, want, f.mass])
 				_c("接触宽度 > 0", c.contact_width > 0.0, "%.2f px" % c.contact_width)
 	_c("产生了带冲量的接触事件", got)

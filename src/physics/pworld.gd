@@ -458,6 +458,30 @@ var min_fragment_pixels_downgrade := 0
 # 精确覆盖与矩形上限不可兼得，宁可多几个矩形也不要幻影碰撞体。
 var max_rects_per_shape := 0
 
+## ---- 碰撞体多边形拟合（Noita 式）----
+##
+## 默认把**矩形集合拟合成凸多边形**再交给 Rapier：斜边是**直的**（锯齿被拉平）、
+## 块数远少于矩形（实心地面 1 个、圆盘 1 个、平滑斜坡 4 个、楼梯 1 个）。
+##
+## ⚠️ 代价是**幻影**：凸包会把凹处填平，碰撞体比像素厚一点（上限 = poly_dev_tol）。
+##    这是**有意的取舍**（Noita 也这么做：像素只是真源，交给 Box2D 的是凸形状）。
+##    与 max_rects_per_shape 那条注释不冲突：那条管的是"矩形上限被顶到时怎么近似"，
+##    这条管的是"要不要用多边形当碰撞体"—— 想要逐像素精确就把它设 false。
+## ⚠️ 关掉（false）= 回到"一堆轴对齐矩形"，8 条逐位基准跑的就是那条路。
+var poly_colliders := true
+## 偏离容差（像素）：碰撞体允许比像素表面"厚"多少。
+## 1 像素的台阶会被拉成斜线；12 像素的锯齿不会被填平（洞也不会被封死）。
+## 判据与实测见 src/core/poly_fit.gd 与 tests/validation_poly.gd。
+## ⚠️ 默认 1.0 而不是 2.0：判据是**平均**厚度，深而窄的凹口会被低估
+##    （实测"墙+洞"在 2.0 时会封掉半个洞）。详见 poly_fit.gd 的说明。
+var poly_dev_tol := 1.0
+## 矩形数超过它就**不拟合**，退回精确矩形。
+##
+## ⚠️ 为什么要有这条闸：拟合是 O(矩形数 x 邻居数)，而且每次几何变化都要重算整块。
+##    768x100 的高频锯齿地形有 769 个矩形 —— 那种形状拟合出来的块数几乎不减少
+##    （高频锯齿本来就不是凸的），却要付整趟拟合的钱。默认 256 是实测的拐点。
+var poly_max_rects := 256
+
 
 ## ---- 剖面计数（默认关）----
 ## 教训：只统计**累计耗时**会漏掉"每个阶段都不慢、整帧很慢"这类问题
@@ -981,6 +1005,36 @@ static func _rp_f32(b: PackedByteArray, v: float) -> void:
 	b.resize(n + 4)
 	b.encode_float(n, v)
 
+## Rapier 侧的**质量** —— 判据用（-1 = 拿不到）。
+##
+## ⚠️ 为什么必须能读到它：碰撞体拟合之后面积 >= 像素面积（幻影），密度得按
+##    "质量 / 多边形面积"反算。反算错了**不会报错**，只会让两边质量静默分叉，
+##    而所有按 mass 算的力（抓取限力、灰尘判据…）都会跟着错。
+func rp_body_mass(b: PBody) -> float:
+	if not _rp_ensure() or b.rapier_id <= 0:
+		return -1.0
+	var cmds := PackedByteArray()
+	_rp_u8(cmds, 45)
+	_rp_u32(cmds, b.rapier_id)
+	var res := _rp_send(cmds, 8)
+	if res.size() < 12:
+		return -1.0
+	return res.decode_double(4)
+
+
+## Rapier 侧的**角惯量**（-1 = 拿不到）—— 与 rp_body_mass 配套的判据。
+func rp_body_inertia(b: PBody) -> float:
+	if not _rp_ensure() or b.rapier_id <= 0:
+		return -1.0
+	var cmds := PackedByteArray()
+	_rp_u8(cmds, 46)
+	_rp_u32(cmds, b.rapier_id)
+	var res := _rp_send(cmds, 8)
+	if res.size() < 12:
+		return -1.0
+	return res.decode_double(4)
+
+
 ## 原生（Rapier）侧的刚体数 —— **诊断用**。
 ##
 ## ⚠️ 为什么必须有它：GDScript 侧的 bodies.size() 与 Rapier 侧的刚体数是**两个数**，
@@ -997,6 +1051,66 @@ func rp_body_count() -> int:
 	if res.size() < 8:
 		return -1
 	return res.decode_s32(4)
+
+
+## 读回一个刚体**真的在用**的碰撞体形状（凸多边形；走矩形那条路时是 4 个角的矩形）。
+##
+## ⚠️ 这是**问物理要真相**（op 44），不是 GDScript 侧另算一份 —— 那样可视化会和
+##    碰撞体悄悄分叉（本仓库为"调试可视化画错"栽过：它比没有可视化更糟）。
+## 结果按 rects_rev 缓存：形状没变就不再问（每问一次是一次 _rp_send，约 2.8 us）。
+## 用途：调试叠加层 / 门面的 colliders()。编辑器抓手不走这条路（那里不跑物理）。
+func fetch_polys(b: PBody) -> Array:
+	if b.polys_rev == b.rects_rev:
+		return b.polys
+	b.polys_rev = b.rects_rev
+	b.polys = []
+	if not _rp_ensure() or b.rapier_id <= 0:
+		return b.polys
+	# ⚠️ 第一趟给一个**宽裕**的 cap（4096 字节 ≈ 500 个顶点）：绝大多数刚体一次就够。
+	#    别用 cap = 0 去"探大小" —— 那会让原生侧写出 4 字节而 cap 是 0，
+	#    触发 "结果段越界" 的假警告（那是命令流错位的指纹，留着会把真问题淹掉）。
+	var probe := PackedByteArray()
+	_rp_u8(probe, 44)
+	_rp_u32(probe, b.rapier_id)
+	_rp_i32(probe, 4096)
+	var res := _rp_send(probe, 4096)
+	if res.size() < 8:
+		return b.polys
+	var need: int = res.decode_s32(4)
+	if need <= 0:
+		return b.polys
+	if need <= 4096:
+		# 一趟就成了：payload 就是块本身（off = 4 是协议头的 written）
+		return _read_polys(b, res, 4)
+	# 太大了：按 need 精确重开一次（payload = 块本身）
+	var cmds := PackedByteArray()
+	_rp_u8(cmds, 44)
+	_rp_u32(cmds, b.rapier_id)
+	_rp_i32(cmds, need)
+	var res2 := _rp_send(cmds, need)
+	if res2.size() < 4 + need:
+		return b.polys
+	return _read_polys(b, res2, 4)
+
+
+## 把 op 44 的结果段解析成多边形（off 是 payload 起点）。
+func _read_polys(b: PBody, res: PackedByteArray, start: int) -> Array:
+	var off := start
+	var np: int = res.decode_s32(off)
+	off += 4
+	for i in np:
+		var cnt: int = res.decode_s32(off)
+		off += 4
+		if cnt < 3:
+			off += cnt * 8
+			continue
+		var poly := PackedVector2Array()
+		poly.resize(cnt)
+		for k in cnt:
+			poly[k] = Vector2(res.decode_float(off), res.decode_float(off + 4))
+			off += 8
+		b.polys.append(poly)
+	return b.polys
 
 
 func _rp_send(cmds: PackedByteArray, out_cap: int) -> PackedByteArray:
@@ -1244,9 +1358,18 @@ func _substep_rapier(dt: float) -> void:
 			_rp_f64(cmds, b.gravity_scale)
 			b._rp_gravity_scale = b.gravity_scale
 		if b._rp_rects_rev != b.rects_rev:
-			_rp_u8(cmds, 5)
-			_rp_u32(cmds, b.rapier_id)
-			_rp_i32(cmds, b.rects.size())
+			# ⚠️ 两条路**互斥**（都会先清空旧碰撞体），二选一由 poly_colliders / poly_max_rects 决定：
+			#   · op 43：矩形 -> **凸多边形**（原生侧拟合，Noita 式）
+			#   · op 5 ：矩形 -> Rapier cuboid（精确，逐像素不差）
+			var as_polys: bool = poly_colliders and b.rects.size() <= poly_max_rects
+			if as_polys:
+				_rp_u8(cmds, 43)
+				_rp_u32(cmds, b.rapier_id)
+				_rp_i32(cmds, b.rects.size())
+			else:
+				_rp_u8(cmds, 5)
+				_rp_u32(cmds, b.rapier_id)
+				_rp_i32(cmds, b.rects.size())
 			# ⚠️ 整段**先 resize 一次**，再逐字段 encode_float —— 不要每个字段都走 _rp_f32。
 			#    _rp_f32 每次都 `resize(size+4)` + `encode_float`：1200 个矩形 = 4800 次
 			#    resize（每次都动整个缓冲区）+ 4800 次编码。实测（1200 / 4000 个矩形）：
@@ -1263,14 +1386,25 @@ func _substep_rapier(dt: float) -> void:
 				cmds.encode_float(off + 12, r.size.y)
 				off += 16
 			_rp_f64(cmds, global_friction)
+			if as_polys:
+				_rp_f64(cmds, b.mass)
+				_rp_f32(cmds, poly_dev_tol)
 			b._rp_rects_rev = b.rects_rev
+			b.polys_rev = -1          # 形状变了：读回的碰撞体形状作废
 			# ⚠️ 重建碰撞体 = Rapier 侧的分组回到**默认全 1**（新碰撞体不会继承旧分组）。
 			#    把镜像打回"未推送"，让下面那段重新推一次 —— 否则"擦掉一块地形"
 			#    就会让那个刚体的层/掩码静默失效（子弹又开始打中它）。
 			b._rp_layer = -1
 			b._rp_mask = -1
-			# ⚠️ 同理：新碰撞体的密度也回到 Rapier 默认的 1.0，必须重推。
-			b._rp_density = -1.0
+			if as_polys:
+				# ⚠️⚠️ 多边形这条路**不推密度**：op 43 已经按 mass/多边形面积 反算好了。
+				#    多边形面积 >= 像素面积（幻影），推"材质密度"会让 Rapier 的质量比
+				#    b.mass 大出幻影那一份（薄形状能差 2 倍）。把镜像写成"与 b.density
+				#    一致"，下面那段 op 34 就不会再去覆盖它。
+				b._rp_density = b.density
+			else:
+				# ⚠️ 矩形那条路：新碰撞体的密度回到 Rapier 默认的 1.0，必须重推。
+				b._rp_density = -1.0
 			# ⚠️ 同理：新碰撞体的摩擦/恢复系数也回到 Rapier 默认（0.5 / 0.0），必须重推。
 			b._rp_friction = -1.0
 			b._rp_restitution = -1.0

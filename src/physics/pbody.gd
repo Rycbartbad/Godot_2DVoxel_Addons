@@ -37,7 +37,15 @@ var inv_mass := 0.0
 var inv_inertia := 0.0
 var local_com := Vector2.ZERO     # 质心（Body 局部坐标，像素单位）
 
-var rects: Array = []             # Array[Rect2]，局部空间碰撞矩形（贪心分解结果）
+var rects: Array = []             # Array[Rect2]，局部空间碰撞矩形（贪心分解结果，**精确覆盖**）
+## 碰撞体**真的在用**的凸多边形（局部空间，Array[PackedVector2Array]）—— **惰性**读回。
+##
+## ⚠️ 它不是"另算一份"：由 PWorld.fetch_polys() 走 op 44 从 Rapier 读回来，
+##    所以走矩形那条路时这里就是矩形（4 个角）。可视化必须用这个，
+##    否则叠加层画的形状和碰撞体不是一回事。
+## 形状一变（rects_rev）就作废；polys_rev == -1 表示"还没读过"。
+var polys: Array = []
+var polys_rev := -1
 var shapes: Array = []            # Array[PixelShape]，局部空间像素数据
 var is_static := false
 ## **冻结**（可逆）—— 与 is_static 的区别：静态是"天生不动"，冻结是"暂时不动，状态留着"。

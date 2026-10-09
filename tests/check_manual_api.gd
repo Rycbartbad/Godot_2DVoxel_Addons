@@ -79,7 +79,7 @@ func _initialize() -> void:
 		"push", "push_at", "spin", "impulse", "set_gravity_scale", "set_velocity",
 		"raycast", "closest_point", "bodies_in", "query_reject_body", "query_clear_filters",
 		# 包围体：AABB 与它并列的凸包（多边形碰撞箱拟合）
-		"bounds", "hull", "hull_contains", "shape_bounds", "shape_hull",
+		"bounds", "hull", "hull_contains", "shape_bounds", "shape_hull", "colliders",
 		"grab_at", "drag_to", "release", "has_grab",
 		"set_tag", "find_body", "find_bodies", "find_shapes", "tag_value", "has_tag", "remove_tag",
 		"shape_material_at", "center_of_mass", "step", "resync", "renderer",

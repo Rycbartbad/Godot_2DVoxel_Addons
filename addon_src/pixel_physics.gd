@@ -796,6 +796,19 @@ func hull_contains(body: PBody, world_point: Vector2) -> bool:
 	return body.hull_contains(world_point)
 
 
+## 刚体**真的在用**的碰撞体形状（世界坐标的凸多边形数组）。
+##
+## 引擎默认把像素拟合成的**凸多边形**交给 Rapier（斜边是直的：楼梯的锯齿会被拉成
+## 一条斜线），所以这里的多边形就是物理实际用的形状 —— 不是另算一份近似。
+## 走矩形那条路（`world.poly_colliders = false` 或矩形数超预算）时，返回的是
+## 每个碰撞矩形（4 个角）。
+##
+## ⚠️ 它是**惰性**读回（形状不变就复用缓存），可以每帧调；但**别在编辑器里调** ——
+##    编辑器不跑物理，刚体还没有 Rapier 身份，会返回空数组。
+func colliders(body: PBody) -> Array:
+	return world.fetch_polys(body)
+
+
 ## 是否已经被打碎（形状全空）。
 func is_broken(body: PBody) -> bool:
 	for s in body.shapes:

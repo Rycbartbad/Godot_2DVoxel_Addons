@@ -5,7 +5,9 @@
 ```
 PBody                        world.bodies[]
   ├─ shapes:  PixelShape[]   像素数据（chunk 稀疏表）
-  ├─ rects:   Rect2[]        贪心分解出的碰撞矩形（局部空间）—— **唯一的碰撞形状**
+  ├─ rects:   Rect2[]        贪心分解出的碰撞矩形（局部空间，**精确覆盖**：面积和 == 像素数）
+│                           —— 这是**输入**，不是最终碰撞形状
+├─ polys:   Vector2[][]    **Rapier 里真的在用的**碰撞体形状（惰性读回，见下）
   ├─ aabb:    Rect2          世界 AABB（每子步维护，宽相/粗筛用）
   ├─ world_hull()            世界凸包（**与 AABB 并列的包围体**，惰性：谁问谁付）
   ├─ local_com / mass / inertia
@@ -95,6 +97,11 @@ world.fracture(body, damage, burst_speed)
 ## 扩展点
 
 - 想换碰撞形状：`greedy_rects.gd` 换成别的分解方式即可，物理层只吃 `rects`。
+- **默认的碰撞形状是"拟合出来的凸多边形"，不是 `rects` 本身**：`rects` 是精确覆盖的输入，
+  原生侧（`rb_body_fit_polys`）把它拟合成凸多边形（斜边拉直、锯齿拉平、块数更少）再交给 Rapier。
+  `world.poly_colliders = false` 可以关掉（回到精确矩形）。
+  ⚠️ 要**可视化/判定**就用 `px.colliders(body)`（读回 Rapier 的真相），
+  别照 `rects` 画 —— 那是两份会分叉的真相。
 - 想要"紧的包围体"：`hull_fit.gd`（凸包，与 AABB 并列）。
   ⚠️ 它是**包围体**，不是碰撞形状 —— 凹形状的凹角会被填平，别拿它去替换 `rects`。
 - 想换渲染：`PixelRenderer` 是唯一与渲染相关的模块，替换它不影响物理。
