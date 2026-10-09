@@ -17,9 +17,9 @@ tag 用 git 推就够了，但 **Release 是 GitHub 的元数据**，git 推不�
 的 PATCH/DELETE 一律 500（GitHub 侧状态不一致），只能去网页上手工删一个。
 
 什么时候还用得上它：CI 没跑成（网络 / 权限 / workflow 被禁用）而 Release 必须补上时。
-⚠️ 另外它有个已知缺陷：更新已有 Release 时会把 `tag_name` 也发过去，GitHub 判
-"already_exists" 直接 422 —— 所以"更新正文"这条路径实际是坏的（v0.4.1 实测）。
-要用就先修这里，别指望 --dry-run 能看出来。
+⚠️ 更新已有 Release 的 PATCH 只发 `{"name", "body"}`。早期版本会把 `tag_name`
+一起发过去，GitHub 判 already_exists 直接 422 —— 那条"更新路径是坏的"说明已作废
+（代码里已经没有它了），但上面"两条路同时建 Release"的坑仍然有效。
 
 ## token 放哪（**不要**贴进对话或写进仓库）
 

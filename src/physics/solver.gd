@@ -179,7 +179,7 @@ func prepare(manifolds: Array, dt: float) -> void:
 ##   1. 有效质量、逆质量、切向、摩擦系数、r x normal 全部来自 prepare()；
 ##   2. 速度采样不再调 velocity_at()，因为 r_a / r_b 已经缓存，
 ##      "lv + w x r" 就地写出来即可（这也顺带省掉了 com_world() 那层调用）。
-func solve_manifold(m: Manifold, dt: float) -> void:
+func solve_manifold(m: Manifold) -> void:
 	var a: PBody = m.a
 	var b: PBody = m.b
 	var n := m.normal
@@ -251,7 +251,7 @@ func solve_manifold(m: Manifold, dt: float) -> void:
 func solve(manifolds: Array, dt: float, grabs: Array = []) -> void:
 	for it in iterations:
 		for m: Manifold in manifolds:
-			solve_manifold(m, dt)
+			solve_manifold(m)
 		# 抓取约束和接触约束在同一层迭代，所以拖着物体撞墙时会自然互相制衡
 		for g in grabs:
 			g.solve(dt)
@@ -270,10 +270,10 @@ func solve_colored(groups: Array, dt: float, grabs: Array = []) -> void:
 			elif cnt < parallel_min_per_color:
 				# 太小的组，线程开销大于收益
 				for m2: Manifold in grp:
-					solve_manifold(m2, dt)
+					solve_manifold(m2)
 			else:
 				var worker := func(t: int) -> void:
-					solve_manifold(grp[t], dt)
+					solve_manifold(grp[t])
 				# 同 pworld._parallel_solve：高优先级才能拿到全部线程（低优先级只有 ~30%）
 				var gid := WorkerThreadPool.add_group_task(worker, cnt, color_tasks_needed,
 					color_high_priority, "solve_color")
@@ -428,20 +428,6 @@ static func _apply(m: Manifold, p: Point, impulse: Vector2) -> void:
 	if b.awake and not b.is_static:
 		b.linear_velocity += impulse * b.inv_mass
 		b.angular_velocity += b.inv_inertia * p.r_b.cross(impulse)
-
-
-## 与 _apply 同构，但只作用于伪速度（热路径同样已内联）
-static func _apply_pseudo(m: Manifold, p: Point, impulse: Vector2) -> void:
-	if impulse == Vector2.ZERO:
-		return
-	var a: PBody = m.a
-	var b: PBody = m.b
-	if a.awake and not a.is_static:
-		a.pseudo_linear_velocity -= impulse * a.inv_mass
-		a.pseudo_angular_velocity -= a.inv_inertia * p.r_a.cross(impulse)
-	if b.awake and not b.is_static:
-		b.pseudo_linear_velocity += impulse * b.inv_mass
-		b.pseudo_angular_velocity += b.inv_inertia * p.r_b.cross(impulse)
 
 
 static func make_key(ia: int, ra: int, ib: int, rb: int) -> int:

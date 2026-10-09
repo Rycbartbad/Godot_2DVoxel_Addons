@@ -21,11 +21,12 @@ godot --headless --path . --script res://tests/dump_state.gd    # 逐位状态�
 
 | 类别 | 命令 |
 | --- | --- |
-| 单元断言 | `tests/test_core.gd` / `test_physics.gd` / `test_interaction.gd` / `test_parallel.gd` |
+| **闸门名单** | `python tools/test_list.py` —— CI 与 `tools/promote.py` 都从这**一份**读（以前两处各写一份，已经分叉过：CI 那份引用过一个已删除的 `test_parallel`） |
+| 单元断言 | `tests/test_core.gd`（35）/ `test_physics.gd`（32）/ `test_interaction.gd`（41）/ `test_determinism.gd`（6） |
 | 物理验证 | `tests/validation_*.gd`（sweep 14/14、extreme、grab、stroke…） |
 | 逐位回归 | `tests/dump_state.gd` —— 8 个固定场景的 12 位小数摘要，**基准值见 `docs/development_log.md`** |
 | 接口验证 | `tests/validation_api.gd`（17 项）+ `addons/pixel_destruction/examples/facade_demo.gd`（24 项） |
-| 性能 | `tests/bench_phase.gd` / `bench_grab_cost.gd` / `bench_native_solve.gd` |
+| 性能 | `tests/bench_phase.gd` / `bench_grab_cost.gd` / `bench_solver.gd` |
 | GPU | 加 `--display-driver windows --rendering-driver vulkan` 再跑 `tests/test_gpu.gd` |
 
 ## 首次使用时需让编辑器先注册扩展

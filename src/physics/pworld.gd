@@ -3188,7 +3188,7 @@ func enforce_body_budget() -> int:
 ##
 ## ⚠️ 顺序不能反：必须**先** extract（此时像素还在），**再** fracture（它会把像素删掉）。
 ##    反过来就什么都捡不到了。
-func detach(body: PBody, damage, burst_speed: float = 40.0) -> Array:
+func detach(body: PBody, damage) -> Array:
 	# ① 先捡：把"将被命中"的像素收集出来
 	var extracted: Array = []
 	for s in body.shapes:

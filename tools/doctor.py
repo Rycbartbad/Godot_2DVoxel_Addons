@@ -29,8 +29,12 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-GODOT = os.environ.get(
-    "GODOT_EXE", r"D:\Godot_v4.7.2\Godot_v4.7.2-stable_win64_console.exe")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from godot_bin import find_godot  # noqa: E402
+
+## ⚠️ 这里原来读的是 GODOT_EXE（项目里其它脚本读 GODOT_BIN）—— 两个变量名
+##    等于两个都不记。现在统一走 tools/godot_bin.py。
+GODOT = find_godot() or "godot"
 
 problems = []
 fixes = []
@@ -58,7 +62,10 @@ def main() -> int:
     addon = ROOT / "addons" / "pixel_destruction"
     check("addon 不在项目树里", not addon.exists(),
           "（它在树里会让 UID 冲突，测试整批加载失败、编辑器打不开）",
-          fix=lambda: shutil.rmtree(ROOT / "addons", ignore_errors=True))
+          # ⚠️ 删的必须**只是** pixel_destruction：这里原来 rmtree 整个 addons/，
+          #    而那正是构建产物唯一的落点 —— 修一个状态却把盘上其它东西一起清了。
+          fix=lambda: shutil.rmtree(ROOT / "addons" / "pixel_destruction",
+                                    ignore_errors=True))
 
     # 2) 引擎源码在
     check("src/physics/pworld.gd 存在", (ROOT / "src" / "physics" / "pworld.gd").is_file())

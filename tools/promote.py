@@ -17,7 +17,6 @@ r"""把 main 推进到 stable —— 只有**全绿**才允许。
 import argparse
 import os
 import re
-import shutil
 import subprocess
 import sys
 
@@ -25,25 +24,17 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STABLE = "stable"
 SOURCE = "main"
 
-TESTS = [
-    "test_core", "test_physics", "test_interaction", "test_determinism",
-    "validation_sweep", "validation_query", "validation_api", "validation_api2",
-    "validation_voxel_layer", "validation_contacts", "validation_traversal",
-    "validation_dynamics", "validation_nodes", "validation_alignment",
-    "validation_shape_plugin", "validation_stress", "validation_facade_api",
-]
+## ⚠️ 名单不写在这里 —— 见 tools/test_list.py（唯一真源）。
+##    CI 与这里各写一份时已经分叉过一次（CI 那份还引用了一个已删除的测试）。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from godot_bin import find_godot  # noqa: E402
+from test_list import GATES  # noqa: E402
+
+TESTS = GATES
 
 
-def find_godot() -> str:
-    for cand in (os.environ.get("GODOT_BIN", ""), "godot", "godot4"):
-        if cand and shutil.which(cand):
-            return cand
-    for base in (r"D:\Godot_v4.7.2", os.path.expanduser("~/godot")):
-        if os.path.isdir(base):
-            for f in sorted(os.listdir(base)):
-                if f.endswith(".exe") and "console" in f:
-                    return os.path.join(base, f)
-    return ""
+## ⚠️ 找 Godot 的逻辑不写在这里 —— 见 tools/godot_bin.py（唯一真源，
+##    与 gen_api_docs.py 共用；以前两边各有一份，环境变量名还不同）。
 
 
 def run(cmd, **kw):

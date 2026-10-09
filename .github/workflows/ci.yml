@@ -157,10 +157,13 @@ jobs:
       - name: 构建 addon（树内，供手册 API 检查用）
         run: python tools/build_addon.py
 
+      ## ⚠️ 名单来自 tools/test_list.py（**唯一真源**）—— 别在这里再写一份。
+      ##    两处各写一份时已经分叉过：这里引用过一个早已删除的 test_parallel，
+      ##    而 engine-tests job 因为没设 GODOT_VERSION 一直没跑，谁都没发现。
       - name: 单元断言
         run: |
           set -e
-          for t in test_core test_physics test_interaction test_parallel; do
+          for t in $(python tools/test_list.py --prefix test_); do
             ./godot --headless --path . --script "res://tests/${t}.gd" | tee /tmp/out
             grep -q "0 failed" /tmp/out
           done
@@ -171,8 +174,7 @@ jobs:
       - name: 物理与接口验证
         run: |
           set -e
-          for t in validation_sweep validation_query validation_api validation_api2 \
-                   validation_voxel_layer validation_contacts validation_traversal; do
+          for t in $(python tools/test_list.py --prefix validation_); do
             ./godot --headless --path . --script "res://tests/${t}.gd" | tee /tmp/out
             grep -q "0 failed" /tmp/out
           done

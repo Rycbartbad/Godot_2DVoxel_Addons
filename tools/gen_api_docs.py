@@ -33,7 +33,9 @@ import xml.etree.ElementTree as ET
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "docs", "api")
-GODOT = os.environ.get("GODOT_BIN", "godot")
+## ⚠️ 找 Godot 的逻辑不写在这里 —— 见 tools/godot_bin.py（与 promote.py 共用）。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from godot_bin import find_godot  # noqa: E402
 
 MODULE_ORDER = ["physics", "core", "render", "gpu", "demo"]
 
@@ -52,17 +54,6 @@ def official(short: str) -> str:
     head, dot, tail = short.partition(".")
     return NAME_MAP.get(head, head) + (dot + tail if dot else "")
 
-
-def find_godot() -> str:
-    for cand in (GODOT, "godot", "godot4"):
-        if shutil.which(cand):
-            return cand
-    for base in (r"D:\Godot_v4.7.2", os.path.expanduser("~/godot")):
-        if os.path.isdir(base):
-            for f in sorted(os.listdir(base)):
-                if f.endswith(".exe") and "console" in f:
-                    return os.path.join(base, f)
-    return ""
 
 
 def run_doctool(godot: str, outdir: str) -> bool:

@@ -4,7 +4,7 @@
 > 所有性能数字都来自本机实测（Godot 4.7.2 stable 标准版，headless，GDScript），不是估算。
 >
 > 参考实现位置：`src/` ，自检：`tests/test_core.gd`（35 项）、`tests/test_physics.gd`（27 项）、
-> `tests/test_interaction.gd`（35 项）、`tests/test_parallel.gd`（12 项）、`tests/bench.gd`
+> `tests/test_interaction.gd`（41 项）、`tests/test_determinism.gd`（6 项）、`tests/bench.gd`
 
 ---
 
@@ -676,7 +676,7 @@ M0~M5 的代码在本仓库里已经全部可运行，M4 的数字见第 5.6 节
 | **子步预算** | ✅ | 子步数按"醒着的动态体数"摊薄，避免一屏碎块把帧时间乘以 16 |
 | **僵尸对象回收** | ✅ | `cull_outside()` —— 掉出世界的物体会永远加速并把子步永久顶满 |
 | **岛划分正确性** | ✅ | 静态体**不**连接岛（求解器永远不会写它），流形归到动态体所在的岛。修前"一整块地面把全场焊成 1 个岛"，岛并行名存实亡（坑 18） |
-| **并行确定性** | ✅ | 断言锁定：岛并行 == 串行**逐位一致**；着色 == 串行；同配置可复现（`tests/test_parallel.gd`，12 项） |
+| **可复现性** | ✅ | 同配置跑两次**逐位相同** + 长时间不发散 / 不漂移（`tests/test_determinism.gd`，6 项）。⚠️ 原来的「岛并行 == 串行逐位一致」三条断言已随 GDScript 求解路径一起删除 —— 见该测试的文件头 |
 
 ### 10.2 仍然是缺的
 
@@ -818,9 +818,9 @@ src/render/pixel_renderer.gd           Body -> Sprite2D + ImageTexture
 src/demo/game.gd                       Demo：左键绘制 / 右键擦除 / 中键平移 / Ctrl+左键拖动
 
 tests/test_core.gd                     35 项：位运算、掩码、分裂、连通性规则、矩形分解、质量
-tests/test_physics.gd                  27 项：落地、堆叠零漂移、休眠、破坏分裂守恒、绕质心旋转
-tests/test_interaction.gd              35 项：绘制 / 跨瓦片 / 笔画连续 / 擦除分裂 / 抓取 / 甩出
-tests/test_parallel.gd                 12 项：岛划分 / 岛并行==串行 / 着色==串行 / 可复现 / 不发散
+tests/test_physics.gd                  32 项：落地、堆叠零漂移、休眠、破坏分裂守恒、绕质心旋转
+tests/test_interaction.gd              41 项：绘制 / 跨瓦片 / 笔画连续 / 擦除分裂 / 抓取 / 甩出
+tests/test_determinism.gd             6 项：可复现（逐位相同）/ 不发散 / 不漂移
 tests/test_gpu.gd                       GPU 内核正确性 + 性能对比（需 Vulkan 窗口运行）
 tests/validation_highspeed.gd           高速隧穿 / 嵌入深度 / 粘黏 / 拉出
 tests/validation_stroke.gd              单笔画在世界坐标上的连通性
@@ -831,15 +831,13 @@ tests/bench_solver.gd                   求解器内层成本（带 solve/broad 
 tests/bench_collide.gd                  窄相 A/B（一次多余的 SAT 值多少）
 tests/dump_state.gd                     刚体状态 dump —— 物理改动的**逐位等价性判据**
 tests/bench_datalayout.gd               数据布局：对象属性 vs packed 数组（串行成本 + 并发膨胀）
-tests/dump_batch_bin.gd                 把 SoA 批次导出成二进制（给 C++ 侧读同一份数据）
 gdext/fastphys.cpp                      GDExtension 入口（手写 C API）：注册 RapierPhys（物理）+ PixelRaster（渲染栅格化）两个类
 gdext/rapier_bridge/                    Rust + Rapier 桥接层（纯 C ABI，自包含，由前者运行时 LoadLibrary）
-gdext/rapier_bridge/src/lib.rs          19 个 rb_* 导出：世界 / 刚体 / 碰撞体 / 接触
+gdext/rapier_bridge/src/lib.rs          41 个 rb_* 导出：世界 / 刚体 / 碰撞体 / 接触 / 关节
 tests/diag_rapier.gd                    桥接层直连样例（含命令流编码器）
 tests/diag_rapier_world.gd              PWorld 最小验证：方块落下 -> 停住 -> 入睡
 tests/diag_rapier_contacts.gd           接触事件验证（世界系法向/点、真冲量、撞前 approach）
 tests/diag_multi_world.gd               同进程多世界的状态隔离
-tests/bench_ghost.gd                    幽灵碰撞 A/B（Rapier #669 判据）
 
 > 上面这一组是**手写内核时代**的产物，已随 Rapier 迁移删除：
 > @@collide_kernel.h@@ / @@bp_kernel.h@@ / @@solver_kernel.h@@ / @@collide_check.cpp@@

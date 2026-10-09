@@ -792,10 +792,6 @@ func shape_bounds(shape: PixelShape) -> Rect2i:
 	return shape.local_aabb()
 
 
-func shape_size(shape: PixelShape) -> Vector2i:
-	return shape.local_aabb().size
-
-
 func shape_voxels(shape: PixelShape) -> int:
 	return shape.pixel_count()
 

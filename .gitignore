@@ -10,37 +10,28 @@
 # ⚠️ addons/pixel_destruction/ 是 **生成物**（由 tools/build_addon.py 从
 # src/ + gdext/ + addon_src/ 拼出来），不进仓库 —— 否则就有两个真源。
 # CI 会构建、校验并打包发布，见 .github/workflows/ci.yml。
+# ⚠️ 这一条**已经覆盖**了它下面的一切（addons/*.zip、native/*.dll 之类不必再列，
+#    Git 不下降进被忽略的目录）。
 addons/pixel_destruction/
 pixel_destruction*.zip
 # API 参考同样是生成物（tools/gen_api_docs.py），由 CI 产出并发布
 docs/api/
-# 诊断时用的临时输出
-_edit_out.txt
-_edit_err.txt
-_e_o.txt
-_e_e.txt
-.godot_bak/
-# ⚠️ Windows 的 fastphys.dll **提交进仓库**（0.5 MB）：
-#   没有它就只能走 GDScript 回退路径，而回退路径目前与原生路径**不等价**
-#   （实测 sleep_box 0/12 -> 10/12 清醒）。开箱可用比"仓库里不放二进制"更重要。
+# ⚠️ Windows 的 fastphys.dll **提交进仓库**（0.5 MB）：开箱可用比"仓库里不放二进制"
+#   更重要。（理由已更新：GDScript 回退路径**已随 Rapier 迁移删除**，不再有
+#   "两条路径等价性"那套说法 —— 见 README.md。但缺 DLL 引擎会响亮地报错，仍要带上。）
 #   源码在 gdext/，改了就重新编译并一起提交。
 #   其它平台/中间产物不提交：
 gdext/*.so
 gdext/*.dylib
 # 链接器的临时备份文件（g++ 会留下 ~<name>.dll）
 gdext/~*
-gdext/*.dylib
 gdext/*.o
 gdext/*.obj
 gdext/*.exe
-addons/pixel_destruction/native/*.dll
-addons/pixel_destruction/native/*.so
-# 打包产物：addon 目录本身就是可用的，再打个 zip 只会产生第二个真源
-addons/*.zip
 
-# 测试夹具：由脚本生成，不进仓库（省 5 MB）
-#   collide_pairs.bin  <- tests/dump_collide_bin.gd
-#   batch.bin          <- tests/dump_batch_bin.gd
+# 测试夹具：由脚本生成，不进仓库（省 5 MB）。
+# ⚠️ 生成它们的 dump_collide_bin.gd / dump_batch_bin.gd 已随手写内核删除，
+#    这条留着的唯一作用是兜住历史遗留的 *.bin（别让它们被误提交）。
 gdext/*.bin
 
 # ---------------------------------------------------------------- Godot 生成物
@@ -63,6 +54,9 @@ _tdres/
 docs/teardown_api_research/
 
 # ---------------------------------------------------------------- 杂项
+# tools/ 里现在有可被 import 的模块（test_list / godot_bin），跑一次就生成缓存
+__pycache__/
+*.pyc
 *.tmp
 *.log
 Thumbs.db

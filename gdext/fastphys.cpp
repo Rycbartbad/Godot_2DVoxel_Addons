@@ -48,9 +48,6 @@ static GDExtensionInterfaceVariantGetPtrConstructor g_get_ctor = nullptr;
 static GDExtensionInterfacePackedByteArrayOperatorIndex g_pba_index = nullptr;
 static GDExtensionInterfacePackedByteArrayOperatorIndexConst g_pba_index_const = nullptr;
 static GDExtensionPtrConstructor g_pba_copy_ctor = nullptr;
-static GDExtensionPtrConstructor g_pba_default_ctor = nullptr;
-static GDExtensionInterfaceVariantGetPtrBuiltinMethod g_get_builtin = nullptr;
-static GDExtensionPtrBuiltInMethod g_pba_resize = nullptr;
 
 // ---- Variant <-> 内置类型 的官方转换接口 ----
 // 这是纯 C API 里最关键的一组：没有它就得自己去猜 Variant 的内存布局。
@@ -63,22 +60,12 @@ static GDExtensionInterfaceVariantGetPtrDestructor g_get_destructor = nullptr;
 static GDExtensionTypeFromVariantConstructorFunc g_pba_from_variant = nullptr;
 static GDExtensionVariantFromTypeConstructorFunc g_pba_to_variant = nullptr;
 static GDExtensionPtrDestructor g_pba_destructor = nullptr;
-static GDExtensionTypeFromVariantConstructorFunc g_int_from_variant = nullptr;
-static GDExtensionPtrDestructor g_int_destructor = nullptr;
 
 // 内置类型值的暂存空间（PackedByteArray 实际只有 8 字节，给足余量）
 struct TypeStorage { alignas(16) unsigned char buf[64]; };
 
 struct SN { alignas(16) unsigned char buf[64]; };
-static SN g_sn_class, g_sn_parent, g_sn_method;
-static SN g_sn_ret, g_sn_a0, g_sn_a1, g_sn_a2, g_sn_a3;
-static SN g_sn_bp;          // 方法名 broadphase
-static SN g_sn_sv, g_sn_sv0, g_sn_sv1, g_sn_sv2, g_sn_svret, g_sn_cw;
-static SN g_sn_bp0, g_sn_bp1, g_sn_bp2, g_sn_bp3;
-static SN g_sn_bpret;
-static SN g_sn_resize;      // PackedByteArray.resize 的 StringName
-// PackedByteArray.resize 的 hash —— 从 extension_api.json 里取，不能瞎猜
-static const int64_t PBA_RESIZE_HASH = 848867239;
+static SN g_sn_parent;
 // ⚠️ PropertyInfo 里的 class_name / hint_string **不能给 nullptr** ——
 // Godot 会根据它们构造 PropertyInfo，空指针会直接段错误。
 // 之前那次 signal 11 就是这里：注册方法时没有任何输出就崩了。
@@ -2086,7 +2073,6 @@ extern "C" __declspec(dllexport) GDExtensionBool gdextension_init(
 	g_object_set_instance = (GDExtensionInterfaceObjectSetInstance)p_get_proc_address("object_set_instance");
 	g_str_new = (GDExtensionInterfaceStringNewWithUtf8Chars)p_get_proc_address("string_new_with_utf8_chars");
 	g_get_ctor = (GDExtensionInterfaceVariantGetPtrConstructor)p_get_proc_address("variant_get_ptr_constructor");
-	g_get_builtin = (GDExtensionInterfaceVariantGetPtrBuiltinMethod)p_get_proc_address("variant_get_ptr_builtin_method");
 	g_get_to_type = (GDExtensionInterfaceGetVariantToTypeConstructor)p_get_proc_address("get_variant_to_type_constructor");
 	g_get_from_type = (GDExtensionInterfaceGetVariantFromTypeConstructor)p_get_proc_address("get_variant_from_type_constructor");
 	g_get_destructor = (GDExtensionInterfaceVariantGetPtrDestructor)p_get_proc_address("variant_get_ptr_destructor");
@@ -2119,8 +2105,7 @@ extern "C" __declspec(dllexport) GDExtensionBool gdextension_init(
 	g_str_new((GDExtensionUninitializedStringPtr)g_str_empty_hint, "");
 	// PackedByteArray 的构造索引 1 = 拷贝构造
 	g_pba_copy_ctor = g_get_ctor(GDEXTENSION_VARIANT_TYPE_PACKED_BYTE_ARRAY, 1);
-	g_pba_default_ctor = g_get_ctor(GDEXTENSION_VARIANT_TYPE_PACKED_BYTE_ARRAY, 0);
-	if (!g_pba_copy_ctor || !g_pba_default_ctor) { printf("[FastPhys] 拿不到 PackedByteArray 构造函数\n"); return 0; }
+	if (!g_pba_copy_ctor) { printf("[FastPhys] 拿不到 PackedByteArray 构造函数\n"); return 0; }
 	// ⚠️ 这里曾经解析并检查 PackedByteArray.resize —— 那是手写后端用来"现造输出数组"的。
 	//    RapierPhys 的输出走"按模板拷贝"（C++ 侧 resize 一个 PackedByteArray 实测段错误），
 	//    不需要它。删掉内核后这段检查还在，导致扩展**整个加载失败** ——
@@ -2133,14 +2118,12 @@ extern "C" __declspec(dllexport) GDExtensionBool gdextension_init(
 	g_pba_from_variant = g_get_to_type(GDEXTENSION_VARIANT_TYPE_PACKED_BYTE_ARRAY);
 	g_pba_to_variant = g_get_from_type(GDEXTENSION_VARIANT_TYPE_PACKED_BYTE_ARRAY);
 	g_pba_destructor = g_get_destructor(GDEXTENSION_VARIANT_TYPE_PACKED_BYTE_ARRAY);
-	g_int_from_variant = g_get_to_type(GDEXTENSION_VARIANT_TYPE_INT);
-	g_int_destructor = g_get_destructor(GDEXTENSION_VARIANT_TYPE_INT);
 	// ⚠️ variant_get_ptr_destructor 对 POD 类型（int/float…）返回 **null** —— 它们没有析构函数。
 	// 所以可空项要分开判断，不能一起当"必需"。
-	if (!g_pba_from_variant || !g_pba_to_variant || !g_pba_destructor || !g_int_from_variant) {
-		printf("[FastPhys] Variant 转换函数解析失败: from=%p to=%p dtor=%p int_from=%p\n",
+	if (!g_pba_from_variant || !g_pba_to_variant || !g_pba_destructor) {
+		printf("[FastPhys] Variant 转换函数解析失败: from=%p to=%p dtor=%p\n",
 			(void *)g_pba_from_variant, (void *)g_pba_to_variant,
-			(void *)g_pba_destructor, (void *)g_int_from_variant);
+			(void *)g_pba_destructor);
 		return 0;
 	}
 	r_initialization->minimum_initialization_level = GDEXTENSION_INITIALIZATION_SCENE;

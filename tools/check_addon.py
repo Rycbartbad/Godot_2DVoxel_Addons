@@ -19,7 +19,15 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "addons", "pixel_destruction")
 SRC = os.path.join(ROOT, "src")
 
-MODULES = ["physics", "core", "render", "gpu"]
+## 要检查"残留 res://src/ 路径 / 空文件"的模块目录 —— **不手写清单**。
+##
+## ⚠️ 这里原来是一份硬编码的 4 个模块（physics/core/render/gpu），而
+##    build_addon.py 已经打包 6 个（多了 nodes/fluid）—— 两份清单分叉的结果是
+##    nodes/ 与 fluid/ 生成的脚本从来没被这两条检查覆盖过。
+##    改成扫 OUT 下的所有目录：新增模块自动纳入，不用记着回来改这里。
+def module_dirs() -> list:
+    return [n for n in sorted(os.listdir(OUT))
+            if n != "native" and os.path.isdir(os.path.join(OUT, n))]
 REQUIRED = [
     "physics/pworld.gd",
     "physics/pbody.gd",
@@ -54,7 +62,7 @@ def main() -> int:
             errors.append("缺少文件: %s" % rel)
 
     # 2) 模块里不能残留 src 路径 / 不能有空文件
-    for mod in MODULES:
+    for mod in module_dirs():
         d = os.path.join(OUT, mod)
         if not os.path.isdir(d):
             errors.append("缺少模块目录: %s" % mod)
