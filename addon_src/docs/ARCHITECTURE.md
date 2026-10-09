@@ -5,7 +5,9 @@
 ```
 PBody                        world.bodies[]
   ├─ shapes:  PixelShape[]   像素数据（chunk 稀疏表）
-  ├─ rects:   Rect2[]        贪心分解出的碰撞矩形（局部空间）
+  ├─ rects:   Rect2[]        贪心分解出的碰撞矩形（局部空间）—— **唯一的碰撞形状**
+  ├─ aabb:    Rect2          世界 AABB（每子步维护，宽相/粗筛用）
+  ├─ world_hull()            世界凸包（**与 AABB 并列的包围体**，惰性：谁问谁付）
   ├─ local_com / mass / inertia
   └─ position / rotation / velocity
         │
@@ -93,6 +95,8 @@ world.fracture(body, damage, burst_speed)
 ## 扩展点
 
 - 想换碰撞形状：`greedy_rects.gd` 换成别的分解方式即可，物理层只吃 `rects`。
+- 想要"紧的包围体"：`hull_fit.gd`（凸包，与 AABB 并列）。
+  ⚠️ 它是**包围体**，不是碰撞形状 —— 凹形状的凹角会被填平，别拿它去替换 `rects`。
 - 想换渲染：`PixelRenderer` 是唯一与渲染相关的模块，替换它不影响物理。
 - 想换求解器：求解**整体在 Rapier 里**（`native/rapier_bridge`），GDScript 侧没有求解代码。
   要换就把桥接层换掉（`gdext/fastphys.cpp` 的命令流协议是唯一的接口）。

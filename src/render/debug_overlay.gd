@@ -18,6 +18,7 @@ extends Node2D
 @export_group("显示内容")
 @export var show_obbs := true              ## 碰撞矩形（贪心分解的结果，物理实际用的形状）
 @export var show_aabbs := false            ## 刚体 AABB（宽相用的粗包围盒）
+@export var show_hulls := false            ## 凸包（多边形碰撞箱拟合：比 AABB 紧，跟着刚体转）
 @export var show_swept_aabbs := false      ## 扫掠 AABB（含本步位移，CCD 用）
 @export var show_contacts := true          ## 接触点 + 法向
 @export var show_velocity := false         ## 线速度矢量
@@ -30,6 +31,7 @@ extends Node2D
 @export_group("外观")
 @export var obb_color := Color(0.3, 0.9, 1.0, 0.9)
 @export var aabb_color := Color(0.5, 0.5, 0.5, 0.5)
+@export var hull_color := Color(1.0, 0.85, 0.2, 0.8)
 @export var swept_color := Color(1.0, 0.6, 0.2, 0.4)
 @export var contact_color := Color(1.0, 0.25, 0.25, 1.0)
 @export var velocity_color := Color(0.4, 1.0, 0.4, 0.9)
@@ -163,9 +165,11 @@ func _draw() -> void:
 		if show_awake:
 			col = awake_color if b.awake else asleep_color
 
-		# ---- AABB / 扫掠 AABB ----
+		# ---- AABB / 凸包 / 扫掠 AABB ----
 		if show_aabbs:
 			draw_rect(b.aabb, aabb_color, false, u)
+		if show_hulls:
+			_draw_hull(b, hull_color, u)
 		if show_swept_aabbs:
 			draw_rect(b.swept_aabb, swept_color, false, u)
 
@@ -233,6 +237,18 @@ func _draw_obb(b, r: Rect2, col: Color, width := 1.0) -> void:
 		b.to_world(r.position + Vector2(0, r.size.y)),
 	])
 	draw_polyline(PackedVector2Array([pts[0], pts[1], pts[2], pts[3], pts[0]]), col, width)
+
+
+## 凸包（多边形碰撞箱拟合）—— 和 _draw_obb 同一个道理：**必须按刚体位姿画**。
+## 画成轴对齐的框会骗人，而凸包存在的意义恰恰是"它不是轴对齐的"。
+func _draw_hull(b, col: Color, width := 1.0) -> void:
+	var h: PackedVector2Array = b.world_hull()
+	if h.size() < 3:
+		return
+	# 顶点列表不含首点，画环要自己接上
+	var pts := PackedVector2Array(h)
+	pts.append(h[0])
+	draw_polyline(pts, col, width)
 
 
 func _draw_arrow_head(tip: Vector2, dir: Vector2, col: Color, width := 1.5) -> void:

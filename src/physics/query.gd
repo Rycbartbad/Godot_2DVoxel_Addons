@@ -22,6 +22,7 @@ const PBody := preload("res://src/physics/pbody.gd")
 const PixelShape := preload("res://src/core/pixel_shape.gd")
 const Bits := preload("res://src/core/pixel_bits.gd")
 const PixelChunk := preload("res://src/core/pixel_chunk.gd")
+const HullFit := preload("res://src/core/hull_fit.gd")
 
 
 ## 一次射线/最近点查询的结果。字段名对齐 Teardown 的多返回值。
@@ -201,6 +202,25 @@ static func _ray_vs_body(b: PBody, origin: Vector2, d: Vector2, max_dist: float,
 	# 转到刚体局部系：像素坐标就活在这里
 	var lo := b.to_local(origin)
 	var ld := d.rotated(-b.rotation)
+	# ---- 凸包预剔除（**保守**，见 HullFit.segment_hits）----
+	#
+	# 挡掉"射线穿过 AABB、但离物体本体还远"的刚体，免得为它们白跑一遍 DDA。
+	# 收益主要来自**旋转过的**刚体：AABB 是按外接半径膨胀的轴对齐盒子，
+	# 一块 100x8 的板转 45 度就是 76x76 —— 射线擦着那个空盒子过时，DDA 会老老实实走几十格。
+	#
+	# ⚠️⚠️ **机会主义**：只在凸包**已经算过**时才用（cached_local_hull 不会触发重算）。
+	#    现算一次凸包的代价随形状尺寸走（768x100 的地面实测 5.05 ms），而它一条射线
+	#    只省下约 0.2 ms；地形每擦一笔就作废一次 -> "为了剔除而现算"是净亏，
+	#    而且亏在射线那一帧。算过就用（编辑器抓手 / 调试叠加层 / 游戏层调过 px.hull()），
+	#    没算过就退化成 AABB —— **结果完全一样，只有快慢不同**（凸包是保守外接）。
+	#
+	# ⚠️⚠️ eps 必须把**加粗射线的半径**算进去：细射线（radius=0）的判定是"线段碰到凸包"，
+	#    而粗射线会命中"离线段 radius + 半个像素对角以内"的像素。少给一点就是
+	#    **静默漏命中** —— 比慢难查得多（症状是"子弹偶尔穿过去"）。
+	#    +1.5 = 0.7071（像素对角的一半）+ 余量，宁可多算。
+	var hull := b.cached_local_hull()
+	if not hull.is_empty() and not HullFit.segment_hits(hull, lo, lo + ld * max_dist, radius + 1.5):
+		return _hit_none()
 	if radius > 0.0:
 		return _swept_circle_vs_body(b, origin, d, max_dist, radius)
 	var best := _hit_none()

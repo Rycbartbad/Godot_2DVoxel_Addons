@@ -103,6 +103,38 @@ func _initialize() -> void:
 	_c("total_momentum 与单体重心一致", tm.is_equal_approx(mo), str(tm))
 	_c("total_angular_momentum 是数", px.total_angular_momentum() is float, "%.2f" % px.total_angular_momentum())
 
+	print("=== 包围体（AABB 与凸包并列）===")
+	# ⚠️ check_manual_api 只确认方法**存在**；这里确认"调了有用"。
+	#    凸包这条尤其要紧：门面方法是**构建产物**里的那份（addon 路径），
+	#    而它的行为依赖 src/core/hull_fit.gd 一起被拷过去 —— 漏拷就是运行时报错。
+	var bx = px.spawn_rect(Vector2(400, 0), Vector2(40, 10), 1)
+	await process_frame
+	var ab: Rect2 = px.bounds(bx)
+	_c("bounds 是 AABB", ab.size.x >= 40.0 and ab.size.y >= 10.0, str(ab))
+	var hull: PackedVector2Array = px.hull(bx)
+	_c("hull 给出凸包（至少 3 个顶点）", hull.size() >= 3, "%d 个顶点 %s" % [hull.size(), str(hull)])
+	# 凸包必须**不比 AABB 大**（保守外接 + 紧）：面积判据
+	var hull_area := 0.0
+	for i in hull.size():
+		var p: Vector2 = hull[i]
+		var q: Vector2 = hull[(i + 1) % hull.size()]
+		hull_area += p.x * q.y - q.x * p.y
+	hull_area = absf(hull_area) * 0.5
+	_c("凸包面积 <= AABB 面积（紧且保守）", hull_area <= ab.size.x * ab.size.y + 1e-3,
+		"凸包 %.1f vs AABB %.1f" % [hull_area, ab.size.x * ab.size.y])
+	_c("hull_contains 刚体质心", px.hull_contains(bx, px.center_of_mass(bx)))
+	_c("hull_contains 远处为假", not px.hull_contains(bx, px.center_of_mass(bx) + Vector2(5000, 5000)))
+	var sh: PackedVector2Array = px.shape_hull(bx.shapes[0])
+	_c("shape_hull 是形状局部坐标的凸包", sh.size() >= 3, "%d 个顶点" % sh.size())
+	var sb: Rect2i = px.shape_bounds(bx.shapes[0])
+	# 局部凸包必须落在局部 AABB 内（保守性；用容差兜浮点）
+	var inside := true
+	for p2: Vector2 in sh:
+		if not Rect2(Vector2(sb.position) - Vector2(0.001, 0.001),
+				Vector2(sb.size) + Vector2(0.002, 0.002)).has_point(p2):
+			inside = false
+	_c("形状凸包落在形状 AABB 内", inside, "aabb=%s hull=%s" % [str(sb), str(sh)])
+
 	print("=== 破坏 ===")
 	# 挖圆洞
 	var before: int = px.shape_voxels(b.shapes[0])

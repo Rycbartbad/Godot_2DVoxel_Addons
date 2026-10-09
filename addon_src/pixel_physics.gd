@@ -776,6 +776,26 @@ func bounds(body: PBody) -> Rect2:
 	return body.aabb
 
 
+## 刚体的**世界坐标凸包**（多边形碰撞箱拟合）—— **与 bounds() 并列**的另一种包围体。
+##
+## 比 bounds() 紧：AABB 是轴对齐的，刚体一转就按外接半径膨胀（100x8 的板转 45 度
+## 就是 76x76 的空盒子）；凸包跟着刚体一起转。判定贵一点（O(顶点数) vs O(1)），
+## 所以"能粗筛就粗筛"的地方仍然该先用 bounds()。
+##
+## 返回：世界坐标顶点，**不含首点**（不开环）。空刚体返回空数组。
+##
+## ⚠️ 它是**包围体，不是碰撞形状**：凹形状（L 形墙、楼梯）的凹角会被填平，
+##    拿它去碰撞会多出看不见的体积。物理真正用的是碰撞矩形（`body.rects`）。
+func hull(body: PBody) -> PackedVector2Array:
+	return body.world_hull()
+
+
+## 世界坐标点是否落在刚体的凸包内（**保守**：凸包比像素集大，
+## 返回 true **不代表**那个点上有像素 —— 要精确判定用 material_at()）。
+func hull_contains(body: PBody, world_point: Vector2) -> bool:
+	return body.hull_contains(world_point)
+
+
 ## 是否已经被打碎（形状全空）。
 func is_broken(body: PBody) -> bool:
 	for s in body.shapes:
@@ -792,6 +812,16 @@ func shape_body(shape: PixelShape) -> PBody:
 
 func shape_bounds(shape: PixelShape) -> Rect2i:
 	return shape.local_aabb()
+
+
+## 形状的凸包（**形状局部像素坐标**）—— 与 shape_bounds() 并列的另一种包围体。
+##
+## ⚠️ 与 shape_bounds() 的缓存口径不同：那个跟着"内容版本"走，**每帧都问也便宜**；
+##    这个按 revision 作废，第一次调用要扫一遍块（768x100 地面约 1 万次行扫描），
+##    所以**别在每帧的热循环里对同一个没改过的形状反复调** —— 缓存会兜住，
+##    但形状一改就要重算。要世界坐标请用 hull(body)。
+func shape_hull(shape: PixelShape) -> PackedVector2Array:
+	return shape.local_hull()
 
 
 func shape_voxels(shape: PixelShape) -> int:
