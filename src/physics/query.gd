@@ -56,11 +56,27 @@ static func raycast(origin: Vector2, dir: Vector2, max_dist: float,
 	# ⚠️ 至少要留 1 像素的厚度：轴对齐的射线（比如纯水平）会让包围盒在另一轴上
 	# **宽度为 0**，而 Rect2.intersects 对零面积的矩形一律返回 false ——
 	# 于是所有水平/垂直射线都会静默打空。
+	#
+	# ⚠️⚠️ 墓碑：这里曾经是
+	#        lo = origin - pad;  hi = origin + d * max_dist + pad
+	#        bounds = Rect2(Vector2(minf(lo.x, hi.x), minf(lo.y, hi.y)), Vector2(absf(hi-lo)...))
+	#    —— 那是**两个端点各自加 pad 再取 min**，只有在方向分量为正时碰巧等于线段的包围盒。
+	#    方向分量为负（朝上或朝左）时，min 取到的是**终点**那一侧，再配上正的高度，
+	#    框就整个滑到射线外面：**起点自己落在了框外**。偏移量恰好是 2*pad。
+	#
+	#    症状极其隐蔽：只有朝上/朝左的射线会漏，而且只漏**离起点 2*pad 以内**的目标 ——
+	#    radius=0 时是 2 像素（肉眼几乎看不出来），radius=6 时是 12 像素。
+	#    这正是 HANDOFF「待核实」里挂了很久的那条：**「Query.raycast 在实心地面上也
+	#    返回不到命中 —— 未解释」**（贴着地面朝上/斜向射，起点就在被排除的那一段里）。
+	#    闸门：tests/validation_hull.gd 的 300 条随机射线与"绕过粗筛"的参照对拍。
+	#
+	#    现在按**线段**算：包围盒 = [min(起点,终点) - pad, max(起点,终点) + pad]。
 	var pad := Vector2(maxf(radius, 1.0), maxf(radius, 1.0))
-	var lo := origin - pad
-	var hi := origin + d * max_dist + pad
-	var bounds := Rect2(Vector2(minf(lo.x, hi.x), minf(lo.y, hi.y)),
-		Vector2(maxf(absf(hi.x - lo.x), 1.0), maxf(absf(hi.y - lo.y), 1.0)))
+	var far := origin + d * max_dist
+	var bounds := Rect2(
+		Vector2(minf(origin.x, far.x), minf(origin.y, far.y)) - pad,
+		Vector2(absf(far.x - origin.x), absf(far.y - origin.y)) + pad * 2.0)
+	bounds.size = Vector2(maxf(bounds.size.x, 1.0), maxf(bounds.size.y, 1.0))
 	best.distance = max_dist
 	for b: PBody in _candidates(bounds, reject):
 		var h := _ray_vs_body(b, origin, d, max_dist, radius)
@@ -182,11 +198,11 @@ static func clear_filters() -> void:
 
 static func _ray_vs_body(b: PBody, origin: Vector2, d: Vector2, max_dist: float,
 		radius: float) -> Hit:
-	if radius > 0.0:
-		return _swept_circle_vs_body(b, origin, d, max_dist, radius)
 	# 转到刚体局部系：像素坐标就活在这里
 	var lo := b.to_local(origin)
 	var ld := d.rotated(-b.rotation)
+	if radius > 0.0:
+		return _swept_circle_vs_body(b, origin, d, max_dist, radius)
 	var best := _hit_none()
 	var best_t := max_dist
 	for s in b.shapes:

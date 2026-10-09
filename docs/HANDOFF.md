@@ -286,8 +286,10 @@ Vex-2.0 贪心盒 -> 每个盒一个 Roblox Part（一次性转化）、
   「求解前后各测一次相对法向速度、差值乘有效质量」（见 PWorld 里那段说明）。
   `manifolds` / `_packed_manifolds` 两个字段也已删除。
 - `frags:240` 回退路径在第 142 步起有 `1.92e-5` 偏差（疑似 warm-start 缓存键序）。
-- **`Query.raycast` 在实心地面上也返回不到命中** —— 未解释。它会挡住任何
-  "直接问 Rapier 要答案"的验证手段，值得单独查。
+- ~~**`Query.raycast` 在实心地面上也返回不到命中**~~：**已解决** —— 不是物理问题，
+  是**射线粗筛的包围盒算错了方向**（"两个端点各自加 pad 再取 min"只在方向分量为正时
+  才等于线段的包围盒；朝上/朝左时框整个滑到射线外面，把起点自己排除掉了）。
+  见 docs/development_log.md 坑 40，闸门 tests/validation_hull.gd。
 - API 文档覆盖率约 159/442 公开成员。
 - **仍未实现**：通用约束（`ConstrainPosition/Velocity/Orientation/AngularVelocity`）、
   **形状级**碰撞过滤（现在是刚体级）、多段绳索解算、通用 `GetProperty/SetProperty`、

@@ -25,6 +25,25 @@ func _slab(mat: int) -> PixelShape:
 	s.fill_rect(Rect2i(0, 16, 8, 8), 0)      # 通高的缝
 	return s
 
+## 建一个**只含一块小方块**的干净世界，从 (400,100) 朝 dir 打一条半径 6 的射线。
+##
+## 方块是 4x4、紧贴在起点旁边（差 1 像素）—— 这正是坑 40 那个"2*pad 窗口"里的目标：
+## 粗筛包围盒算错方向时，起点附近这一圈会被整个排除掉。
+func _probe_near(block_pos: Vector2, dir: Vector2, mat: int) -> Query.Hit:
+	var w2 := PWorld.new()
+	w2.gravity = Vector2.ZERO
+	var b := PBody.new()
+	b.position = block_pos
+	b.make_static()
+	var s := PixelShape.new()
+	s.fill_rect(Rect2i(0, 0, 4, 4), mat)
+	w2.add_body(b, [s])
+	Query.attach(w2)
+	var h := Query.raycast(Vector2(400.0, 100.0), dir, 200.0, 6.0)
+	Query.detach(w2)
+	return h
+
+
 func _initialize() -> void:
 	var w := PWorld.new()
 	w.gravity = Vector2.ZERO
@@ -102,6 +121,26 @@ func _initialize() -> void:
 	var h9 := Query.raycast(Vector2(95.0, -50.0), Vector2(0.0, 1.0), 400.0)
 	_c("旋转后仍能命中", h9.hit and h9.normal.is_equal_approx(Vector2(0.0, -1.0)),
 		"dist=%.2f 法线=%s" % [h9.distance, str(h9.normal)])
+
+	# 10. ⚠️⚠️ 粗筛包围盒的**方向性**（见 docs/development_log.md 坑 40）
+	#
+	# 曾经的 bug：射线粗筛的包围盒按"两个端点各自加 pad 再取 min"算 —— 方向分量为负
+	# （朝上/朝左）时那个框会整个滑到射线外面，**把起点自己排除掉**，偏移量恰好 2*pad。
+	# 症状：朝上/朝左的射线漏掉"离起点 2*pad 以内"的目标；radius=0 时窗口只有 2 像素
+	# （看不出来），radius=6 时是 12 像素 —— 所以这里用**加粗射线**把它放大到能断言。
+	#
+	# ⚠️ 目标必须**整个**落在"离起点 2*pad 以内"，所以是一块**小**方块：
+	#    换成大墙的话它会从框的另一侧伸进来，照样是候选，这个用例就测不出东西了
+	#    （第一版就是这么写的，改回旧代码也是绿的）。
+	# ⚠️ 两个方向各用一个**干净的世界**：加粗射线的扫掠范围是半径 6 的胶囊，而两个目标
+	#    离起点都只有 1 像素 —— 放在同一个世界里，"朝左"那一枪会先命中"朝上"的那块
+	#    （第一版就是这样：dist=0.00、材质=7，看起来像方向性还没修好）。
+	var hu := _probe_near(Vector2(398.0, 95.0), Vector2(0.0, -1.0), 7)
+	_c("朝上的加粗射线能命中贴脸目标（粗筛方向性）",
+		hu.hit and hu.material == 7, "hit=%s dist=%.2f mat=%d" % [str(hu.hit), hu.distance, hu.material])
+	var hl := _probe_near(Vector2(395.0, 98.0), Vector2(-1.0, 0.0), 8)
+	_c("朝左的加粗射线能命中贴脸目标（粗筛方向性）",
+		hl.hit and hl.material == 8, "hit=%s dist=%.2f mat=%d" % [str(hl.hit), hl.distance, hl.material])
 
 	print("=== %d passed, %d failed ===" % [_pass, _fail])
 	quit(0 if _fail == 0 else 1)
