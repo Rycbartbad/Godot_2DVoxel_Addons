@@ -15,6 +15,7 @@ const PBody := preload("res://src/physics/pbody.gd")
 const PixelShape := preload("res://src/core/pixel_shape.gd")
 const PolyFit := preload("res://src/core/poly_fit.gd")
 const GreedyRects := preload("res://src/core/greedy_rects.gd")
+const HullFit := preload("res://src/core/hull_fit.gd")
 
 var _pass := 0
 var _fail := 0
@@ -51,6 +52,22 @@ func _wall_hole() -> PixelShape:
 	return s
 
 
+## 独立实现：点到凸多边形的距离（在里面 = 0，否则到最近边的距离）。
+##
+## ⚠️ 不用 Geometry2D 的同名函数 —— Godot 4.7 里没有"点到多边形"那个 API
+##    （只有点到**线段**）。自己写反而更合本仓库的规矩：判据不该借实现方的算。
+func _dist_to_poly(poly: PackedVector2Array, p: Vector2) -> float:
+	if _in_poly(poly, p):
+		return 0.0
+	var best := INF
+	for i in poly.size():
+		var a := poly[i]
+		var b := poly[(i + 1) % poly.size()]
+		var q: Vector2 = Geometry2D.get_closest_point_to_segment(p, a, b)
+		best = minf(best, p.distance_to(q))
+	return best
+
+
 ## 独立实现：点在**闭凸多边形**内（自己算绕向 + 逐边叉积同号）。
 func _in_poly(poly: PackedVector2Array, p: Vector2) -> bool:
 	var lo := INF
@@ -64,12 +81,15 @@ func _in_poly(poly: PackedVector2Array, p: Vector2) -> bool:
 	return lo >= 0.0 or hi <= 0.0
 
 
+## ⚠️ 容差是**必须**的：把斜边往里挪之后，交点会落在与邻居几乎共线的位置上，
+## 叉积量级 ~1e-9（不是 0 也不是负数）。判"几何上凸不凸"不该拿这个当反例 ——
+## 会误报的闸门比没有闸门更糟（它训练人绕过它）。
 func _is_convex(poly: PackedVector2Array) -> bool:
 	for i in poly.size():
 		var a := poly[i]
 		var b := poly[(i + 1) % poly.size()]
 		var c := poly[(i + 2) % poly.size()]
-		if (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x) <= 0.0:
+		if (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x) < -1e-6:
 			return false
 	return true
 
@@ -116,21 +136,25 @@ func _test_fit_properties() -> void:
 			ok_cover = false
 			print("     %s: 没有多边形" % name)
 			continue
-		# 覆盖：每个像素中心都落在某个多边形里（凸多边形包含判定，独立实现）
+		# **双向容差**（"取中间"）：每个像素中心要么在多边形里，要么离它不超过容差。
+		# ⚠️ 这里以前断言的是"像素**必须**在多边形里"（完全包裹）。甲方要的是
+		#    "一部分在外面、一部分在里面" —— 斜边往里挪之后像素本来就会露出来，
+		#    所以判据必须改成**两向**的：既不许包太多，也不许削太多。
 		var box := s.local_aabb()
 		for y in range(box.position.y, box.position.y + box.size.y):
 			for x in range(box.position.x, box.position.x + box.size.x):
 				if s.get_pixel(x, y) == 0:
 					continue
 				var c := Vector2(x + 0.5, y + 0.5)
-				var hit := false
+				var near := INF
 				for p: PackedVector2Array in res.polys:
 					if _in_poly(p, c):
-						hit = true
+						near = 0.0
 						break
-				if not hit:
+					near = minf(near, _dist_to_poly(p, c))
+				if near > PolyFit.DEFAULT_DEV_TOL:
 					ok_cover = false
-					print("     %s: 像素 (%d,%d) 没被任何多边形盖住" % [name, x, y])
+					print("     %s: 像素 (%d,%d) 离碰撞体 %.2f（超容差）" % [name, x, y, near])
 					break
 		# 凸性
 		for p2: PackedVector2Array in res.polys:
@@ -141,22 +165,23 @@ func _test_fit_properties() -> void:
 		if res.max_deviation > PolyFit.DEFAULT_DEV_TOL + 1.0e-6:
 			ok_dev = false
 			print("     %s: 偏离 %.3f 超预算" % [name, res.max_deviation])
-		# 每个**碰撞矩形**的四个角都在某个多边形里（保守性：碰撞体不许比像素小）
+		# 另一向：每个**碰撞矩形**的角离多边形也不许超过容差（不许削太多）
 		var rects: Array = GreedyRects.decompose(s, 0).rects
 		for r: Rect2 in rects:
 			for corner: Vector2 in [r.position, Vector2(r.end.x, r.position.y), r.end, Vector2(r.position.x, r.end.y)]:
-				var inside := false
+				var near2 := INF
 				for p3: PackedVector2Array in res.polys:
 					if _in_poly(p3, corner):
-						inside = true
+						near2 = 0.0
 						break
-				if not inside:
+					near2 = minf(near2, _dist_to_poly(p3, corner))
+				if near2 > PolyFit.DEFAULT_DEV_TOL:
 					ok_contains_rects = false
-					print("     %s: 矩形角 %s 不在任何多边形里" % [name, str(corner)])
-	_c("每个像素都被某个多边形盖住", ok_cover)
+					print("     %s: 矩形角 %s 离碰撞体 %.2f（超容差）" % [name, str(corner), near2])
+	_c("每个像素都在碰撞体的容差内（削得不过分）", ok_cover)
 	_c("每个多边形都是凸的", ok_convex)
 	_c("偏离不超过容差（%.1f px）" % PolyFit.DEFAULT_DEV_TOL, ok_dev)
-	_c("每个碰撞矩形都被包住（保守性）", ok_contains_rects)
+	_c("每个碰撞矩形都在容差内（包得不过分）", ok_contains_rects)
 
 	# 楼梯：**一块**，而且有斜边（这就是这次改动的目的）
 	var st: PixelShape = _stair(40)
@@ -165,6 +190,66 @@ func _test_fit_properties() -> void:
 	_c("楼梯拟合成一块（矩形 %d 个）" % rects_n, rs.parts() == 1, "%d 块" % rs.parts())
 	_c("楼梯的边不是轴对齐的（锯齿被拉直）", _has_diagonal(rs.polys[0]), str(rs.polys[0]))
 	_c("楼梯的偏离 < 1 像素", rs.max_deviation < 1.0, "%.3f" % rs.max_deviation)
+
+	# **取中间**：斜边既没有把台阶整个包住，也没有削进像素里面去
+	#   · 有像素露在碰撞体外面（说明不是"完全包裹"）
+	#   · 也有碰撞体的面积落在像素外面（说明不是"完全内切"）
+	var pixel_area: float = float(GreedyRects.decompose(st, 0).rects.size())  # 占位，下面用真值覆盖
+	pixel_area = 0.0
+	for r2: Rect2 in GreedyRects.decompose(st, 0).rects:
+		pixel_area += r2.size.x * r2.size.y
+	var poly_area := 0.0
+	for p4: PackedVector2Array in rs.polys:
+		poly_area += HullFit.area(p4)
+	# ⚠️ 要按**面积**量，不能只问像素中心：斜边挪半个像素之后，锯齿上的像素**中心**
+	#    正好落在碰撞体的边上（那正是"取中间"的定义）—— 只问中心会误判成"没有露出来"。
+	var outside_pixels := false
+	var outside_samples := 0
+	var box2 := st.local_aabb()
+	var fine := 0.25
+	var y2 := float(box2.position.y)
+	while y2 < float(box2.position.y + box2.size.y):
+		var x2 := float(box2.position.x)
+		while x2 < float(box2.position.x + box2.size.x):
+			var sp2 := Vector2(x2 + fine * 0.5, y2 + fine * 0.5)
+			if st.get_pixel(floori(sp2.x), floori(sp2.y)) != 0:
+				var inside2 := false
+				for p5: PackedVector2Array in rs.polys:
+					if _in_poly(p5, sp2):
+						inside2 = true
+						break
+				if not inside2:
+					outside_pixels = true
+					outside_samples += 1
+			x2 += fine
+		y2 += fine
+	_c("斜边是**居中**的：有像素面积露在碰撞体外面", outside_pixels,
+		"露在外面 %d 个采样点；像素面积 %.0f vs 碰撞体面积 %.1f" % [outside_samples, pixel_area, poly_area])
+	# 另一向要**真的量**：在碰撞体里采样，看有没有落在"没像素"的格子上。
+	# ⚠️ 不能拿"面积比"当代理 —— 面积大不等于它落在像素外面（凹口的面积才是关键）。
+	var covered_empty := 0
+	var total_samples := 0
+	var b3 := st.local_aabb()
+	var step := 0.25
+	var y3 := float(b3.position.y)
+	while y3 < float(b3.position.y + b3.size.y):
+		var x3 := float(b3.position.x)
+		while x3 < float(b3.position.x + b3.size.x):
+			var sp := Vector2(x3 + step * 0.5, y3 + step * 0.5)
+			var in_poly := false
+			for p6: PackedVector2Array in rs.polys:
+				if _in_poly(p6, sp):
+					in_poly = true
+					break
+			if in_poly:
+				total_samples += 1
+				if st.get_pixel(floori(sp.x), floori(sp.y)) == 0:
+					covered_empty += 1
+			x3 += step
+		y3 += step
+	_c("斜边是**居中**的：也有碰撞体盖在没有像素的地方（凹口）",
+		covered_empty > 0 and total_samples > 0,
+		"%d / %d 个采样点在碰撞体里但没有像素" % [covered_empty, total_samples])
 
 	# 确定性：同一份矩形集合 -> 同一组多边形（与输入顺序无关）
 	var shuffled: Array = GreedyRects.decompose(st, 0).rects.duplicate()

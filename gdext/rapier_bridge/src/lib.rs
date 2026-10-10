@@ -334,6 +334,131 @@ fn fit_long_side(poly: &[(f32, f32)]) -> f64 {
     (hi_x - lo_x).max(hi_y - lo_y)
 }
 
+
+/// 凸多边形的**最小宽度**（对每条边取"其它顶点到这条边的最大距离"，再取最小）。
+/// 用来给"往里挪"设上限：挪得比它的一半还多就会把薄片削没。
+fn fit_min_width(poly: &[(f32, f32)]) -> f64 {
+    let n = poly.len();
+    if n < 3 {
+        return 0.0;
+    }
+    let mut best = f64::INFINITY;
+    for i in 0..n {
+        let a = poly[i];
+        let b = poly[(i + 1) % n];
+        let ex = b.0 as f64 - a.0 as f64;
+        let ey = b.1 as f64 - a.1 as f64;
+        let len = (ex * ex + ey * ey).sqrt();
+        if len <= 1e-9 {
+            continue;
+        }
+        let mut far = 0.0f64;
+        for p in poly {
+            let d = ((p.0 as f64 - a.0 as f64) * ey - (p.1 as f64 - a.1 as f64) * ex).abs() / len;
+            if d > far {
+                far = d;
+            }
+        }
+        if far < best {
+            best = far;
+        }
+    }
+    if best.is_finite() {
+        best
+    } else {
+        0.0
+    }
+}
+
+/// **把拟合出来的斜边往里挪 —— "取中间"**。
+///
+/// 甲方要的是：碰撞体**不是**把像素整个包住，而是"一部分在外面、一部分在里面"。
+/// 轴对齐的边是**真实的像素边界**（像素就贴在上面），挪它没有任何道理；
+/// 而**斜边是拟合出来的**（像素集不可能有斜边）—— 锯齿的中线才该是碰撞面：
+/// 台阶尖露在外面、凹口被盖住。
+///
+/// 挪多少：半个像素（像素量化下锯齿深度就是 1 像素左右），
+/// 但**不许把薄片削没** —— 上限取最小宽度的 1/4（薄片最多掉一半厚度）。
+fn fit_inset_diagonals(poly: &[(f32, f32)]) -> Vec<(f32, f32)> {
+    let n = poly.len();
+    if n < 3 {
+        return poly.to_vec();
+    }
+    let d = (0.25 * fit_min_width(poly)).min(0.5) as f32;
+    if d <= 0.0 {
+        return poly.to_vec();
+    }
+    // 顶点平均（凸多边形的顶点平均在内部）—— 用它定"哪一侧是里"
+    let mut cx = 0.0f32;
+    let mut cy = 0.0f32;
+    for p in poly {
+        cx += p.0;
+        cy += p.1;
+    }
+    let c = (cx / n as f32, cy / n as f32);
+    let (mut lo_x, mut lo_y) = (f32::INFINITY, f32::INFINITY);
+    let (mut hi_x, mut hi_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for p in poly {
+        lo_x = lo_x.min(p.0);
+        lo_y = lo_y.min(p.1);
+        hi_x = hi_x.max(p.0);
+        hi_y = hi_y.max(p.1);
+    }
+    let pad = 1.0f32;
+    let mut cur: Vec<(f32, f32)> = vec![
+        (lo_x - pad, lo_y - pad),
+        (hi_x + pad, lo_y - pad),
+        (hi_x + pad, hi_y + pad),
+        (lo_x - pad, hi_y + pad),
+    ];
+    for i in 0..n {
+        let a = poly[i];
+        let b = poly[(i + 1) % n];
+        let ex = b.0 - a.0;
+        let ey = b.1 - a.1;
+        if ex == 0.0 && ey == 0.0 {
+            continue;
+        }
+        // ⚠️⚠️ 法线**必须归一化**：不归一化时 nrm * off 挪的是"off x 边长"，
+        //    实测那条 55 像素长的斜边被挪了 27 像素 —— 多边形直接削没，
+        //    然后被下面的兜底静默退回"不挪"（看起来像"这个函数没生效"）。
+        let inv = 1.0f64 / ((ex as f64) * (ex as f64) + (ey as f64) * (ey as f64)).sqrt();
+        let mut nx = (-(ey as f64) * inv) as f32;
+        let mut ny = (ex as f64 * inv) as f32;
+        if nx * (c.0 - a.0) + ny * (c.1 - a.1) < 0.0 {
+            nx = -nx;
+            ny = -ny;
+        }
+        // ⚠️ 只有**斜边**往里挪：轴对齐的边是真实边界（见函数头说明）。
+        let off = if ex.abs() > 1e-6 && ey.abs() > 1e-6 { d } else { 0.0 };
+        let px = a.0 + nx * off;
+        let py = a.1 + ny * off;
+        let mut next: Vec<(f32, f32)> = Vec::with_capacity(cur.len() + 1);
+        for k in 0..cur.len() {
+            let p0 = cur[k];
+            let p1 = cur[(k + 1) % cur.len()];
+            let s0 = (p0.0 - px) * nx + (p0.1 - py) * ny;
+            let s1 = (p1.0 - px) * nx + (p1.1 - py) * ny;
+            if s0 >= 0.0 {
+                next.push(p0);
+            }
+            if (s0 >= 0.0) != (s1 >= 0.0) {
+                let t = s0 / (s0 - s1);
+                next.push((p0.0 + (p1.0 - p0.0) * t, p0.1 + (p1.1 - p0.1) * t));
+            }
+        }
+        cur = next;
+        if cur.len() < 3 {
+            return poly.to_vec();
+        }
+    }
+    // 兜底：削得太狠就退回不挪（宁可"包住"也不要一个不存在的碰撞体）
+    if fit_area(&cur) < 0.5 * fit_area(poly) {
+        return poly.to_vec();
+    }
+    cur
+}
+
 struct FitOut {
     polys: Vec<Vec<(f32, f32)>>,
     pixel_area: f64,
@@ -485,7 +610,14 @@ fn fit_rects_to_polys(rects: &[FitRect], dev_tol: f64) -> FitOut {
         if poly.len() < 3 {
             continue;
         }
-        let dev = (fit_area(&poly) - part_area) / fit_long_side(&poly).max(1.0);
+        // **取中间**：斜边往里挪半个像素（见 fit_inset_diagonals 的说明）
+        poly = fit_inset_diagonals(&poly);
+        if poly.len() < 3 {
+            continue;
+        }
+        // ⚠️ 偏离要**取绝对值**：挪进来之后多边形可能比像素**小**（幻影为负），
+        //    只算正值的话"削掉了多少"就没人报了。
+        let dev = (fit_area(&poly) - part_area).abs() / fit_long_side(&poly).max(1.0);
         if dev > out.max_dev {
             out.max_dev = dev;
         }
