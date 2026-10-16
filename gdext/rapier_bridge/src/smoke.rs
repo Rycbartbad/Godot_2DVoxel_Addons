@@ -14,13 +14,15 @@ fn main() {
         let w = rb_world_new();
         // 拼接地面：一个静态刚体，60 段 20x40
         let g = rb_body_new(w, 1, 0.0, 0.0, 0.0);
-        let mut rects = Vec::new();
+        // ⚠️ 记录是 6 个 f32：x, y, w, h, 摩擦, 恢复（逐矩形系数 —— 材质逐像素存，
+        //    所以"一个刚体一个摩擦"不够用，见 rb_body_set_rects6 的说明）。
+        let mut recs = Vec::new();
         for i in 0..60 {
-            rects.extend_from_slice(&[i as f32 * 20.0, 0.0, 20.0, 40.0]);
+            recs.extend_from_slice(&[i as f32 * 20.0, 0.0, 20.0, 40.0, 0.5, 0.0]);
         }
-        rb_body_set_rects(w, g, rects.as_ptr(), 60, 0.5);
+        rb_body_set_rects6(w, g, recs.as_ptr(), 60);
         let b = rb_body_new(w, 0, 10.0, -16.0, 0.0);
-        rb_body_set_rects(w, b, [0.0f32, 0.0, 16.0, 16.0].as_ptr(), 1, 0.5);
+        rb_body_set_rects6(w, b, [0.0f32, 0.0, 16.0, 16.0, 0.5, 0.0].as_ptr(), 1);
 
         for _ in 0..60 { rb_world_step(w, 1.0 / 60.0); }
         let rest_y = state(w, b)[1];
@@ -44,11 +46,11 @@ fn main() {
         // 角接触：24x24 方块转 40°
         let w2 = rb_world_new();
         let g2 = rb_body_new(w2, 1, 0.0, 20.0, 0.0);
-        rb_body_set_rects(w2, g2, [-2000.0f32, -20.0, 4000.0, 40.0].as_ptr(), 1, 0.5);
+        rb_body_set_rects6(w2, g2, [-2000.0f32, -20.0, 4000.0, 40.0, 0.5, 0.0].as_ptr(), 1);
         let th = 40.0f64.to_radians();
         let low = 12.0 * (th.sin() + th.cos());
         let b2 = rb_body_new(w2, 0, 0.0, -low, th);
-        rb_body_set_rects(w2, b2, [-12.0f32, -12.0, 24.0, 24.0].as_ptr(), 1, 0.5);
+        rb_body_set_rects6(w2, b2, [-12.0f32, -12.0, 24.0, 24.0, 0.5, 0.0].as_ptr(), 1);
         for _ in 0..120 { rb_world_step(w2, 1.0 / 60.0); }
         let r1 = state(w2, b2)[2].to_degrees();
         println!("[冒烟] 角接触 40° 方块：终态 {:.3}°（转了 {:.3}°）  {}",

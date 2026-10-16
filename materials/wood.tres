@@ -8,4 +8,6 @@ display_name = "木头"
 id = 2
 color = Color(0.72, 0.52, 0.32, 1)
 density = 0.6
+friction = 0.6
+restitution = 0.15
 compress_strength = 14.0

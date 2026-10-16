@@ -85,6 +85,100 @@ func _bounce(restitution: float, ground_restitution := 0.0, rule := -1) -> float
 	return peak
 
 
+
+## 上下**两截不同材质**的方块：下半截 bottom_mat、上半截 top_mat。
+## ⚠️ 局部坐标 y 向下（与重力 +y 一致），所以"下半截"是大的 y。
+func _two_band(w: int, h: int, bottom_mat: int, top_mat: int) -> PixelShape:
+	var s := PixelShape.new()
+	s.fill_rect(Rect2i(0, 0, w, h / 2), top_mat)
+	s.fill_rect(Rect2i(0, h / 2, w, h - h / 2), bottom_mat)
+	return s
+
+
+## 左右**两种材质**的地面（静态体一块，左半 mat_left、右半 mat_right）。
+func _two_ground(w: int, h: int, mat_left: int, mat_right: int) -> PixelShape:
+	var s := PixelShape.new()
+	s.fill_rect(Rect2i(0, 0, w / 2, h), mat_left)
+	s.fill_rect(Rect2i(w / 2, 0, w - w / 2, h), mat_right)
+	return s
+
+
+## 两块**同一对材质、只是上下对调**的方块在地面上滑：它们的"整体平均系数"完全相同，
+## 所以滑行距离的差别**只能**来自"哪个材质的表面在接触地面"。
+## 材质 1 = 冰（摩擦 0.0），材质 2 = 橡胶（摩擦 0.9），地面材质 3 = 中间值 0.5。
+func _slide_band(ice_down: bool) -> float:
+	var world := PWorld.new()
+	world.gravity = Vector2(0, 600)
+	world.set_material_friction(1, 0.0)
+	world.set_material_friction(2, 0.9)
+	world.set_material_friction(3, 0.5)
+	var ground := PBody.new()
+	ground.position = Vector2(0, 200)
+	ground.make_static()
+	world.add_body(ground, [_rect(1400, 40, 3)])
+	# ⚠️ 方块用**扁平**的（32x8）而不是方块：16x16 在滑动中会翻滚，
+	#    翻过来之后接触地面的材质就换了一面 —— 那时量到的距离混进了滚动，
+	#    判据就不再是"哪个表面在接触"了（实测 136 -> 244 px 的那种假差异就是这么来的）。
+	var box := PBody.new()
+	box.position = Vector2(100, 191)        # 贴着地面（不摔、不弹）
+	var shape := _two_band(32, 8, 1, 2) if ice_down else _two_band(32, 8, 2, 1)
+	world.add_body(box, [shape])
+	box.linear_velocity = Vector2(300, 0)
+	for i in 240:
+		world.step(1.0 / 60.0)
+	return box.position.x - 100.0
+
+
+## 一整块**多材质静态地形**（左半 mat_left、右半 mat_right）上的滑行：
+## 方块从左侧同一位置出发 —— 两次只差"脚下那半是什么材质"。
+func _slide_terrain(mat_left: int, mat_right: int) -> float:
+	var world := PWorld.new()
+	world.gravity = Vector2(0, 600)
+	world.set_material_friction(1, 0.0)     # 冰
+	world.set_material_friction(2, 0.9)     # 橡胶
+	world.set_material_friction(3, 0.5)     # 箱子
+	var ground := PBody.new()
+	ground.position = Vector2(0, 200)
+	ground.make_static()
+	world.add_body(ground, [_two_ground(1200, 40, mat_left, mat_right)])
+	var box := PBody.new()
+	box.position = Vector2(100, 191)        # 扁平 + 贴地：同上，别让翻滚混进判据
+	world.add_body(box, [_rect(32, 8, 3)])
+	box.linear_velocity = Vector2(300, 0)
+	for i in 240:
+		world.step(1.0 / 60.0)
+	return box.position.x - 100.0
+
+
+## 下半截是**弹的**（恢复 0.9）下半截是**死的**（0.0）的方块 ：量落地后的最大回弹高度。
+func _bounce_band(bouncy_down: bool) -> float:
+	var world := PWorld.new()
+	world.gravity = Vector2(0, 600)
+	world.set_material_restitution(1, 0.9)  # 弹
+	world.set_material_restitution(2, 0.0)  # 死
+	world.set_material_restitution(3, 0.0)  # 地面（不配恢复）
+	world.set_material_friction(1, 0.5)
+	world.set_material_friction(2, 0.5)
+	world.set_material_friction(3, 0.5)
+	var ground := PBody.new()
+	ground.position = Vector2(0, 200)
+	ground.make_static()
+	world.add_body(ground, [_rect(600, 40, 3)])
+	var box := PBody.new()
+	box.position = Vector2(100, 100)
+	var shape := _two_band(12, 12, 1, 2) if bouncy_down else _two_band(12, 12, 2, 1)
+	world.add_body(box, [shape])
+	var bounced := false
+	var peak := 0.0
+	for i in 300:
+		world.step(1.0 / 60.0)
+		if not bounced and box.linear_velocity.y < -1.0 and box.position.y > 170.0:
+			bounced = true
+		if bounced:
+			peak = maxf(peak, 200.0 - box.position.y)
+	return peak
+
+
 func _initialize() -> void:
 	print("=== 材质：摩擦系数（默认合成规则 = 几何平均 sqrt(μ₁·μ₂)）===")
 	var far := _slide(0.0)
@@ -117,6 +211,26 @@ func _initialize() -> void:
 	var bouncy_avg := _bounce(0.9, 0.0, PWorld.COMBINE_AVERAGE)
 	_c("同场景改回取平均 -> 只弹回一半（旋钮真的接到了 Rapier）", bouncy_avg < bouncy * 0.5,
 		"取平均 %.1f px vs 取大 %.1f px" % [bouncy_avg, bouncy])
+
+	print("=== 同一刚体上不同材质的表面各自生效 ===")
+	# ⚠️⚠️ 判据是"**哪个材质的表面在接触**决定手感"：两块方块的材质一模一样
+	#    （一截冰 0.0、一截橡胶 0.9），只是上下对调 —— 它们的整体平均系数**完全相同**，
+	#    所以滑行距离若有差别，只可能来自"接触地面的那半截是什么材质"。
+	#    旧实现（整刚体一个平均系数）下这两次必然一样。
+	var ice_down := _slide_band(true)
+	var rubber_down := _slide_band(false)
+	_c("冰的那面朝下滑得远、橡胶那面朝下滑得近", ice_down > rubber_down * 1.5,
+		"冰朝下 %.1f px vs 橡胶朝下 %.1f px（平均系数两者相同）" % [ice_down, rubber_down])
+	# 一整块**多材质静态地形**：脚下那半是冰还是橡胶，决定滑多远（旧实现只取第一个像素的材质）。
+	var on_ice := _slide_terrain(1, 2)
+	var on_rubber := _slide_terrain(2, 1)
+	_c("多材质地形：脚下是冰 vs 橡胶", on_ice > on_rubber * 1.5,
+		"冰上 %.1f px vs 橡胶上 %.1f px（同一块地形刚体）" % [on_ice, on_rubber])
+	# 恢复系数同理：弹的那半截朝下才弹得起来。
+	var bouncy_down := _bounce_band(true)
+	var dead_down := _bounce_band(false)
+	_c("弹的那面朝下才弹得起来", bouncy_down > dead_down + 20.0,
+		"弹面朝下 %.1f px vs 死面朝下 %.1f px" % [bouncy_down, dead_down])
 
 	print("=== %d passed, %d failed ===" % [_pass, _fail])
 	quit(0 if _fail == 0 else 1)

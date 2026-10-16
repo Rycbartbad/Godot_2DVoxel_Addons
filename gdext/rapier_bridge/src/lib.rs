@@ -196,10 +196,21 @@ pub extern "C" fn rb_body_remove(w: *mut World, id: u32) {
     }
 }
 
-/// 给刚体重建碰撞体：rects 是 4 个 f32 一组（局部 Rect2 的 x,y,w,h），与项目的分解结果一致。
+/// 给刚体重建碰撞体：每条记录 **6 个 f32** —— 局部像素空间的 x, y, w, h, friction, restitution。
 /// 每次都先清空旧碰撞体 —— 像素破坏会让分解结果频繁变化。
+///
+/// ⚠️⚠️ 系数为什么是**逐矩形**的：材质是逐像素存的、Rapier 的接触系数是逐碰撞体的，
+///    而一个"下半截冰、上半截橡胶"的刚体只建一个碰撞体就只能给一个平均系数 ——
+///    那种平均正是"不同材质的表面手感不同"做不到的原因。中间那一层
+///    （把矩形按材质切开、每条带自己材质的系数）由 GDScript 提供，见 op 4 / FastPhys 的
+///    `run_raster_decompose_mat`。
+///
+/// ⚠️ 符号名从 `rb_body_set_rects` 改成 `rb_body_set_rects6` **是刻意的**：
+///    记录从 4 个 float 变成 6 个，沿用旧名会让"新 fastphys.dll + 旧 rapier_bridge.dll"
+///    按旧 ABI 静默调用（参数错位 = 碰撞体乱飞，不报错）。现在缺符号 ->
+///    `load_rapier` 直接失败并印出缺了哪一个。
 #[no_mangle]
-pub extern "C" fn rb_body_set_rects(w: *mut World, id: u32, rects: *const f32, count: i32, friction: f64) {
+pub extern "C" fn rb_body_set_rects6(w: *mut World, id: u32, recs: *const f32, count: i32) {
     let Some(w) = (unsafe { wref(w) }) else { return };
     let Some(&h) = w.map.get(&id) else { return };
     let old: Vec<ColliderHandle> = w.bodies[h].colliders().iter().copied().collect();
@@ -207,16 +218,18 @@ pub extern "C" fn rb_body_set_rects(w: *mut World, id: u32, rects: *const f32, c
     for c in old {
         w.colliders.remove(c, &mut w.islands, &mut w.bodies, &mut w.soft, true);
     }
-    if rects.is_null() || count <= 0 { return; }
-    let r = unsafe { std::slice::from_raw_parts(rects, (count as usize) * 4) };
+    if recs.is_null() || count <= 0 { return; }
+    let r = unsafe { std::slice::from_raw_parts(recs, (count as usize) * 6) };
     for i in 0..count as usize {
-        let (px, py, sx, sy) = (r[i * 4], r[i * 4 + 1], r[i * 4 + 2], r[i * 4 + 3]);
+        let (px, py, sx, sy) = (r[i * 6], r[i * 6 + 1], r[i * 6 + 2], r[i * 6 + 3]);
+        let (fric, rest) = (r[i * 6 + 4], r[i * 6 + 5]);
         // ⚠️ with_rules 不能漏：ColliderBuilder 不带合成规则就按 Rapier 默认的
         //    Average 算接触 —— 摩擦 0 的冰面会变成"半滑"（见 World::new 的说明）。
         let builder = w.with_rules(
             ColliderBuilder::cuboid(sx * 0.5, sy * 0.5)
                 .translation(Vector::new(px + sx * 0.5, py + sy * 0.5))
-                .friction(friction as f32),
+                .friction(fric)
+                .restitution(rest),
         );
         w.colliders.insert_with_parent(builder, h, &mut w.bodies);
     }
@@ -705,7 +718,7 @@ pub extern "C" fn rb_body_fit_polys(
             pts.push(Vector::new(x, y));
         }
         if let Some(builder) = ColliderBuilder::convex_hull(&pts) {
-            // ⚠️ 同 rb_body_set_rects：规则不带就回到 Rapier 默认的 Average。
+            // ⚠️ 同 rb_body_set_rects6：规则不带就回到 Rapier 默认的 Average。
             let builder = w.with_rules(builder.friction(friction as f32));
             w.colliders.insert_with_parent(builder, h, &mut w.bodies);
         }
@@ -1382,7 +1395,7 @@ pub extern "C" fn rb_joint_set_contacts(w: *mut World, id: u32, enabled: i32) {
 ///
 /// ⚠️ 分组挂在 **Collider** 上，不是刚体上 —— 本项目一个刚体有 N 个矩形碰撞体，
 ///    所以这里遍历它的全部碰撞体一起设。
-/// ⚠️ 也因此 rb_body_set_rects 重建碰撞体之后必须**再设一次**：新碰撞体拿到的是
+/// ⚠️ 也因此 rb_body_set_rects6 重建碰撞体之后必须**再设一次**：新碰撞体拿到的是
 ///    Rapier 默认分组（全 1），旧分组不会自动继承。实测症状：擦掉一块地形 ->
 ///    重建碰撞体 -> 那个刚体静默变回"和所有层都碰"（子弹又开始打中它）。
 #[no_mangle]

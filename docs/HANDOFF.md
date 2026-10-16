@@ -25,8 +25,10 @@ GDScript 那份自研求解器**已全部删除**，只剩 native 一条路 —�
 `RapierPhys.cmd(in, out_template)` 管物理；`PixelRaster.fill_region(in, out_template)`
 管"形状 -> RGBA8 图"的栅格化（**不依赖 Rapier**，缺桥接也能用）。
 协议：`in = [i32 out_cap][i32 cmd_len][ops...]`。
-操作码 0..23 是刚体/世界，**24..31 是关节**，32..39 是分组/材质/接触导出，
-  **40..41 是关节求解精度**（软度 / 世界级求解参数）—— 完整表见 `gdext/fastphys.cpp` 顶部注释。
+操作码 0..23 是刚体/世界，**24..31 是关节**，32..43 是分组/材质/接触导出/多边形碰撞体，
+  **44..46 是读回诊断**，**47 是接触系数合成规则**，**48 是逐矩形系数的碰撞体**
+  （op 5 已删除）—— 完整表见 `gdext/fastphys.cpp` 顶部注释。
+  PixelRaster 那条流是 1 填充 / 2 分解 / 3 连通分量 / **4 按材质分解**。
 
 **引擎只提供机制，规则在游戏层。** 节点层尽量像 Godot 内置
 （`PixelWorld` / `PixelBody2D` / `PixelShape2D` / `PixelMaterial` / `DebugOverlay`）。

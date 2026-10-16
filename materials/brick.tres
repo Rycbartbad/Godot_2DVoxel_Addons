@@ -8,4 +8,6 @@ display_name = "砖"
 id = 4
 color = Color(0.8, 0.32, 0.3, 1)
 density = 2.0
+friction = 0.7
+restitution = 0.02
 compress_strength = 20.0

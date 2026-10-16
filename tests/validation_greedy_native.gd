@@ -106,6 +106,66 @@ func _cmp(label: String, s: PixelShape, max_rects: int = 0) -> void:
 		"写回=%s %s vs %s" % [str(wrote_back), str(aabb_nat), str(aabb_ref)])
 
 
+## 逐条比较材质标签（数量 + 每条的值）。
+func _diff_mats(a: PackedInt32Array, b: PackedInt32Array) -> String:
+	if a.size() != b.size():
+		return "材质标签数 %d != %d" % [a.size(), b.size()]
+	for i in a.size():
+		if a[i] != b[i]:
+			return "#%d 材质 %d != %d" % [i, a[i], b[i]]
+	return ""
+
+
+## 按材质分解（op 4 / decompose_material）的两条路逐位对拍。
+##
+## ⚠️ 判据比 decompose 那条**更严**：除矩形外，**材质标签也必须逐条相同** ——
+##    标签决定每条矩形拿哪个系数，标签错了就是那个表面的手感错，而且不报错。
+## ⚠️ 单材质形状还要额外钉一条：必须与**普通分解**逐位相同 ——
+##    否则"只是多带了个材质信息"也会让 8 条逐位基准无谓地动。
+func _cmp_mat(label: String, s: PixelShape, max_rects: int = 0) -> void:
+	_cases += 1
+	var r_ref: GreedyRects.ResultMat = null
+	if _flip:
+		s._aabb_rev = -1
+		r_ref = GreedyRects.decompose_material_gd(s, max_rects)
+	GreedyRects.native_calls = 0
+	GreedyRects.native_fallbacks = 0
+	s._aabb_rev = -1
+	var r_nat: GreedyRects.ResultMat = GreedyRects.decompose_material(s, max_rects)
+	var calls := GreedyRects.native_calls
+	var backs := GreedyRects.native_fallbacks
+	var wrote_back := s._aabb_rev == s._bounds_rev
+	var aabb_nat: Rect2i = s.local_aabb()
+	var aabb_ref: Rect2i = _aabb_gd(s)
+	if not _flip:
+		s._aabb_rev = -1
+		r_ref = GreedyRects.decompose_material_gd(s, max_rects)
+	_flip = not _flip
+	_rects_cmp += maxi(r_nat.rects.size(), r_ref.rects.size())
+	if calls == 2:
+		_retries += 1
+
+	var tag := "%s［按材质］（%d 像素 / %d chunk）" % [label, s.pixel_count(), s.chunks.size()]
+	if s.chunks.size() <= 0:
+		_c(tag + " 空形状不走原生", calls == 0 and backs == 0, "calls=%d backs=%d" % [calls, backs])
+	else:
+		_c(tag + " 走原生", calls >= 1 and backs == 0, "calls=%d backs=%d" % [calls, backs])
+	var d := _diff_rects(r_nat.rects, r_ref.rects)
+	_c(tag + " 矩形逐位相同", d == "", d)
+	var dm := _diff_mats(r_nat.mats, r_ref.mats)
+	_c(tag + " 材质标签逐条相同", dm == "", dm)
+	_c(tag + " origin 相同", r_nat.origin == r_ref.origin,
+		"%s vs %s" % [str(r_nat.origin), str(r_ref.origin)])
+	_c(tag + " budget_exceeded 相同", r_nat.budget_exceeded == r_ref.budget_exceeded,
+		"max_rects=%d：%s vs %s" % [max_rects, str(r_nat.budget_exceeded), str(r_ref.budget_exceeded)])
+	_c(tag + " AABB 写回且逐位相同", wrote_back and aabb_nat == aabb_ref,
+		"写回=%s %s vs %s" % [str(wrote_back), str(aabb_nat), str(aabb_ref)])
+	if GreedyRects.material_ids(s).size() <= 1:
+		var plain: GreedyRects.Result = GreedyRects.decompose(s, max_rects)
+		var d2 := _diff_rects(r_nat.rects, plain.rects)
+		_c(tag + " 单材质：与普通分解逐位相同", d2 == "", d2)
+
+
 ## 随机形状：底板 + 内部空洞 + 边缘缺口 + 整行/整列空 + 孤立像素 + 混合占用。
 ## w/h 故意不是 8 的倍数，原点也故意不落在 8 的倍数上（块锚点与 AABB 是两回事）。
 func _random_shape(kind: int) -> PixelShape:
@@ -235,6 +295,36 @@ func _initialize() -> void:
 	dead.fill_rect(Rect2i(0, 0, 16, 16), 1)
 	dead.chunk_or_create(50, 50)                            # 空 chunk，离得很远
 	_cmp("空 chunk 混在里面", dead)
+
+	# ---- 2. 按材质分解（op 4）：矩形按材质切开，每条带材质 id ----
+	var m_stripe := PixelShape.new()        # 同一个 chunk 里上下两材质（最容易漏的边界）
+	m_stripe.fill_rect(Rect2i(0, 0, 20, 8), 1)
+	m_stripe.fill_rect(Rect2i(0, 4, 20, 4), 2)
+	var m_halves := PixelShape.new()        # 左右两半（跨多个 64x64 块）
+	m_halves.fill_rect(Rect2i(0, 0, 70, 40), 3)
+	m_halves.fill_rect(Rect2i(35, 0, 35, 40), 9)
+	var m_diag := PixelShape.new()          # 交错材质（材质 id 跨度大，且要按升序输出）
+	for i in 30:
+		m_diag.fill_rect(Rect2i(i, i, 2, 2), 200)
+		m_diag.fill_rect(Rect2i(i + 1, i, 1, 2), 1)
+	var m_holes := PixelShape.new()         # 多材质 + 内部洞 + 边缘缺口
+	m_holes.fill_rect(Rect2i(-5, -3, 80, 50), 4)
+	m_holes.fill_rect(Rect2i(10, 10, 20, 20), 5)
+	m_holes.fill_rect(Rect2i(40, 5, 30, 40), 6)
+	m_holes.fill_rect(Rect2i(15, 15, 10, 10), 0)
+	var m_rand := _random_shape(1)          # 随机占用 + 三材质（覆盖空 chunk / 负块坐标）
+	for kk: int in m_rand.chunks:
+		var cc = m_rand.chunks[kk]
+		for i in 64:
+			if (cc.occ >> i) & 1:
+				cc.mat[i] = 1 + ((i + (kk & 7)) % 3) * 3      # 1 / 4 / 7
+	_cmp_mat("单材质 800x40", ground)
+	_cmp_mat("同一 chunk 上下两材质", m_stripe)
+	_cmp_mat("左右两材质（跨块）", m_halves)
+	_cmp_mat("交错两材质（1 与 200）", m_diag)
+	_cmp_mat("多材质 + 洞", m_holes)
+	_cmp_mat("随机形状三材质", m_rand)
+	_cmp_mat("多材质 + max_rects=3", m_halves, 3)
 	# 只有空 chunk（一个像素都没有）—— AABB 是空的，但 chunks 不是空的：
 	# 原生会被调用，然后必须走"origin 保持 Vector2.ZERO"那条早返回
 	var hollow := PixelShape.new()

@@ -537,13 +537,9 @@ var material_density := PackedFloat32Array()
 ##    想让某个材质在整个世界里说了算（例如冰面到哪都滑），改的是那条**规则**，不是这里的值。
 var material_friction := PackedFloat32Array()
 
-## op 5（重建碰撞体）给**新**碰撞体设的初始摩擦系数。
-##
-## ⚠️ 它原来叫 `solver.global_friction` —— 求解内核整体删除后，它是 Solver 里
-##    **唯一**还有读者的参数（op 5 的命令流尾巴带着它），所以搬到这里。
-##    默认 0.5 = Rapier 自己的默认值；重建之后每体的 b.friction 会紧跟着重推一次
-##    （见「新碰撞体的摩擦/恢复回到 Rapier 默认」那一段）。
-var global_friction := 0.5
+# ⚠️ 这里曾经有个 `global_friction`（op 5 给新碰撞体的初始摩擦系数）。**已删除** ——
+#    碰撞体现在**建的时候就带上**摩擦/恢复（op 48 逐矩形给，op 43 给整刚体），
+#    于是"先塞一个临时值、随后再整刚体重推"那条路连同它的读者一起没了。
 
 ## 允许的穿透深度（像素）——**判据用的容差，不是求解参数**。
 ##
@@ -1403,35 +1399,47 @@ func _substep_rapier(dt: float) -> void:
 			_rp_f64(cmds, b.gravity_scale)
 			b._rp_gravity_scale = b.gravity_scale
 		if b._rp_rects_rev != b.rects_rev:
-			# ⚠️ 两条路**互斥**（都会先清空旧碰撞体），二选一由 poly_colliders / poly_max_rects 决定：
-			#   · op 43：矩形 -> **凸多边形**（原生侧拟合，Noita 式）
-			#   · op 5 ：矩形 -> Rapier cuboid（精确，逐像素不差）
-			var as_polys: bool = poly_colliders and b.rects.size() <= poly_max_rects
+			# ⚠️ 两条路**互斥**（都会先清空旧碰撞体）：
+			#   · op 43：矩形 -> **凸多边形**（原生侧拟合，Noita 式）—— 整个刚体一个系数
+			#   · op 48：矩形 -> Rapier cuboid（精确，逐像素不差）—— **逐矩形系数**
+			# ⚠️⚠️ 逐矩形系数的刚体**不能**走多边形：拟合会把不同材质的矩形并进一个
+			#    多边形，系数就没法逐表面了（见 PBody.rect_friction 的说明）。
+			var as_polys: bool = poly_colliders and b.rects.size() <= poly_max_rects 					and b.rect_friction.is_empty()
 			if as_polys:
 				_rp_u8(cmds, 43)
-				_rp_u32(cmds, b.rapier_id)
-				_rp_i32(cmds, b.rects.size())
 			else:
-				_rp_u8(cmds, 5)
-				_rp_u32(cmds, b.rapier_id)
-				_rp_i32(cmds, b.rects.size())
+				_rp_u8(cmds, 48)
+			_rp_u32(cmds, b.rapier_id)
+			_rp_i32(cmds, b.rects.size())
 			# ⚠️ 整段**先 resize 一次**，再逐字段 encode_float —— 不要每个字段都走 _rp_f32。
 			#    _rp_f32 每次都 `resize(size+4)` + `encode_float`：1200 个矩形 = 4800 次
 			#    resize（每次都动整个缓冲区）+ 4800 次编码。实测（1200 / 4000 个矩形）：
 			#    0.215 / 0.725 ms -> **0.107 / 0.365 ms（2x）**，而且**逐字节完全一致**
 			#    （同样的 encode_float、同样的偏移、同样的值 —— 探针里比过 A=B:true）。
 			#    位置/速度那些只有几个字段的推送不值得改，就这条循环是 N 个矩形。
+			#    op 43 每条矩形 16 字节（只有几何）；op 48 是 24 字节（多两个 f32 系数）。
 			var n0 := cmds.size()
-			cmds.resize(n0 + b.rects.size() * 16)
+			var per := 16 if as_polys else 24
+			cmds.resize(n0 + b.rects.size() * per)
 			var off := n0
-			for r: Rect2 in b.rects:
+			for i in b.rects.size():
+				var r: Rect2 = b.rects[i]
 				cmds.encode_float(off, r.position.x)
 				cmds.encode_float(off + 4, r.position.y)
 				cmds.encode_float(off + 8, r.size.x)
 				cmds.encode_float(off + 12, r.size.y)
-				off += 16
-			_rp_f64(cmds, global_friction)
+				if not as_polys:
+					# 逐矩形系数（op 48）。空数组 = 整刚体同值（见 PBody.rect_friction）。
+					var f := b.friction
+					var rr := b.restitution
+					if i < b.rect_friction.size():
+						f = b.rect_friction[i]
+						rr = b.rect_restitution[i]
+					cmds.encode_float(off + 16, f)
+					cmds.encode_float(off + 20, rr)
+				off += per
 			if as_polys:
+				_rp_f64(cmds, b.friction)
 				_rp_f64(cmds, b.mass)
 				_rp_f32(cmds, poly_dev_tol)
 			b._rp_rects_rev = b.rects_rev
@@ -1450,9 +1458,16 @@ func _substep_rapier(dt: float) -> void:
 			else:
 				# ⚠️ 矩形那条路：新碰撞体的密度回到 Rapier 默认的 1.0，必须重推。
 				b._rp_density = -1.0
-			# ⚠️ 同理：新碰撞体的摩擦/恢复系数也回到 Rapier 默认（0.5 / 0.0），必须重推。
-			b._rp_friction = -1.0
-			b._rp_restitution = -1.0
+			# 摩擦/恢复系数在**建碰撞体时就写好了**（不像密度那样"先默认后重推"）：
+			#   · op 48 逐矩形带两个系数 -> 全部已生效，镜像写成刚体值，让下面 op 38/39
+			#     **不再推** —— 否则会把逐矩形的系数统一覆盖成刚体平均，正是要避免的那件事；
+			#   · op 43 只带摩擦（恢复没带）-> 恢复的镜像打回未推送，让 op 39 推一次整刚体值
+			#     （那条路只用于"整个刚体一个系数"的形状，推整刚体值是对的）。
+			b._rp_friction = b.friction
+			if as_polys:
+				b._rp_restitution = -1.0
+			else:
+				b._rp_restitution = b.restitution
 		if b._rp_layer != b.collision_layer or b._rp_mask != b.collision_mask:
 			_rp_u8(cmds, 32)
 			_rp_u32(cmds, b.rapier_id)
