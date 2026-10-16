@@ -42,7 +42,12 @@ pub struct World {
     // 每步只建立一次索引，避免逐对查询从头扫描造成 O(N²)。
     contact_pairs: Vec<(ColliderHandle, ColliderHandle)>,
     contacts_dirty: bool,
-
+    /// 接触系数的合成规则（Rapier `CoefficientCombineRule`）。见 `new()` 里的说明。
+    ///
+    /// ⚠️ 它必须在**建碰撞体时**就带上：ColliderBuilder 不带就回到 Rapier 默认的
+    ///    Average —— 而那正是"球 0.9 撞地面 0.0 只弹回 0.45"的来源。
+    fric_rule: CoefficientCombineRule,
+    rest_rule: CoefficientCombineRule,
 }
 
 /// 一个关节在我们这边的记录（Rapier 侧只有句柄，类型得自己记 —— 限位/马达
@@ -85,7 +90,31 @@ impl World {
             next_joint_id: 1,
             contact_pairs: Vec::new(),
             contacts_dirty: true,
+            // 接触系数合成规则：**刻意不用 Rapier 的默认 Average**。
+            //
+            // ⚠️⚠️ 为什么（这是实测过的坑，不是口味问题）：
+            //    Rapier 的接触系数是"两个碰撞体合成"出来的，默认 Average 会把
+            //    **一方的材质稀释掉一半**：
+            //      · 恢复系数：球 0.9 + 地面 0.0 -> 接触处 0.45 -> 回弹高度只剩 ~20%，
+            //        表现完全像"恢复系数根本没接上"，逼得美术给地面也配 0.9；
+            //      · 摩擦系数：冰面 0.0 + 地面 0.5 -> 0.25 —— **冰面并不滑**。
+            //    行业惯例都是"某一方说了算"，不是各让一半
+            //    （Box2D：摩擦 sqrt(mu1*mu2)、恢复 max(e1,e2)）：
+            //      · 摩擦 GeometricMean = sqrt(mu1*mu2)：任一边为 0 就无摩擦（冰面真滑）；
+            //      · 恢复 Max：更弹的那一方决定回弹，0.9 的球砸在 0 的地面上照样弹 0.9。
+            //    ⚠️ 这两个规则都是**交换且幂等**的（combine(a, a) == a），所以
+            //       "两边设同一个值"的老配方结果**逐位不变**，只有两边不同时才变。
+            //    要退回 Average（或 Min/Multiply/ClampedSum）走 rb_world_set_combine_rules。
+            fric_rule: CoefficientCombineRule::GeometricMean,
+            rest_rule: CoefficientCombineRule::Max,
         }
+    }
+
+    /// 建碰撞体时**必须**带的合成规则 —— 这里做成单点：所有建碰撞体的地方都从这儿取，
+    /// 漏一处就会静默回到 Rapier 默认的 Average（不报错，只是手感不对）。
+    fn with_rules(&self, b: ColliderBuilder) -> ColliderBuilder {
+        b.friction_combine_rule(self.fric_rule)
+            .restitution_combine_rule(self.rest_rule)
     }
 
     /// 本步接触对索引；只存带代数的句柄，不跨步缓存点或冲量。
@@ -182,13 +211,14 @@ pub extern "C" fn rb_body_set_rects(w: *mut World, id: u32, rects: *const f32, c
     let r = unsafe { std::slice::from_raw_parts(rects, (count as usize) * 4) };
     for i in 0..count as usize {
         let (px, py, sx, sy) = (r[i * 4], r[i * 4 + 1], r[i * 4 + 2], r[i * 4 + 3]);
-        w.colliders.insert_with_parent(
+        // ⚠️ with_rules 不能漏：ColliderBuilder 不带合成规则就按 Rapier 默认的
+        //    Average 算接触 —— 摩擦 0 的冰面会变成"半滑"（见 World::new 的说明）。
+        let builder = w.with_rules(
             ColliderBuilder::cuboid(sx * 0.5, sy * 0.5)
                 .translation(Vector::new(px + sx * 0.5, py + sy * 0.5))
                 .friction(friction as f32),
-            h,
-            &mut w.bodies,
         );
+        w.colliders.insert_with_parent(builder, h, &mut w.bodies);
     }
 }
 
@@ -675,8 +705,9 @@ pub extern "C" fn rb_body_fit_polys(
             pts.push(Vector::new(x, y));
         }
         if let Some(builder) = ColliderBuilder::convex_hull(&pts) {
-            w.colliders
-                .insert_with_parent(builder.friction(friction as f32), h, &mut w.bodies);
+            // ⚠️ 同 rb_body_set_rects：规则不带就回到 Rapier 默认的 Average。
+            let builder = w.with_rules(builder.friction(friction as f32));
+            w.colliders.insert_with_parent(builder, h, &mut w.bodies);
         }
     }
     if fit.poly_area > 0.0 && mass > 0.0 {
@@ -1398,11 +1429,55 @@ pub extern "C" fn rb_body_set_density(w: *mut World, id: u32, density: f64) {
     }
 }
 
+/// 世界级：两个碰撞体接触时，系数怎么合成（Rapier `CoefficientCombineRule` 的判别值）。
+///
+/// ⚠️ 判别值是**照抄 Rapier 枚举**的，GDScript 侧（PWorld.COMBINE_*）与它逐值对应：
+///    0 Average / 1 Min / 2 Multiply / 3 Max / 4 ClampedSum / 5 GeometricMean。
+///    传了不认识的值 = **忽略**（保持现状），不 panic —— 这条流上 panic 会把整个
+///    DLL 带走，而调用方只是传错一个字节。
+///
+/// ⚠️ 已经存在的碰撞体也要一起改：合成是在**接触对**上每步重算的，只改"新建碰撞体的
+///    默认值"的话，运行时改规则要等所有刚体重建一遍才生效 —— 那正是最容易被误判成
+///    "旋钮没接上"的样子（改完没反应，过一会儿又好了）。
+#[no_mangle]
+pub extern "C" fn rb_world_set_combine_rules(
+    w: *mut World,
+    friction_rule: i32,
+    restitution_rule: i32,
+) {
+    let Some(w) = (unsafe { wref(w) }) else { return };
+    if let Some(r) = rule_from_i32(friction_rule) {
+        w.fric_rule = r;
+    }
+    if let Some(r) = rule_from_i32(restitution_rule) {
+        w.rest_rule = r;
+    }
+    let (f, r) = (w.fric_rule, w.rest_rule);
+    for (_, c) in w.colliders.iter_mut() {
+        c.set_friction_combine_rule(f);
+        c.set_restitution_combine_rule(r);
+    }
+}
+
+/// i32 -> CoefficientCombineRule（判据值与 Rapier 的枚举逐值对应，见上）。
+fn rule_from_i32(v: i32) -> Option<CoefficientCombineRule> {
+    Some(match v {
+        0 => CoefficientCombineRule::Average,
+        1 => CoefficientCombineRule::Min,
+        2 => CoefficientCombineRule::Multiply,
+        3 => CoefficientCombineRule::Max,
+        4 => CoefficientCombineRule::ClampedSum,
+        5 => CoefficientCombineRule::GeometricMean,
+        _ => return None,
+    })
+}
+
 /// 摩擦系数（材质属性）-> 该刚体的**所有**碰撞体。
 ///
-/// ⚠️ Rapier 的接触系数是**两个碰撞体按 CoefficientCombineRule 合成**的（默认 Average）：
-///    地面 0.8 + 箱子 0.2 -> 接触处 0.5。所以"想让某个材质说了算"就得两边设同一个值。
-///    以后要"取最大/取最小"，得再开一个 combine rule 的旋钮（Rapier 有，现在没接）。
+/// ⚠️ Rapier 的接触系数是**两个碰撞体按 CoefficientCombineRule 合成**的，而合成规则
+///    由**世界级**旋钮定（默认 GeometricMean = sqrt(mu1*mu2)，见 World::new 的说明）——
+///    所以"想让某个材质说了算"**不再需要两边设同一个值**：摩擦任一边为 0，
+///    接触就无摩擦（冰面赢了）。这里只改本刚体的系数，规则不在这儿。
 ///
 /// ⚠️ 和密度不同：改摩擦/恢复系数**不需要** recompute_mass_properties ——
 ///    它们不参与质量属性。别照着 rb_body_set_density 抄那两行。
@@ -1417,7 +1492,7 @@ pub extern "C" fn rb_body_set_friction(w: *mut World, id: u32, friction: f64) {
 }
 
 /// 碰撞恢复系数（0 = 完全不弹，1 = 完全弹性）-> 该刚体的所有碰撞体。
-/// 合成规则同 rb_body_set_friction（默认 Average）。
+/// 合成规则同 rb_body_set_friction（世界级旋钮，默认 Max = 更弹的那一边说了算）。
 #[no_mangle]
 pub extern "C" fn rb_body_set_restitution(w: *mut World, id: u32, restitution: f64) {
     let Some(w) = (unsafe { wref(w) }) else { return };

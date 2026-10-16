@@ -531,8 +531,10 @@ var material_density := PackedFloat32Array()
 
 ## 材质 id -> 摩擦系数 / 碰撞恢复系数（与 material_density 同构）。
 ##
-## ⚠️ Rapier 的接触系数由**两个碰撞体合成**（CoefficientCombineRule，默认 Average）：
-##    地面 0.8 + 箱子 0.2 -> 接触处 0.5。所以"让某个材质说了算"要两边设同一个值。
+## ⚠️ 这两个系数**只在接触对上有意义**，而 Rapier 会把两个碰撞体的值按
+##    CoefficientCombineRule **合成**一把 —— 合成规则由下面两个 `*_combine_rule` 定，
+##    默认是"摩擦取几何平均、恢复取大"，所以**不再需要"两边设同一个值"**。
+##    想让某个材质在整个世界里说了算（例如冰面到哪都滑），改的是那条**规则**，不是这里的值。
 var material_friction := PackedFloat32Array()
 
 ## op 5（重建碰撞体）给**新**碰撞体设的初始摩擦系数。
@@ -553,6 +555,41 @@ const PENETRATION_SLOP := 1.0
 var material_restitution := PackedFloat32Array()
 # ⚠️ 这里曾经有个 _friction_fn 缓存字段，**已删除** —— 见 friction_callable()。
 # ⚠️ 这里曾经有个 _restitution_fn 缓存字段，**已删除** —— 见 restitution_callable()。
+
+
+## 接触系数的**合成规则**（Rapier `CoefficientCombineRule` 的判别值）。
+##
+## ⚠️ 这六个常量必须与 Rapier 的枚举**逐值对应**（改顺序 = 静默换规则，不报错）：
+##    0 平均 / 1 取小 / 2 相乘 / 3 取大 / 4 截断求和 / 5 几何平均。
+##    原生侧（rb_world_set_combine_rules）认这几个值；不认识的值会被**忽略**。
+const COMBINE_AVERAGE := 0
+const COMBINE_MIN := 1
+const COMBINE_MULTIPLY := 2
+const COMBINE_MAX := 3
+const COMBINE_CLAMPED_SUM := 4
+const COMBINE_GEOMETRIC_MEAN := 5
+
+## 摩擦系数怎么合成（默认**几何平均**：sqrt(mu1 * mu2)）。
+##
+## ⚠️⚠️ 为什么**不用 Rapier 的默认 Average**：Average 是两边的**算术平均**，
+##    等于让一方的材质被稀释掉一半 —— 冰面 0.0 碰地面 0.5 -> 0.25，**冰面根本不滑**。
+##    几何平均是 Box2D/Bullet 的惯例：任一边为 0 接触就无摩擦（"滑的一方赢"），
+##    而且它是**幂等**的（combine(a, a) == a），两边同值时结果与 Average 逐位相同。
+var friction_combine_rule := COMBINE_GEOMETRIC_MEAN
+
+## 恢复系数怎么合成（默认**取大**：max(e1, e2)）。
+##
+## ⚠️ Average 的症状：球 0.9 砸在没配恢复系数的地面（0.0）上只弹 0.45 ——
+##    回弹高度约 20%，看着完全像"恢复系数没接上"（日志里真这么记过），
+##    于是美术被迫给地面也配 0.9。取大 = **更弹的那一方说了算**（Box2D 也是如此），
+##    于是"只给球配 0.9"就够了；同样是幂等的，两边同值时结果不变。
+var restitution_combine_rule := COMBINE_MAX
+
+# ⚠️⚠️ 镜像初值必须是 (-1, -1)：0（AVERAGE）是**合法且有意义的设置**，
+#    而这两个变量的默认值恰好不是 0 —— 镜像若取 0，"世界建好后的第一次推"
+#    会被守卫吃掉，Rapier 那边停在默认的 Average，而且**不报任何错**。
+#    （同一个坑在 rp_ccd_substeps 上踩过一次：默认 0 被守卫吃掉了。）
+var _rp_combine_pushed := Vector2i(-1, -1)
 
 
 ## 世界自己登记到查询模块，销毁时自己注销。
@@ -1284,6 +1321,14 @@ func _substep_rapier(dt: float) -> void:
 		_rp_f64(cmds, rp_max_corrective_velocity)
 		_rp_f64(cmds, rp_allowed_linear_error)
 		_rp_pixel_params_pushed = true
+	# 接触系数的合成规则（世界级）：**变了才推**。原生侧连**已有**的碰撞体一起改。
+	# ⚠️ 不推的后果是静默的：Rapier 停在默认的 Average —— 冰面半滑、球只弹一半，
+	#    而画面不会报任何错（见 friction_combine_rule 的说明）。
+	if Vector2i(friction_combine_rule, restitution_combine_rule) != _rp_combine_pushed:
+		_rp_u8(cmds, 47)
+		_rp_i32(cmds, friction_combine_rule)
+		_rp_i32(cmds, restitution_combine_rule)
+		_rp_combine_pushed = Vector2i(friction_combine_rule, restitution_combine_rule)
 	# 重力变了才推
 	if gravity != _rp_gravity_pushed:
 		_rp_u8(cmds, 1)

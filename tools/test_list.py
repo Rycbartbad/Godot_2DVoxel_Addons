@@ -32,6 +32,9 @@ GATES = [
     "validation_dynamics", "validation_nodes", "validation_alignment",
     "validation_shape_plugin", "validation_stress", "validation_facade_api",
     "validation_fluid", "validation_hull", "validation_poly",
+    ## ⚠️ 材质那条（摩擦/恢复系数的合成规则）从 94d166f 起就存在、也打印汇总行，
+    ##    却一直没进这张表 —— CI 与 promote 都不会跑它，等于没有闸门。
+    "validation_materials",
     ## 这两条原本零引用（「自称闸门却没人接线」）：汇总行格式统一后才进得了名单。
     "validation_facade_render", "validation_tile_incremental",
 ]

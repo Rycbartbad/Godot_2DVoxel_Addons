@@ -129,6 +129,22 @@ signal physics_step_finished(world)
 ## 兜底密度表（下标即 id，缺省 1.0）
 @export var densities_fallback: Array[float] = [0.0, 2.5, 0.6, 7.8, 2.0]
 
+## **两个材质的系数怎么合成**（Rapier CoefficientCombineRule）。默认"摩擦取几何平均、
+## 恢复取大"—— 见 PWorld.friction_combine_rule / restitution_combine_rule 里的实测理由
+## （Rapier 默认的"取平均"会把一方的材质稀释一半：冰面不滑、球只弹一半）。
+##
+## ⚠️ 下拉项的**顺序就是 Rapier 的判别值**（0..5），别随手调换 —— 换一次就是静默换规则。
+@export_enum("取平均", "取小(滑的一方赢)", "相乘", "取大(涩/弹的一方赢)", "截断求和",
+	"几何平均") var friction_combine_rule: int = PWorld.COMBINE_GEOMETRIC_MEAN:
+	set(v):
+		friction_combine_rule = v
+		_push_knob("friction_combine_rule", v)
+@export_enum("取平均", "取小", "相乘", "取大(更弹的一方赢)", "截断求和",
+	"几何平均") var restitution_combine_rule: int = PWorld.COMBINE_MAX:
+	set(v):
+		restitution_combine_rule = v
+		_push_knob("restitution_combine_rule", v)
+
 @export_group("观感")
 ## 体素在屏幕上的大小：1 = 细腻，3 = 大块像素（默认），8+ = Teardown 那种粗块。
 ##
@@ -283,7 +299,8 @@ func _ready() -> void:
 ## 物理旋钮清单（导出属性名）。_push_knob 的映射表 + 这里的清单必须覆盖同一批属性。
 const KNOBS: Array[String] = ["gravity", "fixed_dt", "max_substeps", "sleeping", "terminal_speed",
 	"max_linear_velocity", "max_angular_velocity", "ccd_ignore_mass",
-	"min_fragment_pixels", "debris_max_mass", "debris_min_speed"]
+	"min_fragment_pixels", "debris_max_mass", "debris_min_speed",
+	"friction_combine_rule", "restitution_combine_rule"]
 
 
 ## 把**一个**旋钮播到 world。**唯一的映射表** —— 每个 @export 的 setter 与
@@ -307,6 +324,8 @@ func _push_knob(prop: String, v: Variant) -> bool:
 		"min_fragment_pixels": world.min_fragment_pixels = int(v)
 		"debris_max_mass": world.debris_max_mass = v
 		"debris_min_speed": world.debris_min_speed = v
+		"friction_combine_rule": world.friction_combine_rule = int(v)
+		"restitution_combine_rule": world.restitution_combine_rule = int(v)
 		_:
 			push_error("PixelWorld: _push_knob 的映射表漏了 %s" % prop)
 			return false

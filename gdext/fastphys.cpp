@@ -154,6 +154,13 @@ alignas(16) static unsigned char g_str_empty_hint[64];
 //  46  body_get_inertia(u32 id)                   -> f64（Rapier 侧角惯量，诊断用）
 //  45  body_get_mass(u32 id)                      -> f64（Rapier 侧质量）
 //      判据用：拟合后的碰撞体面积 >= 像素面积，密度按质量反算 —— 两边质量不许分叉。
+//  47  world_set_combine_rules(i32 friction_rule, i32 restitution_rule)
+//      接触系数的**合成规则**（Rapier CoefficientCombineRule 的判别值：
+//      0 平均 / 1 取小 / 2 相乘 / 3 取大 / 4 截断求和 / 5 几何平均）。
+//      ⚠️ Rapier 的默认是 **0 平均**，它会把一方的材质稀释掉一半：球恢复 0.9 撞地面
+//         0.0 -> 0.45（回弹高度只剩 ~20%）；冰面摩擦 0.0 撞地面 0.5 -> 0.25（并不滑）。
+//         引擎默认推 5 + 3（摩擦几何平均、恢复取大），理由见 lib.rs 的 World::new。
+//      ⚠️ 这条是**世界级**的，原生侧连**已有**的碰撞体一起改 —— 不需要重建刚体。
 //  （35~37 曾用于"鼠标关节"抓取，已删除 —— 见 rapier_bridge/src/lib.rs 的墓碑注释）
 
 typedef void *RPWorld;
@@ -211,6 +218,8 @@ struct RapierApi {
 	void (*body_set_solver_iterations)(RPWorld, uint32_t, uint32_t) = nullptr;
 void (*body_set_friction)(RPWorld, uint32_t, double) = nullptr;
 void (*body_set_restitution)(RPWorld, uint32_t, double) = nullptr;
+	// 世界级：接触系数合成规则（Rapier CoefficientCombineRule 判别值，见 op 47 的说明）
+	void (*world_set_combine_rules)(RPWorld, int32_t, int32_t) = nullptr;
 	int32_t (*joint_set_softness)(RPWorld, uint32_t, double, double) = nullptr;
 	void (*world_set_joint_solver)(RPWorld, int32_t, int32_t, double) = nullptr;
 
@@ -292,6 +301,7 @@ static bool load_rapier() {
 	RP_GET(body_set_solver_iterations, "rb_body_set_solver_iterations")
 RP_GET(body_set_friction, "rb_body_set_friction")
 RP_GET(body_set_restitution, "rb_body_set_restitution")
+	RP_GET(world_set_combine_rules, "rb_world_set_combine_rules")
 	RP_GET(joint_set_softness, "rb_joint_set_softness")
 	RP_GET(world_set_joint_solver, "rb_world_set_joint_solver")
 
@@ -588,6 +598,14 @@ static void run_rapier_cmd(RapierInstance *inst, const uint8_t *in, size_t in_n,
 				int32_t it = r.i32(), ws = r.i32();
 				double coeff = r.f64();
 				g_rap.world_set_joint_solver(W, it, ws, coeff);
+				break;
+			}
+			// 47  世界级：接触系数合成规则（Rapier CoefficientCombineRule 判别值）。
+			//     ⚠️ 是**世界级**而不是逐刚体：材质表本来也是世界级的，规则跟着它走，
+			//        调用方只需要在"改了规则"时推一次（PWorld 用镜像值守这条）。
+			case 47: {
+				int32_t fr = r.i32(), rr = r.i32();
+				g_rap.world_set_combine_rules(W, fr, rr);
 				break;
 			}
 			default:
