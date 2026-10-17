@@ -30,6 +30,11 @@ GDScript 那份自研求解器**已全部删除**，只剩 native 一条路 —�
   （op 5 已删除）—— 完整表见 `gdext/fastphys.cpp` 顶部注释。
   PixelRaster 那条流是 1 填充 / 2 分解 / 3 连通分量 / **4 按材质分解**。
 
+**物理旋钮的单一真源是 `PhysicsConfig`**（Resource，57 个字段）：`world.apply_config(cfg)`
+一处下发；节点路径是把 `.tres` 拖到 `PixelWorld.physics` 上（设了它，节点上那些
+`@export` 旋钮就不再参与下发 —— 关卡里别设，见 `docs/manual/nodes.md`）。
+闸门 `tests/validation_physics_config.gd`。
+
 **引擎只提供机制，规则在游戏层。** 节点层尽量像 Godot 内置
 （`PixelWorld` / `PixelBody2D` / `PixelShape2D` / `PixelMaterial` / `DebugOverlay`）。
 

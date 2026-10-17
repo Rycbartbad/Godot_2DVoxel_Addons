@@ -588,6 +588,25 @@ var restitution_combine_rule := COMBINE_MAX
 var _rp_combine_pushed := Vector2i(-1, -1)
 
 
+## 把一份 PhysicsConfig **一处下发**到本世界（引擎侧的收口点）。
+##
+## ⚠️ 它就是 physics_config.gd 的 `apply()` —— 放这里只是让调用方少 preload 一次：
+##    `world.apply_config(cfg)` 与 `cfg.apply(world)` 是**同一件事**，
+##    别在第三个地方再写一遍"旋钮名 -> 字段名"的映射（本仓库在"同一规则写两处"上栽过太多次）。
+## ⚠️ 参数按 Resource 收（不 preload 配置类）：pworld 是被配置类描述的对象，
+##    让它反过来依赖配置类会绕成依赖环，而本仓库有一条 preload 环闸门
+##    （编辑器遇到环会无声段错误，见 check_addon.py 的 2c）。
+## ⚠️ 对不上的字段由 apply() **吵闹地**报出来（返回值 + push_error）——
+##    `Object.set()` 对不存在的属性是静默失败，那正是这条链路最怕的失败方式。
+func apply_config(cfg: Resource) -> PackedStringArray:
+	if cfg == null:
+		return PackedStringArray()
+	if not cfg.has_method("apply"):
+		push_error("PWorld.apply_config: 传进来的不是 PhysicsConfig（没有 apply()）：%s" % str(cfg))
+		return PackedStringArray()
+	return cfg.apply(self)
+
+
 ## 世界自己登记到查询模块，销毁时自己注销。
 ##
 ## ⚠️ 为什么不让调用方手动 attach：Query 的注册表是**静态变量**，

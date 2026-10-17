@@ -262,6 +262,26 @@ renderer.forget_blueprint(id)
 
 ## 物理与破坏旋钮（Inspector 里可调）
 
+⚠️ **旋钮的单一真源是 `PhysicsConfig`（Resource）**：它把 57 个旋钮收在一个资源里、**一处下发**。
+新场景请用它；下面那些 `@export` 只是"还没换过来的老场景"的接收端。
+
+```gdscript
+world.apply_config(cfg)      # 代码路径（等价于 cfg.apply(world)）
+```
+
+节点路径则是把 `.tres` 拖到 `PixelWorld.physics` 上（`rebuild()` / `push_physics_settings()` 时下发）。
+
+`apply()` 逐字段下发，**字段名就是 `PWorld` 的字段名**（不造第二套命名，也就不需要映射表）；
+**名字对不上会吵闹地报**（返回值 + `push_error`）—— `Object.set()` 对不存在的属性是静默失败，
+而"旋钮静默失效"正是这个类要消灭的东西（踩过：改了 `@export`，`world` 那边还是 0）。
+`capture(world)` / `diff(world)` 与它对称，探针里做"现值快照 / 逐项对照"用它们。
+
+> ⚠️ **一旦 `PixelWorld.physics` 设了配置，下面这些 `@export` 就不再参与下发**（配置说了算）。
+> 两处都设时是"谁最后写谁赢"（config 在 rebuild/push 时下发，而 `@export` 的 setter 是改了立刻播）——
+> 那种"看起来生效了、其实被覆盖"最难查，所以**关卡里别设这些**，要改就改 config。
+> 闸门：`tests/validation_physics_config.gd`（默认值 = `PWorld` 现值逐位不变、每个字段都真的下发、
+> 缺字段会列出来、config 优先于旧 `@export`、没设 config 时老路照旧）。
+
 `PixelWorld` 把这些旋钮**导出**了，编辑器里就能改（"物理"/"破坏"两个组）；
 `rebuild()` 与 `push_physics_settings()` 会播到 `PWorld`。
 

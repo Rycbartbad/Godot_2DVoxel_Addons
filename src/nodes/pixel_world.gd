@@ -31,6 +31,7 @@ const PixelMaterial := preload("res://src/nodes/pixel_material.gd")
 const PixelSprite2D := preload("res://src/nodes/pixel_sprite_2d.gd")
 const PixelJoint2D := preload("res://src/nodes/pixel_joint_2d.gd")
 const PixelScale := preload("res://src/core/pixel_scale.gd")
+const PhysicsConfig := preload("res://src/physics/physics_config.gd")
 
 
 ## **每个固定步**走完时发出，参数就是这个世界。
@@ -52,6 +53,18 @@ signal physics_step_finished(world)
 #    于是"设了阈值却一个碎片都没清"，查了半天。静默不生效是最坏的失败方式。
 #    世界还没建时（场景反序列化、_ready 之前）setter 只记值，rebuild() 会播。
 @export_group("物理")
+## **物理旋钮的唯一真源**（可选，推荐）：拖一份 PhysicsConfig.tres 进来，
+## rebuild / push_physics_settings 时它会被**一处下发**（见 push_physics_settings）。
+##
+## ⚠️⚠️ 一旦设了它，下面那些 @export 旋钮就**不再参与下发** —— 它们只是"还没用 config 的
+##    老场景"的接收端（老关卡因此不炸）。两处都设时：config 在 rebuild/push 时下发，
+##    而 @export 的 setter 是"改了立刻播"，于是**谁最后写谁赢** —— 那种
+##    "看起来生效了、其实被覆盖"最难查，所以：**关卡里别设下面这些**，要改就改 config。
+@export var physics: PhysicsConfig:
+	set(v):
+		physics = v
+		# 与其它旋钮同一条契约：**改了立刻生效**（世界还没建时 push 会安全早返回，rebuild 再播）
+		push_physics_settings()
 @export var gravity := Vector2(0, 600):
 	set(v):
 		gravity = v
@@ -297,6 +310,11 @@ func _ready() -> void:
 
 
 ## 物理旋钮清单（导出属性名）。_push_knob 的映射表 + 这里的清单必须覆盖同一批属性。
+##
+## ⚠️ 它们是**接收端**：新场景请用上面的 `physics`（PhysicsConfig）一处下发；
+##    关卡里别单独设这些 @export（理由见 physics 的说明）。
+## ⚠️ 这份清单只覆盖"节点上真的导出过"的那批 —— 完整的旋钮表在 PhysicsConfig
+##    （它按 PWorld 的字段名逐个下发，见 tests/validation_physics_config.gd）。
 const KNOBS: Array[String] = ["gravity", "fixed_dt", "max_substeps", "sleeping", "terminal_speed",
 	"max_linear_velocity", "max_angular_velocity", "ccd_ignore_mass",
 	"min_fragment_pixels", "debris_max_mass", "debris_min_speed",
@@ -339,6 +357,12 @@ func _push_knob(prop: String, v: Variant) -> bool:
 ##    **别为改一个阈值去调 rebuild()**（那会重建世界、把破坏状态全丢掉）。
 func push_physics_settings() -> void:
 	if world == null:
+		return
+	if physics != null:
+		# ⚠️⚠️ 配置是**唯一真源**：下发之后**不再**按节点上的 @export 覆盖它 ——
+		#    否则"关卡里残留的一行旧值"会静默压掉配置，而配置存在的意义正是收口。
+		#    缺字段由 PhysicsConfig.apply() 自己吵闹地报（返回值 + push_error）。
+		physics.apply(world)
 		return
 	for k in KNOBS:
 		_push_knob(k, get(k))

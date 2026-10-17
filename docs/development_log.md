@@ -5540,3 +5540,58 @@ Box2D（摩擦 `sqrt(μ₁·μ₂)`、恢复 `max`）、Bullet/PhysX 这些引�
 - 多材质刚体现在走**矩形**碰撞体（`poly_colliders` 那条路会让不同材质并进一个多边形）。
 - 四种演示材质终于有了**各自**的摩擦/恢复（石头 0.8/0.05、木头 0.6/0.15、铁 0.3/0.08、砖 0.7/0.02）——
   在那之前它们全是默认 0.5/0.0，摸起来一模一样。
+
+---
+
+# 旋钮收口：`PhysicsConfig`（单一真源 + 一处下发）
+
+## 症状
+
+同一个旋钮最多有**三个家**：`PWorld` 的字段、`PixelWorld` 的 `@export`、门面
+`configure(opts)` 的键表 —— 三份默认值各自演化，"现值是多少"要读三个文件才能回答。
+更糟的是下发方式：每个调用点自己写 `world.set(name, value)`，而
+**`Object.set()` 对不存在的属性是静默失败** —— 旋钮不生效，不报错（甲方踩过：
+改了 `@export`，`world` 那边还是 0）。
+
+## 做了什么（**只动引擎**）
+
+| 位置 | 改动 |
+|---|---|
+| `src/physics/physics_config.gd` | **新增** `class_name PhysicsConfig`（Resource）：57 个旋钮字段 + `apply/capture/diff/knob_names` |
+| `src/physics/pworld.gd` | **新增** `apply_config(cfg)`（薄包装；参数按 `Resource` 收，避免依赖环）|
+| `src/nodes/pixel_world.gd` | **新增** `@export var physics: PhysicsConfig`；设了就由它下发，**旧 @export 不再覆盖它** |
+| `addon_src/README.md` / `pixel_physics.gd` / 手册 | 标注"这些 @export 由上层 config 下发，**关卡里别设**"；门面的 opts 入口降级为"老调用方保留" |
+
+**关键设计：字段名就是 `PWorld` 的字段名** —— 不造第二套命名，于是 `apply()` 可以
+逐字段 `world.set()`，**不需要映射表**（本仓库在"同一规则写两处"上栽过太多次）。
+名字对不上时它**吵闹地报**（返回缺失名单 + `push_error`）。
+
+```gdscript
+world.apply_config(cfg)      # 代码路径（= cfg.apply(world)）
+# 节点路径：把 .tres 拖到 PixelWorld.physics 上
+```
+
+## 闸门（tests/validation_physics_config.gd，13 项）
+
+判据全部是"下发之后世界变成什么样"，不是"字段存在"：
+
+| 判据 | 为什么 |
+|---|---|
+| 全新配置下发到全新世界 -> **每个字段逐位不变** | 抓"默认值搬错了"（手感静默改变）|
+| 每个字段设成探针值 -> 世界逐个收到 | 抓"名字写错了"（`set()` 静默失败）|
+| `capture -> apply` 往返一致 | "现值快照"真的可用 |
+| 假世界（只有一个字段）-> 缺失名单列全 + 报错 | 吵闹，不是静默跳过 |
+| KNOBS 映射到的 13 个世界字段都在 config 里 | 漏一个 = 改用 config 的场景**静默丢掉**那个旋钮 |
+| 设了 physics：配置赢；没设：老路照旧 | 收口 + 老场景不炸，两条都要 |
+
+## 回归
+
+- 全部闸门（含新增这条）全绿；`dump_state` 8 条基准**逐位不变**（新代码只在
+  "设了 physics" 那条路上生效，老场景走的还是原路径）。
+- 57 个字段的默认值与 `PWorld` **逐位相同** —— 这条由闸门第 ① 项保证，不是人工核对。
+
+## 没做的事（留给游戏工程）
+
+- 关卡里的钳制行、游戏侧的 `physics_step`、测试夹具的 `world.gravity` 归口
+  —— 那些在 **ink-2** 工程里（本仓库一行不碰）。⚠️ ink-2 那边**不要再建**
+  `root/src/physics_config.gd`：引擎已经提供了 `class_name PhysicsConfig`，同名会撞。
