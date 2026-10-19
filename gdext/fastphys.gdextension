@@ -8,3 +8,24 @@ reloadable = false
 
 windows.debug.x86_64 = "res://gdext/fastphys.dll"
 windows.release.x86_64 = "res://gdext/fastphys.dll"
+
+; Android：产物由 `python tools/build_native.py --android` 生成（gdext/<abi>/）。
+; ⚠️ 文件名必须叫 libfastphys.so（Godot 的 Android 导出强制 lib 前缀），
+;    按 ABI 分目录只是为了两个 ABI 的 basename 能一致（见 tools/build_native.py 的说明）。
+android.debug.arm64 = "res://gdext/arm64/libfastphys.so"
+android.release.arm64 = "res://gdext/arm64/libfastphys.so"
+android.debug.x86_64 = "res://gdext/x86_64/libfastphys.so"
+android.release.x86_64 = "res://gdext/x86_64/libfastphys.so"
+
+[dependencies]
+
+; 第二个 .so（Rust 桥接层）靠 [dependencies] 进 APK 的 lib/<abi>/ ——
+; 不写这几行 = 手机上 fastphys 加载不到桥接层 -> **物理完全不动**，而且不报错。
+; ⚠️ 这里的键用 feature 集合 android.arm64（debug/release 都命中），
+;    与上面 libraries 的 android.release.arm64 形式不同是**有意的**：依赖不按构建类型分。
+android.arm64 = {
+"res://gdext/arm64/librapier_bridge.so": ""
+}
+android.x86_64 = {
+"res://gdext/x86_64/librapier_bridge.so": ""
+}

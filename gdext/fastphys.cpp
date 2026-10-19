@@ -15,6 +15,12 @@
 //   Variant 副本，_copy_on_write 会把写入落到副本上，调用方看不到。
 //   所以输出走**返回值**：先用拷贝构造函数按模板复制出一个等长数组，再写它。
 
+// ⚠️ 必须在**任何系统头之前**：glibc 的 Dl_info（dladdr）只有 _GNU_SOURCE 下才可见。
+//    Android 的 bionic 无条件提供，这一条是为了 Linux 桌面构建也能过。
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "gdextension_interface.h"
 #include <algorithm>
 // PixelFluid 的 push_apart 要用 std::sqrt（与 GDScript 的 sqrt() 同为 IEEE 正确舍入，
@@ -23,9 +29,22 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
+#include <cstdarg>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+// ================= 平台层：动态库加载 + 导出符号 =================
+//
+// Windows 用 LoadLibrary/GetProcAddress，Linux/Android 用 dlopen/dlsym。
+//
+// ⚠️ 为什么是**运行时**加载而不是链接期耦合：Windows 侧本 DLL 是 MinGW g++ 编的、
+//    rapier_bridge.dll 是 MSVC Rust 编的 —— 跨 C++ ABI 不现实，跨 C 函数指针才是标准做法。
+//    Android 侧两边都是同一套 NDK clang，本来可以直接静态链，但**不要**：
+//    .gdextension 的 [dependencies] 能把第二个 .so 原样放进 APK 的 lib/<abi>/，
+//    两个平台共用同一条「独立库 + 运行时加载」的路径更简单，也省掉了
+//    「用 -Wl,--undefined 钉住 45 个符号 + 打开自己再 dlsym」那套复杂度。
+#ifdef _WIN32
 // windows.h 只用来做运行时动态加载；宏要收窄，否则 min/max 会污染其它头
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -34,6 +53,101 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+using FpDynLib = HMODULE;
+#define FP_EXPORT __declspec(dllexport)
+#define FP_LIB_NAME "rapier_bridge.dll"
+#else
+#include <dlfcn.h>
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
+using FpDynLib = void *;
+#define FP_EXPORT __attribute__((visibility("default")))
+// ⚠️ 三个平台的库名不同：lib<name>.so（Linux/Android）/ lib<name>.dylib（macOS）。
+//    macOS **没有**被 tools/build_native.py 构建、也**没有测过** —— 这里只是让"按名字找"
+//    不要在 macOS 上指向一个根本不存在的 .so（.gitignore 里的 *.dylib 是历史遗留）。
+#if defined(__APPLE__)
+#define FP_LIB_NAME "librapier_bridge.dylib"
+#else
+#define FP_LIB_NAME "librapier_bridge.so"
+#endif
+#endif
+
+// 返回**本库自己所在目录**（带尾部分隔符）；拿不到就返回空串。
+static std::string fp_self_dir(const void *anchor) {
+#ifdef _WIN32
+	char self[MAX_PATH] = { 0 };
+	HMODULE mod = nullptr;
+	if (::GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			(LPCSTR)anchor, &mod) && mod != nullptr) {
+		::GetModuleFileNameA(mod, self, MAX_PATH);
+	}
+	std::string s(self);
+#else
+	// Linux/Android：dladdr 拿本 .so 的完整路径。
+	// ⚠️ Android 上 extractNativeLibs=false 时库是从 APK 里直接映射的，dli_fname 给的是
+	//    APK 内的虚拟路径 —— 但同目录的兄弟库依然能被 dlopen 打开（Android 把
+	//    <apk>!/lib/<abi> 放进了 linker 的搜索路径）。所以这里只取目录，不假设它真实存在。
+	Dl_info info;
+	std::memset(&info, 0, sizeof(info));
+	std::string s;
+	if (::dladdr(anchor, &info) != 0 && info.dli_fname != nullptr) s.assign(info.dli_fname);
+#endif
+	for (int i = (int)s.size() - 1; i >= 0; --i) {
+		if (s[i] == '\\' || s[i] == '/') return s.substr(0, (size_t)i + 1);
+	}
+	return std::string();
+}
+
+static FpDynLib fp_dynlib_open(const std::string &p) {
+#ifdef _WIN32
+	return ::LoadLibraryA(p.c_str());
+#else
+	return ::dlopen(p.c_str(), RTLD_NOW | RTLD_LOCAL);
+#endif
+}
+
+static void *fp_dynlib_sym(FpDynLib lib, const char *name) {
+#ifdef _WIN32
+	return (void *)::GetProcAddress(lib, name);
+#else
+	return ::dlsym(lib, name);
+#endif
+}
+
+static std::string fp_dynlib_error() {
+#ifdef _WIN32
+	return "GetLastError=" + std::to_string((unsigned long)::GetLastError());
+#else
+	const char *e = ::dlerror();
+	return std::string(e != nullptr ? e : "unknown");
+#endif
+}
+
+// 日志：Android 上 stdout 默认不进 logcat（app 的 stdout 指向 /dev/null），
+// 关键路径必须显式走 __android_log_print。
+// 缺了它，Android 上「物理完全不动」这类故障在 logcat 里是**一片空白**。
+static void fp_log(const char *fmt, ...) {
+	char buf[2048];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, ap);
+	va_end(ap);
+	printf("%s", buf);
+#ifdef __ANDROID__
+	__android_log_print(ANDROID_LOG_INFO, "FastPhys", "%s", buf);
+#endif
+}
+
+// ⚠️⚠️ 把后面**所有** printf 改走 fp_log —— 用宏而不是逐条替换，是为了不再犯
+//    「新增一条 printf 忘了换」：只有 4 条走 fp_log 的那一版，Android 上等于没有诊断，
+//    而诊断里恰恰有「未知操作码 %d（命令流错位），就此中止」这种**唯一指纹**。
+// ⚠️ 宏必须放在 fp_log 定义**之后**：它自己内部那句 printf 在文本上更靠前，
+//    不会被替换 —— 否则就是无限递归（栈很快爆，症状像"启动就崩"）。
+// ⚠️ 这条宏只覆盖 `printf` 这个标识符；fprintf / snprintf / vsnprintf 是独立标识符，
+//    不受影响。以后加日志就用 printf / fp_log，别混 fprintf —— 否则"进不进 logcat"会变得不确定。
+#define printf fp_log
+
 
 static GDExtensionInterfaceGetProcAddress g_get_proc_address = nullptr;
 static GDExtensionClassLibraryPtr g_library = nullptr;
@@ -76,8 +190,9 @@ alignas(16) static unsigned char g_str_empty_hint[64];
 // ================= RapierPhys：把物理交给 Rapier =================
 //
 // 只做**薄包装**，两个理由：
-//   · 桥接层 rapier_bridge.dll 是 MSVC Rust 编的，本 DLL 是 MinGW g++ 编的 ——
-//     链接期混用导入库容易出问题，所以用 LoadLibrary **运行时**取函数指针。
+//   · 桥接层（rapier_bridge.dll / librapier_bridge.so）是 Rust 编的，本库是 C++ 编的 ——
+//     Windows 上还是 MinGW ↔ MSVC 两套工具链，链接期混用导入库容易出问题，
+//     所以统一走 LoadLibrary / dlopen **运行时**取函数指针。
 //   · GDScript 侧只有**一个**方法 cmd(in, out)：in 是命令流，out 是结果流。
 //     手写 GDExtension 的注册样板很重，注册面越小越好；而且这层胶水迟早会被
 //     真正的 PWorld 集成取代（那时命令流会变成批量位姿/矩形同步）。
@@ -170,7 +285,7 @@ alignas(16) static unsigned char g_str_empty_hint[64];
 typedef void *RPWorld;
 
 struct RapierApi {
-	HMODULE dll = nullptr;
+	FpDynLib dll = nullptr;
 	RPWorld (*world_new)() = nullptr;
 	void (*world_free)(RPWorld) = nullptr;
 	void (*world_set_gravity)(RPWorld, double, double) = nullptr;
@@ -243,27 +358,24 @@ static void rapier_anchor() {}
 static bool load_rapier() {
 	if (g_rap.tried) return g_rap.ok;
 	g_rap.tried = true;
-	// 先找本 DLL 所在目录，再退回默认搜索路径（exe 目录 / cwd / PATH）
-	char self[MAX_PATH] = { 0 };
-	HMODULE mod = nullptr;
-	if (::GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-			(LPCSTR)&rapier_anchor, &mod) && mod != nullptr) {
-		::GetModuleFileNameA(mod, self, MAX_PATH);
-	}
-	std::string dir;
-	for (int i = (int)std::strlen(self) - 1; i >= 0; --i) {
-		if (self[i] == '\\' || self[i] == '/') { dir.assign(self, (size_t)i + 1); break; }
-	}
-	std::string local = dir + "rapier_bridge.dll";
-	g_rap.dll = ::LoadLibraryA(local.c_str());
-	if (g_rap.dll == nullptr) g_rap.dll = ::LoadLibraryA("rapier_bridge.dll");
+	// 先找本库所在目录的兄弟库，再退回默认搜索路径。
+	//   Windows：exe 目录 / cwd / PATH
+	//   Android：lib/<abi>/ 由 linker 直接搜 —— .gdextension 的 [dependencies] 保证
+	//            librapier_bridge.so 就在那里（文件名带 lib 前缀是 Android 的硬要求）
+	const std::string dir = fp_self_dir((const void *)&rapier_anchor);
+	const std::string local = dir + FP_LIB_NAME;
+	// resolved 记的是**真正成功的那条路径**，只用于最后的日志 ——
+	// 打印 local（第一条尝试、通常已经失败）会把排查引偏。
+	std::string resolved = local;
+	g_rap.dll = fp_dynlib_open(local);
+	if (g_rap.dll == nullptr) { g_rap.dll = fp_dynlib_open(FP_LIB_NAME); resolved = FP_LIB_NAME; }
 	if (g_rap.dll == nullptr) {
-		printf("[RapierPhys] 加载 rapier_bridge.dll 失败（GetLastError=%lu）\n", (unsigned long)::GetLastError());
+		fp_log("[RapierPhys] 加载 %s 失败（%s）\n", FP_LIB_NAME, fp_dynlib_error().c_str());
 		return false;
 	}
 #define RP_GET(field, name) \
-	g_rap.field = (decltype(g_rap.field))::GetProcAddress(g_rap.dll, name); \
-	if (g_rap.field == nullptr) { printf("[RapierPhys] 缺少符号 %s\n", name); return false; }
+	g_rap.field = (decltype(g_rap.field))fp_dynlib_sym(g_rap.dll, name); \
+	if (g_rap.field == nullptr) { fp_log("[RapierPhys] 缺少符号 %s\n", name); return false; }
 	RP_GET(world_new, "rb_world_new")
 	RP_GET(world_free, "rb_world_free")
 	RP_GET(world_set_gravity, "rb_world_set_gravity")
@@ -314,7 +426,7 @@ RP_GET(body_set_restitution, "rb_body_set_restitution")
 
 #undef RP_GET
 	g_rap.ok = true;
-	printf("[RapierPhys] rapier_bridge.dll 已加载: %s\n", local.c_str());
+	fp_log("[RapierPhys] Rapier 后端就绪，符号来自: %s\n", resolved.c_str());
 	return true;
 }
 
@@ -2392,7 +2504,7 @@ static void deinitialize(void *p_userdata, GDExtensionInitializationLevel p_leve
 	if (p_level == GDEXTENSION_INITIALIZATION_SCENE) printf("[FastPhys] 反初始化\n");
 }
 
-extern "C" __declspec(dllexport) GDExtensionBool gdextension_init(
+extern "C" FP_EXPORT GDExtensionBool gdextension_init(
 		GDExtensionInterfaceGetProcAddress p_get_proc_address,
 		GDExtensionClassLibraryPtr p_library,
 		GDExtensionInitialization *r_initialization) {

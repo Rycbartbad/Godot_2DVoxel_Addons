@@ -23,6 +23,11 @@ docs/api/
 #   其它平台/中间产物不提交：
 gdext/*.so
 gdext/*.dylib
+# ⚠️ Android 的两个 .so 在 gdext/<abi>/ 里（arm64/ 与 x86_64/），上面那条
+#    `gdext/*.so` **够不到子目录** —— 少这一行的话 `git add -A` 会把
+#    6.5 MB 的交叉编译产物一起提交进去，和上面「只提交 Windows DLL」的政策打架。
+#    消费方自己跑 tools/build_native.py --android 生成即可。
+gdext/*/*.so
 # 链接器的临时备份文件（g++ 会留下 ~<name>.dll）
 gdext/~*
 gdext/*.o

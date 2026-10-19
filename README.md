@@ -52,13 +52,25 @@ godot --headless --editor --quit --path .     # 扫描一次，注册扩展
 
 ## 构建原生加速
 
+一条命令（Windows / Android 都是它 —— **别手敲 g++**，那套参数已经变过两次，
+而 README 里照抄旧参数会得到一个加载报错误 126 的 DLL）：
+
 ```bash
-cd gdext
-g++ -O2 -std=c++17 -ffp-contract=off -shared -static-libgcc -static-libstdc++ -I.. -o fastphys.dll fastphys.cpp
+python tools/build_native.py             # Windows：gdext/fastphys.dll + rapier_bridge.dll
+python tools/build_native.py --android   # Android：gdext/<abi>/lib{fastphys,rapier_bridge}.so
 ```
 
-`-ffp-contract=off` 不能省：少了它编译器会把浮点乘加融合成 FMA，与 GDScript 路径立刻分叉。
-构建前先关掉占用 dll 的 Godot 进程，否则链接会报 Permission denied。
+- **Windows**：要 MinGW g++ 与 cargo。`-static` 与 `-ffp-contract=off` 不能省 ——
+  少了前者漏 winpthread（加载报**错误 126**），少了后者浮点乘加会被融成 FMA、与参照实现分叉。
+  构建前先关掉占用 dll 的 Godot 进程，否则链接会报 Permission denied（或静默不产出）。
+- **Android**：要 NDK（`ANDROID_NDK_HOME`，或 `D:\ink2-android\sdk\ndk` / `%LOCALAPPDATA%\Android\Sdk\ndk`）
+  与 `rustup target add aarch64-linux-android x86_64-linux-android`。
+  产物 API 级别 **24** —— 项目 minSdk 低于 24 时设备上会加载失败。
+  ⚠️ 两个 ABI 的 basename 必须都叫 `libfastphys.so`（Godot 的 Android 导出硬性要求 lib 前缀），
+  只能靠目录区分；桥接库走 `.gdextension` 的 `[dependencies]` 进 APK。
+- **放进 addon**：先 `python tools/build_addon.py`（它会**整目录重建**），再
+  `python tools/build_native.py --android --out addons/pixel_destruction/native` ——
+  顺序反了会把刚拷进去的 .so 一起删掉。
 
 ## 引擎包（addon）：**生成物，不进仓库**
 

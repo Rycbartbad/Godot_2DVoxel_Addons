@@ -53,12 +53,14 @@ GDIGNORE = """# 这是构建产物（tools/build_addon.py 从 src/ + gdext/ + ad
 """
 ## 从 gdext/ 打包哪些原生源码。
 ##
-## ⚠️ 现在是**两个**动态库，都要编译出来放进 native/：
-##     · fastphys.dll       GDExtension 入口（MinGW g++ 编）
-##     · rapier_bridge.dll  Rust + Rapier（MSVC cargo 编，由前者运行时 LoadLibrary）
+## ⚠️ 是**两个**动态库，都要编译出来放进 native/：
+##     · fastphys       GDExtension 入口（C++；Windows 用 MinGW g++，Android 用 NDK clang++）
+##     · rapier_bridge  Rust + Rapier（由前者运行时 LoadLibrary / dlopen）
 ##    只放一个会加载失败 —— 而且症状是"物理完全不动"，不是报错。
 ##    手写内核（collide_kernel.h / bp_kernel.h / solver_kernel.h）已随 Rapier
 ##    迁移删除，见 docs/development_log.md。
+##
+## Android 的两个 .so 放在 native/<abi>/ 里（见下面的 GDEXTENSION_TEMPLATE）。
 NATIVE_SRC = [
     "fastphys.cpp",
     "rapier_bridge/Cargo.toml",
@@ -69,6 +71,16 @@ NATIVE_SRC = [
 ## 扩展名故意不是 .gdextension —— Godot **编辑器**会自动扫描并加载项目里的
 ## .gdextension，而这个包里没有编译好的 .dll，留着会每次导入都报
 ## "GDExtension dynamic library not found"。要用原生加速就去掉 .template 后缀。
+##
+## ⚠️ Android 那几行同理：native/<abi>/ 里的 .so 要自己构建（tools/build_native.py
+##    --android）才会有，没构建时这几行只是摆设，不会更糟 —— 但一旦构建了就能直接
+##    导出 Android，不用再改这个文件。
+##
+## ⚠️ rapier_bridge 走 [dependencies] 而**不是**静态链进 fastphys。别改回去：
+##    静态链要 (1) 用 -Wl,--undefined 把每个 rb_* 符号钉住（代码是 dlsym 按名字查的，
+##    链接器看不到引用），(2) 运行时"打开自己"再 dlsym（Godot 用 RTLD_LOCAL 加载扩展，
+##    glibc 的 dlsym(RTLD_DEFAULT) 搜不到）。[dependencies] 把第二个 .so 直接放进
+##    lib/<abi>/，两个平台就共用同一条「独立库 + 运行时加载」的路。
 GDEXTENSION_TEMPLATE = """[configuration]
 
 entry_symbol = "gdextension_init"
@@ -81,6 +93,31 @@ windows.debug.x86_64 = "res://addons/pixel_destruction/native/fastphys.dll"
 windows.release.x86_64 = "res://addons/pixel_destruction/native/fastphys.dll"
 linux.debug.x86_64 = "res://addons/pixel_destruction/native/fastphys.so"
 linux.release.x86_64 = "res://addons/pixel_destruction/native/fastphys.so"
+
+; Android：每个 ABI 一个 .so，但**文件名必须都叫 libfastphys.so**。
+;   1. Godot 的 Android 导出强制 .so 文件名以 "lib" 开头（save_apk_so 里硬性检查）；
+;   2. 运行时 OS_Android::open_dynamic_library 在 res:// 里找不到这个文件时，会退化成
+;      dlopen(p_path.get_file()) —— 只用文件名让 Android 的 linker 去 lib/<abi>/ 里找。
+;   所以按 ABI 分目录、basename 保持一致。
+android.debug.arm64 = "res://addons/pixel_destruction/native/arm64/libfastphys.so"
+android.release.arm64 = "res://addons/pixel_destruction/native/arm64/libfastphys.so"
+android.debug.x86_64 = "res://addons/pixel_destruction/native/x86_64/libfastphys.so"
+android.release.x86_64 = "res://addons/pixel_destruction/native/x86_64/libfastphys.so"
+
+[dependencies]
+
+; rapier_bridge 是**第二个 .so**，靠 [dependencies] 进 APK 的 lib/<abi>/。
+; 源码链路（4.7.2 核过）：
+;   gdextension_export_plugin.h -> GDExtensionLibraryLoader::find_extension_dependencies()
+;   -> EditorExportPlugin::shared_objects -> EditorExportPlatform::export_project_files()
+;   -> EditorExportPlatformAndroid::save_apk_so()      # dst_path = "lib"/abi/<basename>
+; 唯一的约束同样是文件名必须以 "lib" 开头。
+android.arm64 = {
+"res://addons/pixel_destruction/native/arm64/librapier_bridge.so": ""
+}
+android.x86_64 = {
+"res://addons/pixel_destruction/native/x86_64/librapier_bridge.so": ""
+}
 """
 
 

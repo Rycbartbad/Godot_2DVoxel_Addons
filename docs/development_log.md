@@ -5595,3 +5595,52 @@ world.apply_config(cfg)      # 代码路径（= cfg.apply(world)）
 - 关卡里的钳制行、游戏侧的 `physics_step`、测试夹具的 `world.gravity` 归口
   —— 那些在 **ink-2** 工程里（本仓库一行不碰）。⚠️ ink-2 那边**不要再建**
   `root/src/physics_config.gd`：引擎已经提供了 `class_name PhysicsConfig`，同名会撞。
+
+---
+
+# 原生层跨平台：Android（arm64 / x86_64）
+
+## 做了什么
+
+`fastphys.cpp` 抽出**平台层**：`fp_self_dir` / `fp_dynlib_open` / `fp_dynlib_sym` /
+`fp_dynlib_error` / `fp_log`（Windows `LoadLibrary` ↔ Linux/Android `dlopen`）、
+`_GNU_SOURCE` 必须在系统头**之前**（`dladdr`）、`FP_EXPORT`（`__declspec(dllexport)` ↔
+`visibility("default")`）、macOS 的 `.dylib` 分支。
+
+`tools/build_native.py --android`：NDK 定位（找不到**响亮退出**，不退用本机 g++ ——
+那会产出 x86_64 的 .so 塞进 arm64 目录）、两个 ABI 的 cargo 交叉编译 + clang++ 入口编译、
+`llvm-nm` 核对 `gdextension_init` 与 **46 个 `rb_*`** 符号。
+
+`.gdextension`：`<abi>/libfastphys.so` 按 ABI 分目录（basename 必须一致 —— Godot 的
+Android 导出强制 `lib` 前缀），桥接库走 `[dependencies]` 进 APK 的 `lib/<abi>/`。
+
+## 这一轮补的洞（都是"真机上会静默出错"的那类）
+
+| # | 洞 | 症状 | 修法 |
+|---|---|---|---|
+| 1 | 仓库自己的 `gdext/fastphys.gdextension` 没有 Android 条目 | 在**本仓库**导 Android：扩展根本不加载 | 补 4 条 libraries + 2 条 dependencies |
+| 2 | `printf` 28 处里只有 4 处走 `fp_log` | Android 上 logcat **一片空白** —— 连"未知操作码（命令流错位），就此中止"这条唯一指纹都看不到 | `#define printf fp_log`（放在 `fp_log` 之后，否则自递归）；缓冲区 1024 -> 2048 |
+| 3 | 模板里的 Android 路径没人校验 | ABI 目录写错 / 漏 `[dependencies]` 都不报错 -> "手机上物理不动" | `check_addon.py` 新增 2f：解析两份 `.gdextension`，查 ABI 目录、`lib` 前缀、依赖是否同 ABI |
+| 4 | `--android` 只能落 `gdext/`，而 addon 要 `native/<abi>/` | 手拷的 .so 下次 `build_addon`（整目录重建）被删 | 新增 `--out`，文档写清"先 build_addon 再拷" |
+| 5 | Android 构建只看 `is_file()` | "报告成功但产物是旧的"（cargo 命中缓存 / copyfile 失败） | 照 Windows 那条补 mtime 新鲜度断言 |
+| 6 | 没开 `-fvisibility=hidden` | 符号面大（411,320 -> **407,768** bytes / arm64） | 加上；`gdextension_init` 仍由 `FP_EXPORT` 导出（构建期核对） |
+| 7 | macOS 会去找 `.so` | 找错库名 | `__APPLE__` 分支给 `.dylib`，并注明"未构建、未测" |
+| 8 | `wanted_symbols()` 只跳整行注释 | 行尾注释里的 `RP_GET(...)` 会伪报"缺符号" | 先切 `//` 再匹配 |
+
+闸门 2f 是**探针反证**过的：故意把 arm64 指到 x86_64 目录 -> 报 2 条；删掉
+`[dependencies]` -> 报 1 条；恢复后全绿。（这条经验来自 `check_docs` 那次的教训：
+会误报的闸门比没有闸门更糟 —— 所以还得证明它**抓得到**。）
+
+## 未做（明确留白）
+
+- **Linux 桌面**：C++ 侧能编（dlopen 路径 + 模板里的 `linux.*`），但没有 `--linux` 构建路；
+  模板那两条指向的 `native/fastphys.so` 没有任何工具会生成 —— **别当它是支持的**。
+- **CI 里没有 Android 构建**（要 NDK）。2f 闸门是"不需要 NDK 的那一半"。
+- **真机验证**：目前只验证到"能编、符号齐、模板自洽"；`[dependencies]` 是否真的进了 APK，
+  判据是 `unzip -l app.apk | grep lib/` 里有两个 `.so`（见 addon README）。
+
+## 回归
+
+- Windows：24 条闸门全绿、`dump_state` 8 条基准**逐位不变**
+  （`printf -> fp_log` 只换输出通道，文字与顺序逐字节相同）。
+- Android：两个 ABI 都构建成功，`gdextension_init` 在、`rb_*` **46/46**。

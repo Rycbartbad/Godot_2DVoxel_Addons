@@ -219,6 +219,81 @@ def main() -> int:
                 if not os.path.isfile(target):
                     errors.append("%s 引用了不存在的 %s" % (os.path.relpath(p, OUT), m.group(0)))
 
+    # 2f) `.gdextension` 里的 Android 条目必须自洽（**不需要 NDK** 就能查）。
+    #
+    # ⚠️ 为什么必须有这一条：Android 那几条指向"编好才存在"的路径，而 CI 没有 NDK、
+    #    发布包里也不带 .so —— 写错了**没有任何东西**会报错，症状是
+    #    「装到手机上物理完全不动」（扩展没加载 / 桥接库没进 APK，都不抛异常）。
+    #    这里查的都是纯静态的事，但正好覆盖那两类事故：
+    #      ① libraries 里 android.* 的路径必须落在 <root>/<abi>/ 且叫 libfastphys.so
+    #        （Godot 的 Android 导出强制 lib 前缀；放错目录 = dlopen 找不到）；
+    #      ② [dependencies] 里每条桥接库都要有**同 ABI** 的 libraries 条目（否则不进 APK）；
+    #      ③ 仓库自己那份 gdext/fastphys.gdextension 也要有同样的条目 —— 少了它，
+    #        在**本仓库**导 Android 会静默没有原生库（只有 addon 那份有，这是真实发生过的不对称）。
+    def parse_gdext(path):
+        """极简解析：只要 [libraries] 的 key -> path，和 [dependencies] 里被引用的路径。"""
+        libs, deps, sec = {}, [], ""
+        with open(path, encoding="utf-8") as f:
+            for raw in f:
+                line = raw.split(";", 1)[0].strip()
+                if not line:
+                    continue
+                if line.startswith("[") and line.endswith("]"):
+                    sec = line[1:-1].strip().lower()
+                    continue
+                m = re.match(r'^([\w.]+)\s*=\s*"([^"]+)"', line)
+                if m and sec == "libraries":
+                    libs[m.group(1)] = m.group(2)
+                    continue
+                m = re.match(r'^"([^"]+)"\s*:', line)
+                if m and sec == "dependencies":
+                    deps.append(m.group(1))
+        return libs, deps
+
+    def check_gdext(path, label):
+        libs, deps = parse_gdext(path)
+        if not libs:
+            errors.append("%s 里没有 [libraries] 条目" % label)
+            return libs, deps
+        for key, p in libs.items():
+            parts = key.split(".")
+            if "android" not in parts:
+                continue
+            abi = parts[-1]
+            if ("/%s/" % abi) not in p:
+                errors.append("%s：%s 的路径不在 <root>/%s/ 里（%s）—— 放错目录 dlopen 找不到"
+                              % (label, key, abi, p))
+            if not p.endswith("libfastphys.so"):
+                errors.append("%s：%s 指向 %s —— Android 的库必须叫 libfastphys.so"
+                              "（lib 前缀是 Godot 导出的硬要求）" % (label, key, p))
+        if not deps:
+            errors.append("%s 没有 [dependencies] —— 桥接库不进 APK，手机上物理不动" % label)
+        for p in deps:
+            m = re.search(r"/(?:native|gdext)/([^/]+)/", p)
+            abi = m.group(1) if m else ""
+            if not p.endswith("librapier_bridge.so"):
+                errors.append("%s：[dependencies] 里的 %s 不是 librapier_bridge.so" % (label, p))
+            same = [k for k in libs if "android" in k.split(".") and k.split(".")[-1] == abi]
+            if not same:
+                errors.append("%s：[dependencies] 的 %s 没有同 ABI 的 libraries 条目"
+                              "（不会被打进 APK）" % (label, p))
+        return libs, deps
+
+    template = os.path.join(OUT, "native", "fastphys.gdextension.template")
+    if os.path.isfile(template):
+        libs, _ = check_gdext(template, "native/fastphys.gdextension.template")
+        for k in ("windows.debug.x86_64", "windows.release.x86_64"):
+            if k not in libs:
+                errors.append("native/fastphys.gdextension.template 缺 %s（Windows 回归）" % k)
+    else:
+        errors.append("缺少 native/fastphys.gdextension.template")
+
+    # 仓库自己那份：引擎本仓库导 Android 用的是它，不是 addon 那份
+    repo_gde = os.path.join(ROOT, "gdext", "fastphys.gdextension")
+    if os.path.isfile(repo_gde):
+        check_gdext(repo_gde, "gdext/fastphys.gdextension")
+    else:
+        errors.append("缺少 gdext/fastphys.gdextension")
     n_gd = sum(1 for dp, _d, fs in os.walk(OUT) for f in fs if f.endswith(".gd"))
     if n_gd < 20:
         errors.append("生成的 .gd 只有 %d 个，明显不完整" % n_gd)

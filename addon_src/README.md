@@ -386,6 +386,29 @@ g++ -O2 -std=c++17 -ffp-contract=off -shared -static \
 ⚠️ **用 `-static`，不要用 `-static-libgcc -static-libstdc++`** —— 后者漏掉
 winpthread，部署到 Godot 里加载会报**错误 126**（同样是"没有报错信息的失败"）。
 
+### Android（arm64 + x86_64）
+
+用仓库里的脚本 —— 它已经把 ABI 目录、`lib` 前缀、`[dependencies]` 三件事都处理好了：
+
+```bash
+python tools/build_native.py --android --out <addon>/native
+```
+
+手敲的话有三个硬约束，**缺一个的症状都是「手机上物理完全不动」且不报错**：
+
+1. 文件名必须以 `lib` 开头（Godot 的 Android 导出会硬性检查）；
+2. 两个 ABI 的 basename 必须一样（`libfastphys.so`）—— 所以只能按 `native/<abi>/` 分目录；
+3. `librapier_bridge.so` 是**第二个库**，必须写进 `.gdextension` 的 `[dependencies]`
+   （`android.arm64 = { "res://…/native/arm64/librapier_bridge.so": "" }`），
+   否则它不会被打进 APK 的 `lib/<abi>/`。
+
+⚠️ 产物 API 级别是 **24**：项目 minSdk 低于 24 时设备上加载失败（不是崩溃，是扩展没了）。
+⚠️ 验证只需两步：`unzip -l app.apk | grep lib/` 里能看到
+`lib/arm64-v8a/libfastphys.so` 与 `lib/arm64-v8a/librapier_bridge.so` 两个文件；
+启动后 logcat 里出现 `[RapierPhys] Rapier 后端就绪，符号来自: …`。
+（扩展自己的诊断都走 `__android_log_print`；只有 Windows 上那套 `printf` 在 Android 是看不见的 ——
+所以这条日志没有，就说明扩展没加载。）
+
 这个 DLL 里有两个类：`RapierPhys`（物理）与 `PixelRaster`（栅格化 + 矩形分解）。
 后者**不依赖 Rapier 桥接**，所以 `rapier_bridge.dll` 没加载时它照样能用。
 
